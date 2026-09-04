@@ -1,0 +1,107 @@
+{
+  "name": "@sunjuntao/dsh-file-workbench",
+  "version": "0.1.0",
+  "description": "DSH web plugin: a Vue 3 + Vite complete file workbench (explorer tree / code editor / markdown+image+html preview / file search / CRUD), isolated file browser reimplemented from dsh-better-sidebar's fs workbench.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "dsh",
+    "plugin",
+    "file",
+    "explorer",
+    "editor",
+    "workbench",
+    "dsh-plugin"
+  ],
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-modules"
+      ]
+    }
+  },
+  "scripts": {
+    "dev:vue": "vite",
+    "build:vue": "vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "build": "node scripts/build.mjs",
+    "build:dev": "node scripts/build.mjs --dev",
+    "sync": "node scripts/sync-to-profile.mjs",
+    "deploy": "node scripts/build.mjs --dev && node scripts/sync-to-profile.mjs",
+    "prepublishOnly": "node scripts/build.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1-rc.1",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.8",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "vue": "^3.5.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": false
+    },
+    "@deepseek-ai/dsh-host-webserver": {
+      "optional": true
+    },
+    "react": {
+      "optional": false
+    },
+    "react-dom": {
+      "optional": true
+    },
+    "vue": {
+      "optional": false
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "@vitejs/plugin-vue": "^5.2.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0",
+    "vue-tsc": "^2.1.0"
+  },
+  "dependencies": {
+    "diff": "^9.0.0",
+    "dompurify": "^3.2.0",
+    "element-plus": "^2.14.5",
+    "fflate": "^0.8.3",
+    "highlight.js": "^11.12.0",
+    "marked": "^14.1.0",
+    "vanilla-jsoneditor": "^3.13.0",
+    "vue": "^3.5.0"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  }
+}
