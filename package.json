@@ -1,7 +1,7 @@
 {
   "name": "@sunjuntao/dsh-file-workbench",
   "version": "0.1.0",
-  "description": "DSH web plugin: a Vue 3 + Vite complete file workbench (explorer tree / code editor / markdown+image+html preview / file search / CRUD), isolated file browser reimplemented from dsh-better-sidebar's fs workbench.",
+  "description": "DSH web plugin: a Vue 3 + Vite complete file workbench (explorer tree / code editor / markdown+image+html preview / file search / CRUD)",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",

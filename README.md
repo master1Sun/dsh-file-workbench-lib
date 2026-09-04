@@ -13,66 +13,6 @@
 - 🔍 **搜索**：递归文件名搜索（复刻 fs-search），跳过 node_modules/.git 等噪声目录，带结果数上限。
 - 🧹 **CRUD**：新建文件/目录、重命名、删除（带确认）。
 
-## 项目结构
-
-```
-src/
-  shared/types.ts        宿主 ↔ 客户端 ↔ Vue 共享类型
-  host/                  服务端（Cordis 插件）
-    index.ts             Cordis apply（注册 /api/dsh-file-workbench 路由 + 静态资源）
-    fs-tree.ts           fs-tree + path-security：列目录/排序/软链接探测/containment 守卫
-    fs-search.ts         递归文件名搜索（预算截断）
-    fs-read.ts           打开/保存文件、类型推导
-    routes.ts            REST + 静态资源路由
-    root-store.ts        工作区根目录注册表
-  client/                DSH 客户端桥接（React → Vue）
-    index.ts             __ModuleLoader__ 入口：注册 conversation.view 槽位
-    bridge.tsx           注入 Vue 产物 asset，轮询后 mountFileWorkbench
-  vue/                   Vue 3 + Vite 文件工作台
-    main.ts              入口（向 window 暴露 mountFileWorkbench + 独立 dev 自挂）
-    App.vue              布局：工具栏 / 侧栏（资源管理器|搜索）/ 标签 + 内容
-    components/          ExplorerTree、ExplorerNode、SearchPane、EditorPane、PreviewPane
-    composables/useApi.ts REST 客户端
-    stores/workbench.ts  全局响应式状态
-    utils/markdown.ts    安全 Markdown 渲染
-```
-
-## 开发
-
-前置：Node ≥ 20、pnpm ≥ 10（或 npm）。
-
-```bash
-pnpm install          # 或 npm install
-pnpm run build:vue    # 仅构建 Vue 产物（dist/）
-pnpm run dev:vue      # 单独跑 Vue 应用联调（配合 host 后端）
-pnpm run typecheck    # tsc --noEmit
-pnpm run build        # 完整构建：Vite(Vue) + esbuild(host/client) → lib/
-```
-
-`pnpm run dev:vue` 下 Vue 应用会自挂到 `#app`；API 基址默认 `/api/dsh-file-workbench`，
-可用环境变量 `VITE_API_BASE` 覆盖指向已运行的 host（例如 `http://localhost:xxxx/api/dsh-file-workbench`）。
-
-## 安装到 DSH（web 档）
-
-```bash
-# 1) 构建并把产物同步进 web profile（首次 target 插件需已安装，见方式二）
-npm run build && npm run sync
-
-# 方式二（推荐改版即生效的联调目标）：用 npm link / file: 依赖指向本目录
-#   ~/.dsh/profiles/web/package.json  dependencies 添加 "dsh-file-workbench": "link:<本目录绝对路径>"
-#   或在本目录先 `npm pack` 后于 profile 安装该 tgz
-```
-
-装好后在 profile 里执行 `npm install`（让 cordis.patch.yml 生效），**重启 `dsh web`** 并硬刷新浏览器
-（Cmd/Ctrl+Shift+R）。
-
-> 若 `dsh web` 未内置本插件的挂载行，可按 dsh-better-sidebar 的方式在
-> `~/.dsh/profiles/web/cordis.patch.yml` 追加：
-> ```yaml
-> - insert:
->     - id: dsh-file-workbench
->       name: 'dsh-file-workbench'
-> ```
 
 ## 使用
 
@@ -91,7 +31,7 @@ npm run build && npm run sync
 
 ## DSH 版本
 
-参考 dsh-better-sidebar 支持 DSH 0.1.0-rc.8 / 0.1.1-rc.1 / 0.1.1-rc.2 / 0.1.2-alpha.1。
+  支持 DSH 0.1.0-rc.8 / 0.1.1-rc.1 / 0.1.1-rc.2 / 0.1.2-alpha.1。
 
 ## 依赖
 
