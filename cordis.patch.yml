@@ -1,0 +1,4 @@
+# dsh-file-workbench bundle patch：把插件挂进 profile（web）
+- insert:
+    - id: dsh-file-workbench
+      name: '@sunjuntao/dsh-file-workbench'
