@@ -1,6 +1,6 @@
 {
   "name": "@sunjuntao/dsh-file-workbench",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "DSH web plugin: a Vue 3 + Vite complete file workbench (explorer tree / code editor / markdown+image+html preview / file search / CRUD)",
   "type": "module",
   "main": "./lib/index.js",
@@ -82,6 +82,7 @@
     }
   },
   "devDependencies": {
+    "@types/katex": "^0.16.7",
     "@types/node": "^22.0.0",
     "@types/react": "^18.3.0",
     "@vitejs/plugin-vue": "^5.2.0",
@@ -107,8 +108,10 @@
     "highlight.js": "^11.12.0",
     "html2canvas": "^1.4.1",
     "jspdf": "^4.2.1",
+    "katex": "^0.16.11",
     "mammoth": "^1.12.2",
     "marked": "^14.1.0",
+    "mermaid": "^11.4.0",
     "node-pty": "^1.1.0",
     "vanilla-jsoneditor": "^3.13.0",
     "vue": "^3.5.0",
