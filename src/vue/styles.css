@@ -1,0 +1,169 @@
+/* dsh-file-workbench 全局样式（在所有作用域下生效的全局兜底） */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+/* 挂载容器补满高度，否则 Vue 根组件 height:100% 塌缩、主体内容不显示 */
+#app {
+  height: 100%;
+}
+
+.fw-root {
+  box-sizing: border-box;
+  position: relative;
+  height: 100%;
+}
+
+.fw-root * {
+  box-sizing: border-box;
+}
+
+/* 顶部消息提示(Toast)：Teleport 到 body、按视口顶部固定；桌面模式下整体下移 36px 避开顶栏。
+   margin-top 对每条消息独立累加，能保持 Element Plus 自身的堆叠间距。 */
+body:is(
+    [data-dsh-desktop-mode="compatibility"],
+    [data-dsh-desktop-mode="extended"]
+  )
+  .el-message {
+  margin-top: 36px;
+}
+
+/* DSH 文件工作台 — 主题色。
+ * 优先跟随 DSH 官方皮肤 token（--dsw-alias-*，宿主随 body[data-ds-dark-theme]
+ * 与 html{color-scheme} 翻转），缺失时（独立 vite dev 等无宿主场景）回退到
+ * useTheme 在 .fw-root 上规定的深/浅兜底板。各组件经 var(--dsh-*) 消费。 */
+html[data-theme="dark"],
+.fw-root[data-theme="dark"] {
+  color-scheme: dark;
+  --dsh-bg: #0d1117;
+  --dsh-bg2: #161b22;
+  --dsh-border: #30363d;
+  --dsh-fg: #c9d1d9;
+  --dsh-fg-weak: #8b949e;
+  --dsh-select: #1f6feb33;
+  --dsh-hover: #30363d;
+  --dsh-accent: #238636;
+  --dsh-accent-glow: color-mix(in srgb, var(--dsh-accent, #238636) 45%, transparent);
+  --dsh-font: "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --dsh-mono: "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  --hljs-comment: #8b949e;
+  --hljs-keyword: #ff7b72;
+  --hljs-string: #a5d6ff;
+  --hljs-number: #79c0ff;
+  --hljs-function: #d2a8ff;
+  --hljs-attr: #79c0ff;
+  --hljs-builtin: #ffa657;
+  --hljs-tag: #7ee787;
+  --hljs-meta: #ffa657;
+  /* Element Plus 基础控件随主题（el-button/el-input/el-switch/el-select 等） */
+  --el-bg-color: var(--dsh-bg2, #161b22);
+  --el-bg-color-overlay: var(--dsh-bg2, #161b22);
+  --el-bg-color-page: var(--dsh-bg, #0d1117);
+  --el-text-color-primary: var(--dsh-fg, #c9d1d9);
+  --el-text-color-regular: var(--dsh-fg, #c9d1d9);
+  --el-text-color-secondary: var(--dsh-fg-weak, #8b949e);
+  --el-text-color-placeholder: var(--dsh-fg-weak, #8b949e);
+  --el-text-color-disabled: var(--dsh-fg-weak, #8b949e);
+  --el-border-color: var(--dsh-border, #30363d);
+  --el-border-color-light: var(--dsh-border, #30363d);
+  --el-border-color-lighter: var(--dsh-border, #30363d);
+  --el-border-color-extra-light: var(--dsh-border, #30363d);
+  --el-fill-color-blank: var(--dsh-bg2, #161b22);
+  --el-fill-color-light: var(--dsh-hover, rgba(48, 54, 61, 0.5));
+  --el-fill-color-lighter: var(--dsh-hover, rgba(48, 54, 61, 0.5));
+  --el-fill-color: var(--dsh-hover, rgba(48, 54, 61, 0.5));
+  --el-fill-color-extra-light: var(--dsh-bg2, #161b22);
+  --el-mask-color: rgba(1, 4, 9, 0.8);
+}
+html[data-theme="light"],
+.fw-root[data-theme="light"] {
+  color-scheme: light;
+  --dsh-bg: #ffffff;
+  --dsh-bg2: #f6f8fa;
+  --dsh-border: #d0d7de;
+  --dsh-fg: #1f2328;
+  --dsh-fg-weak: #656d76;
+  --dsh-select: #0969da33;
+  --dsh-hover: #d7dce3;
+  --dsh-accent: #1f883d;
+  --dsh-accent-glow: color-mix(in srgb, var(--dsh-accent, #1f883d) 40%, transparent);
+  --dsh-font: "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --dsh-mono: "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  --hljs-comment: #6e7781;
+  --hljs-keyword: #cf222e;
+  --hljs-string: #0a3069;
+  --hljs-number: #0550ae;
+  --hljs-function: #8250df;
+  --hljs-attr: #0550ae;
+  --hljs-builtin: #953800;
+  --hljs-tag: #116329;
+  --hljs-meta: #953800;
+  /* Element Plus 基础控件随主题（el-button/el-input/el-switch/el-select 等） */
+  --el-bg-color: var(--dsh-bg2, #f6f8fa);
+  --el-bg-color-overlay: var(--dsh-bg2, #f6f8fa);
+  --el-bg-color-page: var(--dsh-bg, #ffffff);
+  --el-text-color-primary: var(--dsh-fg, #1f2328);
+  --el-text-color-regular: var(--dsh-fg, #1f2328);
+  --el-text-color-secondary: var(--dsh-fg-weak, #656d76);
+  --el-text-color-placeholder: var(--dsh-fg-weak, #656d76);
+  --el-text-color-disabled: var(--dsh-fg-weak, #656d76);
+  --el-border-color: var(--dsh-border, #d0d7de);
+  --el-border-color-light: var(--dsh-border, #d0d7de);
+  --el-border-color-lighter: var(--dsh-border, #d0d7de);
+  --el-border-color-extra-light: var(--dsh-border, #d0d7de);
+  --el-fill-color-blank: var(--dsh-bg2, #f6f8fa);
+  --el-fill-color-light: var(--dsh-hover, #d7dce3);
+  --el-fill-color-lighter: var(--dsh-hover, #d7dce3);
+  --el-fill-color: var(--dsh-hover, #d7dce3);
+  --el-fill-color-extra-light: var(--dsh-bg2, #f6f8fa);
+  --el-mask-color: rgba(31, 35, 40, 0.4);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.35);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---- 统一空态 / 加载态 ---- */
+/* 空态：弱化文字 + 居中，供各面板的空列表/无结果场景复用。 */
+.fw-empty {
+  color: var(--dsh-fg-weak, #8b949e);
+  font-size: 12px;
+  text-align: center;
+  padding: 24px 12px;
+}
+/* 加载态：左侧强调色小 spinner + 文字。组件局部若未定义，自动获得统一观感。 */
+.fw-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--dsh-fg-weak, #8b949e);
+  font-size: 12px;
+  padding: 2px 6px;
+}
+.fw-loading::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border: 2px solid var(--dsh-border, #30363d);
+  border-top-color: var(--dsh-accent, #238636);
+  border-radius: 50%;
+  box-sizing: border-box;
+  animation: fw-spin 0.7s linear infinite;
+}
+@keyframes fw-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

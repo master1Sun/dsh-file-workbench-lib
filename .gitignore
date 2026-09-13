@@ -1,0 +1,13 @@
+/node_modules
+/.trae
+
+# dev 日志（提交时排除）
+/dsh-vite-dev.log
+/dsh-web.log
+/dsh-web.err.log
+/dsh-web.log.err
+/.workbuddy
+
+# vite dev 临时文件与探针目录
+/vite.config.ts.timestamp-*
+/.cp-probe
