@@ -66,6 +66,18 @@ export const zh = {
   brokenLink: "失效软链接",
   // 编辑器
   save: "保存",
+  // 文本编辑器（.txt 编辑 / 保存）
+  menuEdit: "编辑",
+  txtEditorTitle: "编辑文本 · {name}",
+  txtLoading: "加载中…",
+  txtReadError: "读取失败：{msg}",
+  txtDirty: "未保存",
+  txtReadonly: "只读（工作区外）",
+  txtPlaceholder: "在此输入文本…",
+  txtChars: "字符",
+  txtUnsavedTitle: "未保存的改动",
+  txtUnsavedMsg: "该文件有未保存的改动，确定关闭？",
+  txtSaved: "已保存",
   // 预览
   download: "下载",
   // JSON 编辑器
@@ -587,6 +599,18 @@ export const en: Record<CopyKey, string> = {
   confirmDelete: 'Delete "{name}"?',
   brokenLink: "Broken symlink",
   save: "Save",
+  // Text editor (.txt edit / save)
+  menuEdit: "Edit",
+  txtEditorTitle: "Edit Text · {name}",
+  txtLoading: "Loading…",
+  txtReadError: "Failed to read: {msg}",
+  txtDirty: "Unsaved",
+  txtReadonly: "Read-only (outside workspace)",
+  txtPlaceholder: "Type text here…",
+  txtChars: "chars",
+  txtUnsavedTitle: "Unsaved changes",
+  txtUnsavedMsg: "This file has unsaved changes. Close anyway?",
+  txtSaved: "Saved",
   // Markdown rendering (mermaid / KaTeX)
   download: "Download",
   menuDownload: "Download",

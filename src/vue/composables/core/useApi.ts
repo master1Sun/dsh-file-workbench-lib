@@ -396,6 +396,11 @@ export function detail(path: string): Promise<FileDetail> {
   return request("GET", `/detail${qs({ path })}`);
 }
 
+/** 读取文本文件内容（编辑 .txt 用；大文件由后端以 413 拒绝）。 */
+export function readFile(path: string): Promise<{ content: string; size: number }> {
+  return request("GET", `/read${qs({ path })}`);
+}
+
 /** 压缩单文件或目录为 .zip（to 缺省放源同目录）。 */
 export function compress(path: string, to?: string, key?: string): Promise<{ path: string }> {
   return request("POST", "/compress", { key, path, to });

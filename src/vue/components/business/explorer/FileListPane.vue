@@ -269,6 +269,9 @@
     <!-- Git 管理面板（完整 Git 能力：状态/分支/暂存/命令台） -->
     <GitPanel v-model="gitPanelOpen" :dir="inRecycle ? '' : explorer.listing?.path ?? ''" />
     <SvnPanel v-model="svnPanelOpen" :dir="inRecycle ? '' : explorer.listing?.path ?? ''" />
+
+    <!-- 文本编辑器（.txt 编辑 / 保存） -->
+    <TxtEditor v-model="txtEditorOpen" :path="txtEditorPath" @saved="onTxtSaved" />
   </div>
 </template>
 
@@ -299,6 +302,7 @@ import Icon from "../../common/Icon.vue";
 import QuickCommit from "../git/QuickCommit.vue";
 import GitPanel from "../git/GitPanel.vue";
 import SvnPanel from "../git/SvnPanel.vue";
+import TxtEditor from "./TxtEditor.vue";
 import { useUniformVirtual } from "../../../composables/ui/virtual";
 import { startTask } from "../../../composables/session/tasks";
 import { sessionSse } from "../../../composables/session/sessionSse";
@@ -412,6 +416,17 @@ const gitDiffText = ref("");
 const quickCommitOpen = ref(false);
 const gitPanelOpen = ref(false);
 const svnPanelOpen = ref(false);
+/** 文本编辑器（.txt 编辑 / 保存）状态。 */
+const txtEditorOpen = ref(false);
+const txtEditorPath = ref("");
+function openTxtEditor(path: string): void {
+  txtEditorPath.value = path;
+  txtEditorOpen.value = true;
+}
+/** 文本编辑器保存成功后刷新列表（更新大小 / 修改时间）。 */
+function onTxtSaved(): void {
+  void refreshListing();
+}
 
 function setSort(key: SortKey): void {
   if (sortKey.value === key) asc.value = !asc.value;
@@ -968,6 +983,7 @@ async function open(e: FsEntry): Promise<void> {
     await browseTo(e.path);
     return;
   }
+  // 双击 / 打开：一律走之前的查看器（DSH 右侧原生预览）；编辑只在右键「编辑」里进行。
   try {
     await openPreview(e.path);
   } catch (err) {
@@ -1175,10 +1191,17 @@ function onFileCtx(e: MouseEvent, entry: FsEntry): void {
   }
   const fav = isFavorite(entry.path);
   const ro = !canOperatePath(entry.path);
-  openMenu(e, [
+  // 仅 .txt 文件在右键菜单暴露「编辑」（需求：只有 txt 类型支持编辑与保存）。
+  const isTxt = /\.txt$/i.test(entry.name);
+  const items: MenuItem[] = [
     { label: t("menuOpen"), icon: "arrowRight", onClick: () => open(entry) },
     { label: t("menuOpenExternal"), icon: "monitor", onClick: () => systemOpen(entry.path) },
-    { separator: true },
+  ];
+  if (isTxt) {
+    items.push({ label: t("menuEdit"), icon: "edit", disabled: ro, onClick: () => openTxtEditor(entry.path) });
+  }
+  items.push({ separator: true });
+  items.push(
     { label: t("menuCut"), icon: "cut", disabled: ro, onClick: () => { cutPaths([entry.path]); toast("ok", t("menuCutDone")); } },
     { label: t("menuCopy"), icon: "copy", onClick: () => { copyPaths([entry.path]); toast("ok", t("menuCopyDone")); } },
     { label: t("menuCompress"), icon: "archive", disabled: ro, onClick: () => compressOne(entry) },
@@ -1195,7 +1218,8 @@ function onFileCtx(e: MouseEvent, entry: FsEntry): void {
     { separator: true },
     { label: t("menuCopyPath"), icon: "link", onClick: () => copyPath(entry.path) },
     { label: t("menuProperties"), icon: "info", onClick: () => property(entry.path) },
-  ]);
+  );
+  openMenu(e, items);
 }
 
 // —— 空白区右键菜单 ——
@@ -1711,6 +1735,8 @@ async function newEntry(kind: "folder" | "file"): Promise<void> {
     toast("ok", kind === "folder" ? t("createdFolder") : t("createdFile"));
   } catch (err) {
     toast("error", (err as Error).message);
+    await refreshListing();
+    return;
   }
   await refreshListing();
 }

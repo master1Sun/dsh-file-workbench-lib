@@ -4,7 +4,7 @@
  * 不再使用 localStorage —— 统一经 host 的 /persist 接口写入后端 JSON 配置文件
  * （{DSH_HOME|~/.dsh}/file/dsh-file-workbench/data/workbench-state.json）。
  *
- * - prefs：显示隐藏文件 / 默认视图 / 排序 / 主题 / 字体 / 强调色 / root 开关。
+ * - prefs：显示隐藏文件 / 默认视图 / 排序 / 主题 / 字体 / 强调色 / root 开关 / 终端与记事本选项。
  * - favorites：收藏的文件/目录路径（NavPane 收藏分组）。
  * - layout：导航分组展开态 + 资源管理器「导航树:文件列表」分隔比例。
  *
@@ -39,6 +39,10 @@ export interface Prefs {
   termShell: "cmd" | "powershell";
   /** 终端字号（px）。 */
   termFontSize: number;
+  /** 记事本（txt 编辑器）「格式 ▸ 自动换行」开关；持久化后下次打开沿用。 */
+  txtWordWrap: boolean;
+  /** 记事本（txt 编辑器）「查看 ▸ 状态栏」开关；持久化后下次打开沿用。 */
+  txtShowStatus: boolean;
 }
 
 const defaults: Prefs = {
@@ -56,6 +60,9 @@ const defaults: Prefs = {
   colWidths: { name: 300, size: 96, type: 160 },
   termShell: "cmd",
   termFontSize: 13,
+  /** 记事本默认不自动换行、显示状态栏（与 Win10 记事本初始状态一致）。 */
+  txtWordWrap: false,
+  txtShowStatus: true,
 };
 
 /** 启动初始值一律用默认；initPersist() 拉取成功后再用后端值覆盖。 */
@@ -93,6 +100,8 @@ function sanitizePrefs(raw: unknown): Partial<Prefs> {
   if (src.termShell === "powershell" || src.termShell === "cmd") out.termShell = src.termShell;
   if (typeof src.termFontSize === "number" && src.termFontSize >= 8 && src.termFontSize <= 36)
     out.termFontSize = src.termFontSize;
+  if (typeof src.txtWordWrap === "boolean") out.txtWordWrap = src.txtWordWrap;
+  if (typeof src.txtShowStatus === "boolean") out.txtShowStatus = src.txtShowStatus;
   return out;
 }
 

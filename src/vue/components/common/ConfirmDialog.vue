@@ -4,6 +4,7 @@
     class="fw-confirm-dialog"
     width="380px"
     align-center
+    append-to-body
     :show-close="true"
     :close-on-click-modal="false"
     :close-on-press-escape="false"

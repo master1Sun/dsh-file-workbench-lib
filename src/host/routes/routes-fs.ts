@@ -5,7 +5,7 @@
  * 由 routes.ts 统一分发到对应资源，避免单个文件持续膨胀。
  */
 import { createWriteStream, existsSync, statSync } from "node:fs";
-import { cp, mkdir, rename, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import { homedir } from "node:os";
 
@@ -262,6 +262,20 @@ export const fsResource: RouteMatcher = async (req, res, seg, q, method, host) =
     const target = requireAbsolute(q.get("path")?.trim() ?? "");
     const detail = await statDetail(target);
     return (json(res, 200, { ok: true, data: detail }), true);
+  }
+
+  // --- 读取文本文件内容（编辑 .txt 用；限文件 + 限大小，超出返回 413） ---
+  if (seg[0] === "read" && seg.length === 1 && method === "GET") {
+    const raw = q.get("path")?.trim() ?? "";
+    if (!raw) return (json(res, 400, { ok: false, error: "path required" }), true);
+    const target = requireAbsolute(raw);
+    const info = await stat(target);
+    if (!info.isFile()) return (json(res, 400, { ok: false, error: "not a file" }), true);
+    // 编辑场景仅针对文本，限制单次读取体积（8MB），避免大文件 / 二进制拖垮前端。
+    const MAX = 8 * 1024 * 1024;
+    if (info.size > MAX) return (json(res, 413, { ok: false, error: "file too large to edit" }), true);
+    const text = await readFile(target, "utf8");
+    return (json(res, 200, { ok: true, data: { content: text, size: info.size } }), true);
   }
 
   // --- 用系统默认程序打开 / 在资源管理器中打开 ---
