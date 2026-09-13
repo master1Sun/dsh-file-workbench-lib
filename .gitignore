@@ -11,3 +11,4 @@
 # vite dev 临时文件与探针目录
 /vite.config.ts.timestamp-*
 /.cp-probe
+/dist
