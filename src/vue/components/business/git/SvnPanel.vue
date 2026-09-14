@@ -83,6 +83,14 @@
                   <button class="fw-svn-mini" :disabled="running" :title="t('svnBlame')" @click.stop="openBlame(f.path)">
                     <icon name="activity" :size="12" />
                   </button>
+                  <template v-if="f.code.trim() === '?'">
+                    <button class="fw-svn-mini" :disabled="running" :title="t('svnAdd')" @click.stop="addFile(f.path)">
+                      <icon name="plus" :size="12" />
+                    </button>
+                    <button class="fw-svn-mini" :disabled="running" :title="t('svnIgnore')" @click.stop="ignoreFile(f.path)">
+                      <icon name="eyeOff" :size="12" />
+                    </button>
+                  </template>
                 </span>
               </div>
             </div>
@@ -353,6 +361,29 @@ async function doCleanup(): Promise<void> {
 async function doAdd(): Promise<void> {
   const r = await run(["add", ...selected.value]);
   if (r && r.code === 0) await loadStatus();
+}
+/** 单行「加入版本控制」（未版本控制 ? 文件）。 */
+async function addFile(path: string): Promise<void> {
+  const r = await run(["add", "--", path]);
+  if (r && r.code === 0) await loadStatus();
+}
+/** 单行「忽略」：把文件末段名追加进父目录的 svn:ignore 属性（幂等）。 */
+async function ignoreFile(path: string): Promise<void> {
+  const norm = path.replace(/[\\/]$/, "");
+  const parent = norm.replace(/[\\/][^\\/]+$/, "");
+  const base = norm.slice(parent.length + 1);
+  const cur = await api.svnRun(parent, ["propget", "svn:ignore", parent]);
+  const existing = (cur.stdout || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  if (existing.includes(base)) {
+    if (cur.code === 0) toast("ok", t("gitIgnored"));
+    await loadStatus();
+    return;
+  }
+  const combined = [...existing, base].join("\n");
+  const r = await api.svnRun(parent, ["propset", "svn:ignore", combined, parent]);
+  if (r.code === 0) toast("ok", t("gitIgnored"));
+  else toast("error", (r.stderr || t("svnFailed")).split("\n")[0].slice(0, 200));
+  await loadStatus();
 }
 async function doRevert(): Promise<void> {
   const r = await run(["revert", ...selected.value]);

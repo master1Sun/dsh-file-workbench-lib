@@ -8,7 +8,7 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { stat } from "node:fs/promises";
+import { stat, readFile, appendFile } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
 
 import type {
@@ -201,6 +201,30 @@ async function gitUnstage(target: string): Promise<GitAction> {
   return { ok: true, repo: root, output: `unstaged ${rel}` };
 }
 
+/**
+ * 忽略一个文件/目录：把相对仓库根的路径追加进仓库根的 `.gitignore`。
+ * 已存在相同条目则跳过（幂等）；`.gitignore` 不存在则新建。
+ */
+async function gitIgnore(target: string): Promise<GitAction> {
+  guardGitWritable(target);
+  const root = await repoOf(target);
+  const rel = relInRepo(root, target).replace(/\\/g, "/").replace(/^\.\//, "");
+  const giPath = join(root, ".gitignore");
+  let content = "";
+  try {
+    content = await readFile(giPath, "utf8");
+  } catch {
+    /* 文件尚不存在，下面会新建 */
+  }
+  const lines = content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.includes(rel)) {
+    return { ok: true, repo: root, output: `already ignored ${rel}` };
+  }
+  const needSep = content.length > 0 && !content.endsWith("\n");
+  await appendFile(giPath, `${needSep ? "\n" : ""}${rel}\n`, "utf8");
+  return { ok: true, repo: root, output: `ignored ${rel}` };
+}
+
 /** 命令台：在仓库根执行任意 git 命令（非仓库/受保护目录拒绝）。 */
 async function gitRunCmd(dir: string, args: string[]): Promise<GitRunResult> {
   const root = await findRepoRoot(dir);
@@ -352,6 +376,10 @@ export const gitResource: RouteMatcher = async (req, res, seg, q, method, host) 
     }
     if (op === "unstage") {
       const data = await gitUnstage(path);
+      return (json(res, 200, { ok: true, data }), true);
+    }
+    if (op === "ignore") {
+      const data = await gitIgnore(path);
       return (json(res, 200, { ok: true, data }), true);
     }
     if (op === "commit") {

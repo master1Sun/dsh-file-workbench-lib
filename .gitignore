@@ -13,3 +13,8 @@
 /.cp-probe
 /dist
 /tmp
+
+# 工作流产生的临时诊断/消息文件
+/_*.txt
+# Windows 保留名垃圾文件（会导致 git add -A 报 invalid path）
+/nul

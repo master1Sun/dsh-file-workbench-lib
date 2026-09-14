@@ -107,6 +107,12 @@
                       @click.stop="unstageFile(f)"
                     ><icon name="undo" :size="11" /></button>
                     <button
+                      v-if="g.key === 'untracked'"
+                      class="fw-gp-mini"
+                      :title="t('gitIgnore')"
+                      @click.stop="ignoreFile(f)"
+                    ><icon name="eyeOff" :size="11" /></button>
+                    <button
                       v-if="g.key !== 'untracked'"
                       class="fw-gp-mini danger"
                       :title="t('gitDiscard')"
@@ -1089,6 +1095,14 @@ async function discardFile(f: GitPanelFile): Promise<void> {
   await withOp(async () => {
     await runOrThrow(["checkout", "--", f.path]);
   }, "gitDiscarded");
+}
+async function ignoreFile(f: GitPanelFile): Promise<void> {
+  const repo = panel.value?.repo;
+  if (!repo) return;
+  const abs = `${repo.replace(/\\/g, "/")}/${f.path}`.replace(/\/{2,}/g, "/");
+  await withOp(async () => {
+    await api.gitIgnore(abs);
+  }, "gitIgnored");
 }
 async function stageAll(): Promise<void> {
   await withOp(async () => {

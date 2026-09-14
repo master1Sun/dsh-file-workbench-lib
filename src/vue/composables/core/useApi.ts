@@ -433,6 +433,11 @@ export function gitAdd(path: string): Promise<GitAction> {
   return request("POST", "/git/add", { path });
 }
 
+/** 把文件/目录加入仓库根 .gitignore（git ignore）。 */
+export function gitIgnore(path: string): Promise<GitAction> {
+  return request("POST", "/git/ignore", { path });
+}
+
 /** 提交当前暂存的全部改动（git commit）。 */
 export function gitCommit(path: string, message: string): Promise<GitAction> {
   return request("POST", "/git/commit", { path, message });

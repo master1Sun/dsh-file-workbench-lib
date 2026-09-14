@@ -53,6 +53,60 @@ async function svnCli(path: string, args: string[]): Promise<void> {
   }
 }
 
+/** 加入版本控制：`svn add <path>`（svn 接受绝对路径）。 */
+async function svnAddOne(path: string, dir: string, act: RepoMenuActions): Promise<void> {
+  try {
+    const info = await api.svnInfo(path);
+    if (!info.svnAvailable) {
+      toast("error", t("svnNoCli"));
+      return;
+    }
+    const r = await api.svnRun(path, ["add", "--", path]);
+    if (r.code === 0) {
+      toast("ok", t("svnAdded"));
+    } else {
+      toast("error", (r.stderr || t("svnFailed")).split("\n")[0].slice(0, 200));
+    }
+  } catch (err) {
+    toast("error", (err as Error).message);
+  }
+  await act.afterMutate(dir);
+}
+
+/**
+ * 忽略一个文件/目录：把文件末段名追加进其父目录的 `svn:ignore` 属性（读取后追加，幂等）。
+ * `svn:ignore` 是「目录属性」，因此作用在父目录上，条目为子项名称（目录则整目录忽略）。
+ */
+async function svnIgnoreOne(path: string, dir: string, act: RepoMenuActions): Promise<void> {
+  try {
+    const info = await api.svnInfo(path);
+    if (!info.svnAvailable) {
+      toast("error", t("svnNoCli"));
+      return;
+    }
+    const norm = path.replace(/[\\/]$/, "");
+    const parent = norm.replace(/[\\/][^\\/]+$/, "");
+    const base = norm.slice(parent.length + 1);
+    const cur = await api.svnRun(parent, ["propget", "svn:ignore", parent]);
+    const existing = (cur.stdout || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    if (existing.includes(base)) {
+      toast("ok", t("gitIgnored"));
+      await act.afterMutate(dir);
+      return;
+    }
+    const combined = [...existing, base].join("\n");
+    const r = await api.svnRun(parent, ["propset", "svn:ignore", combined, parent]);
+    if (r.code === 0) {
+      toast("ok", t("gitIgnored"));
+    } else {
+      toast("error", (r.stderr || t("svnFailed")).split("\n")[0].slice(0, 200));
+    }
+  } catch (err) {
+    toast("error", (err as Error).message);
+  }
+  await act.afterMutate(dir);
+}
+
 async function gitAddOne(path: string, dir: string, act: RepoMenuActions): Promise<void> {
   try {
     await api.gitAdd(path);
@@ -70,6 +124,16 @@ async function gitDiscardOne(path: string, dir: string, act: RepoMenuActions): P
   try {
     await api.gitDiscard(path);
     toast("ok", t("gitDiscarded"));
+  } catch (err) {
+    toast("error", (err as Error).message);
+  }
+  await act.afterMutate(dir);
+}
+
+async function gitIgnoreOne(path: string, dir: string, act: RepoMenuActions): Promise<void> {
+  try {
+    await api.gitIgnore(path);
+    toast("ok", t("gitIgnored"));
   } catch (err) {
     toast("error", (err as Error).message);
   }
@@ -104,6 +168,7 @@ export function gitMenuFor(dir: string, path: string, act: RepoMenuActions): Men
         { label: t("gitCommit"), icon: "check", onClick: () => act.openCommit() },
         { label: t("gitDiff"), icon: "code", onClick: () => void gitShowDiff(path, act) },
         { label: t("gitDiscard"), icon: "undo", onClick: () => void gitDiscardOne(path, dir, act) },
+        { label: t("gitIgnore"), icon: "eyeOff", onClick: () => void gitIgnoreOne(path, dir, act) },
       ],
     },
   ];
@@ -124,6 +189,9 @@ export function svnMenuFor(dir: string, path: string, act: RepoMenuActions): Men
       children: [
         { label: t("svnPanel"), icon: "svn", onClick: () => act.openSvnPanel() },
         { label: t("svnUpdate"), icon: "sync", onClick: () => void svnCli(path, ["update"]) },
+        { separator: true },
+        { label: t("svnAdd"), icon: "upload", onClick: () => void svnAddOne(path, dir, act) },
+        { label: t("svnIgnore"), icon: "eyeOff", onClick: () => void svnIgnoreOne(path, dir, act) },
       ],
     },
   ];
