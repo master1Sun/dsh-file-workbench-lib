@@ -2,7 +2,6 @@
   <!-- 标签过多时横向溢出：隐藏滚动条，滚轮悬停滚动 + 两侧 ◀▶ 箭头按钮 -->
   <div class="vs-tabs-wrap">
     <button
-      v-if="overflow"
       class="vs-tab-arrow is-left"
       :class="{ dim: !canLeft }"
       :title="t('vsScrollLeft')"
@@ -38,7 +37,6 @@
       <ContextMenu v-if="menuOpen" :items="menuItems" :x="menuX" :y="menuY" @close="menuOpen = false" />
     </div>
     <button
-      v-if="overflow"
       class="vs-tab-arrow is-right"
       :class="{ dim: !canRight }"
       :title="t('vsScrollRight')"

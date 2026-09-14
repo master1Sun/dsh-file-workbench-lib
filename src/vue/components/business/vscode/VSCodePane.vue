@@ -67,7 +67,14 @@
             <icon name="folder" :size="12" />
             <span>{{ t("vsLeftTabFiles") }}</span>
           </button>
-          <button class="vs-left-tab" :class="{ active: leftTab === 'search' }" :title="t('vsLeftTabSearch')" @click="leftTab = 'search'">
+          <!-- 未打开项目目录时搜索不可用（置灰禁用）；title 说明原因 -->
+          <button
+            class="vs-left-tab"
+            :class="{ active: leftTab === 'search' }"
+            :disabled="!vsState.projectDir"
+            :title="vsState.projectDir ? t('vsLeftTabSearch') : t('vsSearchNeedsProject')"
+            @click="leftTab = 'search'"
+          >
             <icon name="search" :size="12" />
             <span>{{ t("vsLeftTabSearch") }}</span>
           </button>
@@ -308,6 +315,14 @@ const saveAsName = ref("");
 const treeRef = ref<InstanceType<typeof ProjectTree> | null>(null);
 /** 左栏 tab：'files' = 目录树（默认），'search' = 全局内容搜索。 */
 const leftTab = ref<"files" | "search">("files");
+
+// 项目目录被清空（关闭项目 / 空白窗口）时，若正停在搜索 tab 则退回文件 tab（搜索按钮已禁用）。
+watch(
+  () => vsState.projectDir,
+  (dir) => {
+    if (!dir && leftTab.value === "search") leftTab.value = "files";
+  },
+);
 
 /** 左栏搜索结果点击：相对路径 → 绝对路径后打开并跳行。 */
 function onSearchOpen(rel: string, ln: number): void {
@@ -1639,6 +1654,13 @@ onBeforeUnmount(() => {
   padding: 3px 6px;
   border-bottom: 1px solid var(--dsh-border, #30363d);
   user-select: none;
+}
+.vs-left-tab:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+.vs-left-tab:disabled:hover {
+  background: transparent;
 }
 .vs-left-tab {
   display: inline-flex;
