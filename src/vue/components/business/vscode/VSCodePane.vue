@@ -927,7 +927,8 @@ async function loadContent(path: string, opts: LoadOptions = {}): Promise<void> 
     // 内容换了一茬：让编辑器整体重建（丢弃旧撤销栈与选区）。
     docRevs[path] = (docRevs[path] ?? 0) + 1;
   } catch (e) {
-    errors[path] = (e as Error).message;
+    // 超过 host 8MB 编辑上限（413）：给明确指引，而不是裸的英文报错。
+    errors[path] = e instanceof api.ApiError && e.status === 413 ? t("vsTooLarge") : (e as Error).message;
   } finally {
     loadingPaths.delete(path);
   }
@@ -1193,12 +1194,43 @@ async function closeSaveTab(path: string): Promise<void> {
   await closeTab(path);
 }
 
+/**
+ * 批量关闭：多个标签都有未保存改动时，只问一次「全部保存并关闭？」，
+ * 而不是逐个弹确认；保存失败/冲突被取消的标签保留不动。
+ * 只有 0/1 个脏标签时退化为原有的逐个 closeTab（单文件确认）。
+ */
+async function closeMany(paths: string[]): Promise<void> {
+  const dirty = paths.filter((p) => buffers[p]?.dirty);
+  if (dirty.length > 1) {
+    const ok = await confirmDialog({
+      title: t("vsUnsavedTitle"),
+      message: t("vsCloseManyMsg", { n: String(dirty.length) }),
+    });
+    if (!ok) return;
+    const failed = new Set<string>();
+    for (const p of dirty) {
+      if (!(await savePath(p, { quiet: true }))) failed.add(p);
+    }
+    for (const p of paths) {
+      if (failed.has(p)) continue;
+      delete buffers[p];
+      delete errors[p];
+      delete docRevs[p];
+      vsState.openTabs = vsState.openTabs.filter((q) => q !== p);
+    }
+    if (vsState.activeTab && !vsState.openTabs.includes(vsState.activeTab)) {
+      vsState.activeTab = vsState.openTabs[vsState.openTabs.length - 1] ?? null;
+    }
+    persistVSCode();
+    return;
+  }
+  for (const p of paths) await closeTab(p);
+}
+
 /** 关闭除指定标签外的全部标签。 */
 async function closeOthers(path: string): Promise<void> {
   if (isDiffTab(path)) return; // 伪标签：不参与真实标签的批量关闭
-  for (const p of [...vsState.openTabs]) {
-    if (p !== path) await closeTab(p);
-  }
+  await closeMany(vsState.openTabs.filter((p) => p !== path));
 }
 
 /** 关闭指定标签右侧的全部标签。 */
@@ -1206,12 +1238,12 @@ async function closeRight(path: string): Promise<void> {
   if (isDiffTab(path)) return; // 伪标签恒在最右，无「右侧」可关
   const idx = vsState.openTabs.indexOf(path);
   if (idx < 0) return;
-  for (const p of vsState.openTabs.slice(idx + 1)) await closeTab(p);
+  await closeMany(vsState.openTabs.slice(idx + 1));
 }
 
-/** 关闭全部标签（有未保存改动时逐个确认）。 */
+/** 关闭全部标签（多个未保存时一次确认全部保存）。 */
 async function closeAllOpen(): Promise<void> {
-  for (const p of [...vsState.openTabs]) await closeTab(p);
+  await closeMany([...vsState.openTabs]);
 }
 
 /** 目录树删除文件：直接移除对应标签（不二次确认）。 */
@@ -1301,10 +1333,34 @@ function onKeydown(e: KeyboardEvent): void {
     void ensureFileIndex();
     return;
   }
-  if (key !== "s") return;
+  if (key !== "s") {
+    // Ctrl+W：关闭当前标签（伪标签优先）。浏览器普通标签页可能拦截不了该组合键，
+    // 但嵌入 shell / 部分浏览器内可用；Ctrl+PageUp/PageDown 是可靠的切标签方案。
+    if (key === "w") {
+      e.preventDefault();
+      if (diffPane.value) diffPane.value = null;
+      else if (vsState.activeTab) void closeTab(vsState.activeTab);
+      return;
+    }
+    if (key === "pagedown" || key === "pageup") {
+      e.preventDefault();
+      cycleTab(key === "pagedown" ? 1 : -1);
+      return;
+    }
+    return;
+  }
   e.preventDefault();
   if (e.shiftKey) saveAs();
   else void saveActive();
+}
+
+/** Ctrl+PageUp/PageDown：在真实标签间循环切换（伪标签不参与，切换即关闭详情）。 */
+function cycleTab(delta: number): void {
+  const list = vsState.openTabs;
+  if (list.length < 2) return;
+  const idx = vsState.activeTab ? list.indexOf(vsState.activeTab) : -1;
+  const next = ((idx < 0 ? 0 : idx + delta) + list.length) % list.length;
+  selectTab(list[next]);
 }
 
 /** 关页面前的未保存拦截：让浏览器弹原生确认（切面板走暂存，见 stashOpenBuffers）。 */

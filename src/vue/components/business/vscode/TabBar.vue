@@ -1,36 +1,56 @@
 <template>
-  <!-- 标签过多时横向溢出：隐藏滚动条，鼠标滚轮悬停即可横向滚动（onWheel） -->
-  <div ref="tabsEl" class="vs-tabs" @wheel="onWheel">
-    <div
-      v-for="tab in tabs"
-      :key="tab.path"
-      class="vs-tab"
-      :class="{ 'is-active': tab.path === active }"
-      :title="tab.path"
-      @click="$emit('select', tab.path)"
-      @contextmenu.prevent.stop="openMenu(tab, $event)"
+  <!-- 标签过多时横向溢出：隐藏滚动条，滚轮悬停滚动 + 两侧 ◀▶ 箭头按钮 -->
+  <div class="vs-tabs-wrap">
+    <button
+      v-if="overflow"
+      class="vs-tab-arrow is-left"
+      :class="{ dim: !canLeft }"
+      :title="t('vsScrollLeft')"
+      @click="scrollStep(-1)"
     >
-      <icon v-if="tab.icon" :name="tab.icon" :size="12" />
-      <span class="vs-tab-name">{{ basename(tab.path) }}</span>
-      <span
-        v-if="tab.dirty"
-        class="vs-tab-dirty"
-        :class="{ conflict: tab.conflict }"
-        :title="tab.conflict ? t('vsConflictBadge') : ''"
-        @click.stop="$emit('save', tab.path)"
-      ></span>
-      <span v-else class="vs-tab-dot"></span>
-      <span class="vs-tab-close" @click.stop="$emit('close', tab.path)">×</span>
-    </div>
-    <div v-if="!tabs.length" class="vs-tabs-empty">{{ t("vsNoOpenFile") }}</div>
+      <icon name="chevronLeft" :size="13" />
+    </button>
+    <div ref="tabsEl" class="vs-tabs" @wheel="onWheel" @scroll="updateArrows">
+      <div
+        v-for="tab in tabs"
+        :key="tab.path"
+        class="vs-tab"
+        :class="{ 'is-active': tab.path === active }"
+        :title="tab.path"
+        @click="$emit('select', tab.path)"
+        @contextmenu.prevent.stop="openMenu(tab, $event)"
+      >
+        <icon v-if="tab.icon" :name="tab.icon" :size="12" />
+        <span class="vs-tab-name">{{ basename(tab.path) }}</span>
+        <span
+          v-if="tab.dirty"
+          class="vs-tab-dirty"
+          :class="{ conflict: tab.conflict }"
+          :title="tab.conflict ? t('vsConflictBadge') : ''"
+          @click.stop="$emit('save', tab.path)"
+        ></span>
+        <span v-else class="vs-tab-dot"></span>
+        <span class="vs-tab-close" @click.stop="$emit('close', tab.path)">×</span>
+      </div>
+      <div v-if="!tabs.length" class="vs-tabs-empty">{{ t("vsNoOpenFile") }}</div>
 
-    <!-- 右键菜单：复用工作台公共 ContextMenu（关闭 / 保存并关闭 / 关闭其他 / 关闭右侧 / 关闭全部） -->
-    <ContextMenu v-if="menuOpen" :items="menuItems" :x="menuX" :y="menuY" @close="menuOpen = false" />
+      <!-- 右键菜单：复用工作台公共 ContextMenu（关闭 / 保存并关闭 / 关闭其他 / 关闭右侧 / 关闭全部） -->
+      <ContextMenu v-if="menuOpen" :items="menuItems" :x="menuX" :y="menuY" @close="menuOpen = false" />
+    </div>
+    <button
+      v-if="overflow"
+      class="vs-tab-arrow is-right"
+      :class="{ dim: !canRight }"
+      :title="t('vsScrollRight')"
+      @click="scrollStep(1)"
+    >
+      <icon name="chevronRight" :size="13" />
+    </button>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { MenuItem } from "../../../../shared/types";
 import { t } from "../../../composables/core/i18n";
 import ContextMenu from "../../common/ContextMenu.vue";
@@ -38,6 +58,46 @@ import Icon from "../../common/Icon.vue";
 
 /** 标签条元素（滚轮横向滚动用）。 */
 const tabsEl = ref<HTMLElement | null>(null);
+
+/* ---------- 标签条两侧 ◀▶ 滚动箭头 ---------- */
+/** 是否横向溢出（决定箭头是否显示）。 */
+const overflow = ref(false);
+const canLeft = ref(false);
+const canRight = ref(false);
+let tabsRO: ResizeObserver | null = null;
+
+/** 依据当前滚动位置刷新箭头显隐与可用态。 */
+function updateArrows(): void {
+  const el = tabsEl.value;
+  if (!el) return;
+  overflow.value = el.scrollWidth > el.clientWidth + 1;
+  canLeft.value = el.scrollLeft > 1;
+  canRight.value = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+}
+
+/** 点击箭头：按可视宽度的大部分平滑滚动（负数向左）。 */
+function scrollStep(dir: number): void {
+  const el = tabsEl.value;
+  if (!el) return;
+  el.scrollBy({ left: dir * Math.max(200, el.clientWidth * 0.7), behavior: "smooth" });
+}
+
+onMounted(() => {
+  tabsRO = new ResizeObserver(updateArrows);
+  if (tabsEl.value) tabsRO.observe(tabsEl.value);
+  updateArrows();
+});
+
+onBeforeUnmount(() => {
+  tabsRO?.disconnect();
+  tabsRO = null;
+});
+
+// 标签数量变化（打开/关闭）后重测溢出。
+watch(
+  () => props?.tabs?.length,
+  () => void nextTick(updateArrows),
+);
 
 /**
  * 滚轮横向滚动标签条：标签放不下时不显示滚动条（太窄难点），改用滚轮——
@@ -120,21 +180,59 @@ const menuItems = computed<MenuItem[]>(() => {
 </script>
 
 <style scoped>
+.vs-tabs-wrap {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  /* 纵向 flex 容器（.vs-right）里绝不能 flex-grow，否则标签条会被撑满整个面板高度 */
+  flex: 0 0 auto;
+}
 .vs-tabs {
   display: flex;
   align-items: stretch;
   height: 35px;
+  min-width: 0;
+  flex: 1 1 auto;
   background: var(--dsh-bg2, #161b22);
   border-bottom: 1px solid var(--dsh-border, #30363d);
   overflow-x: auto;
-  scrollbar-width: none; /* Firefox：隐藏横向滚动条，滚轮滚动（见 onWheel） */
+  overflow-y: hidden;
+  scrollbar-width: none; /* Firefox：隐藏横向滚动条，滚轮/箭头滚动（见 onWheel / scrollStep） */
 }
 .vs-tabs::-webkit-scrollbar {
   height: 0;
   display: none; /* Chrome/Edge：隐藏横向滚动条 */
 }
-.vs-tabs {
-  overflow-y: hidden;
+/* 两侧滚动箭头：布局内固定元素（非悬浮），只在溢出时渲染，永不与标签互相压盖 */
+.vs-tab-arrow {
+  flex: 0 0 auto;
+  align-self: stretch;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  padding: 0;
+  border: none;
+  border-bottom: 1px solid var(--dsh-border, #30363d);
+  background: var(--dsh-bg2, #161b22);
+  color: var(--dsh-fg, #c9d1d9);
+  cursor: pointer;
+  opacity: 0.85;
+}
+.vs-tab-arrow.is-left {
+  border-right: 1px solid var(--dsh-border, #30363d);
+}
+.vs-tab-arrow.is-right {
+  border-left: 1px solid var(--dsh-border, #30363d);
+}
+.vs-tab-arrow:hover {
+  opacity: 1;
+  background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
+}
+.vs-tab-arrow.dim {
+  opacity: 0.3;
+  cursor: default;
 }
 .vs-tab {
   display: flex;
