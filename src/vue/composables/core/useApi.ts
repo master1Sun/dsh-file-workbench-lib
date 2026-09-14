@@ -330,6 +330,14 @@ export function killExec(session: string): Promise<unknown> {
   return request("POST", "/exec-kill", { session });
 }
 
+/**
+ * 终端：查询 host 进程权限态（是否以管理员 / root 运行）。
+ * ConPTY 子进程继承 host 令牌，因此该值即「终端里命令的权限级别」。
+ */
+export function termEnv(): Promise<{ elevated: boolean }> {
+  return request("GET", "/term-env");
+}
+
 /** 子代理（0.1.5）：经宿主 ctx.subagents 建立官方子代理会话（失败回退一次性运行）。 */
 export function spawnSubagent(
   path: string,

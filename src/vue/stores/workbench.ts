@@ -52,9 +52,10 @@ export function setSearchTerm(v: string): void {
 export const searchCase = ref(false);
 export const searchRegex = ref(false);
 
-export function toast(kind: "error" | "ok", message: string): void {
+export function toast(kind: "error" | "ok" | "info", message: string): void {
   const opts = { message, duration: 3000 };
   if (kind === "error") ElMessage.error(opts);
+  else if (kind === "info") ElMessage.info(opts);
   else ElMessage.success(opts);
 }
 

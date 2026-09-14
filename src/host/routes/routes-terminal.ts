@@ -175,6 +175,34 @@ function detectCd(line: string, shell: TermShell): { target: string } | null {
   return m ? { target: m[1] } : null;
 }
 
+/** 当前 host 进程是否以管理员（Windows）/ root（POSIX）身份运行；懒探测 + 缓存（进程生命周期内不变）。 */
+let elevatedCache: boolean | undefined;
+export function hostIsElevated(): boolean {
+  if (elevatedCache === undefined) elevatedCache = detectElevated();
+  return elevatedCache;
+}
+
+/**
+ * 探测提权状态。
+ *
+ * Windows：ConPTY 子进程继承 host 自身令牌，所以「终端能否提权」== 「dsh web 是否提权」。
+ * 用 `whoami /groups` 的完整性级别 SID 判定——SID 不随系统语言变化，比匹配本地化的
+ * 「管理员 / Administrators」字样可靠：S-1-16-12288（High，已提权）、S-1-16-16384（SYSTEM）
+ * 视为提权；普通用户进程为 S-1-16-8192（Medium）。
+ * POSIX：uid 0 即 root。
+ */
+function detectElevated(): boolean {
+  if (process.platform !== "win32") {
+    return typeof process.getuid === "function" && process.getuid() === 0;
+  }
+  try {
+    const r = spawnSync("whoami", ["/groups"], { encoding: "utf8", windowsHide: true });
+    return /S-1-16-(12288|16384)\b/i.test(r.stdout ?? "");
+  } catch {
+    return false;
+  }
+}
+
 /** 资源路由：常驻流式终端（输出 / 输入 / 终止）。 */
 export const terminalResource: RouteMatcher = async (req, res, seg, _q, method, host) => {
   void host;
@@ -271,6 +299,11 @@ export const terminalResource: RouteMatcher = async (req, res, seg, _q, method, 
       endSession(session, s);
     }
     return (json(res, 200, { ok: true, data: { killed: Boolean(s) } }), true);
+  }
+
+  // --- 终端权限态：GET /term-env —— 当前 host 进程是否提权（供终端栏显示「管理员」徽标） ---
+  if (seg[0] === "term-env" && seg.length === 1 && method === "GET") {
+    return (json(res, 200, { ok: true, data: { elevated: hostIsElevated() } }), true);
   }
 
   return false;

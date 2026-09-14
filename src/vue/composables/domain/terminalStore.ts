@@ -9,7 +9,7 @@
  * （output），供 xterm 重放与跨面板存活；不再维护结构化行。
  */
 import { ref, type Ref } from "vue";
-import { killExec, sendTerminalInput, streamTerminal } from "../core/useApi";
+import { killExec, sendTerminalInput, streamTerminal, termEnv } from "../core/useApi";
 
 export interface TermTab {
   id: string;
@@ -32,6 +32,30 @@ export interface TermTab {
 export const termTabs: Ref<TermTab[]> = ref([]);
 /** 当前激活的终端 id。 */
 export const termActiveId: Ref<string> = ref("");
+
+/**
+ * host 进程权限态：true=管理员/root，false=普通权限，null=尚未探测。
+ *
+ * ConPTY 子进程继承 host 令牌，所以这个值就等于「终端里命令的权限级别」；
+ * 放在模块级单例供终端浮窗与最小化 dock 共用，避免各自重复请求。
+ */
+export const termElevated: Ref<boolean | null> = ref(null);
+
+/**
+ * 探测一次 host 权限态（幂等：已探测成功则直接返回）。
+ *
+ * 失败时**保持 null**（而非写入 false）并留待下次挂载重试：探测失败多为 host 尚未就绪，
+ * 若缓存成 false 会把「未知」永久显示成「普通权限」——这比暂时不显示徽标更糟。
+ */
+export async function loadTermElevation(): Promise<void> {
+  if (termElevated.value !== null) return;
+  try {
+    const env = await termEnv();
+    termElevated.value = env.elevated === true;
+  } catch {
+    /* host 未就绪 / 无该路由：保持未知，下次挂载再试 */
+  }
+}
 
 /** 终端名序号：单调递增，关闭终端后不回收复用，保证每个名字唯一。 */
 let nameSeq = 0;

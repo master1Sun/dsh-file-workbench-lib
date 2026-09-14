@@ -65,6 +65,18 @@
         :title="t('terminalShellSwitch')"
         @click="toggleDefaultShell"
       >{{ defaultShellLabel }}</button>
+      <!-- 权限徽标：终端子进程继承宿主（dsh web）令牌，故徽标反映的是宿主进程权限态。
+           探测完成前不渲染，避免先显示「普通权限」再跳成「管理员」的闪烁。 -->
+      <button
+        v-if="termElevated !== null"
+        class="fw-term-admin"
+        :class="{ on: termElevated }"
+        :title="termElevated ? t('terminalAdminOn') : t('terminalAdminOff')"
+        @click="showAdminHint"
+      >
+        <icon name="shield" :size="11" />
+        <span>{{ termElevated ? t("terminalAdmin") : t("terminalAdminNormal") }}</span>
+      </button>
     </div>
 
     <!-- 终端搜索条：Ctrl+F 唤起，Enter/Shift+Enter 上下跳转，Esc 关闭 -->
@@ -124,19 +136,21 @@ import type { ISearchOptions } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { useI18n } from "../../../composables/core/i18n";
-import { wb } from "../../../stores/workbench";
+import { toast, wb } from "../../../stores/workbench";
 import { prefs, savePrefs, termWin, saveTermWin } from "../../../composables/core/settings";
 import {
   closeAllTerminals,
   closeTermTab,
   dropTerminalInput,
   flushTerminalInput,
+  loadTermElevation,
   nextTermName,
   queueTerminalInput,
   restartShell,
   setOutputSink,
   startStream,
   termActiveId,
+  termElevated,
   termTabs,
   type TermTab,
 } from "../../../composables/domain/terminalStore";
@@ -573,6 +587,18 @@ function toggleDefaultShell(): void {
   savePrefs();
 }
 
+/**
+ * 点击权限徽标：已提权时仅回报状态，未提权时给出获取管理员终端的指引。
+ *
+ * 终端 shell 由宿主以 ConPTY 派生，进程令牌继承自 dsh web，因此无法在插件内部对单个
+ * 终端提权（Windows 提权必须经 UAC，且 UAC 提权进程无法挂到 ConPTY 伪控制台上）；
+ * 可行路径是让宿主本身以管理员身份启动。
+ */
+function showAdminHint(): void {
+  if (termElevated.value) toast("ok", t("terminalAdminOn"));
+  else toast("info", t("terminalAdminHint"));
+}
+
 let seq = 0;
 function newSessionId(): string {
   seq += 1;
@@ -606,6 +632,8 @@ function addTab(): void {
 
 // 终端窗口打开（停靠面板首次挂载）时，默认创建一个终端，避免空状态。
 onMounted(() => {
+  // 探测宿主权限态供权限徽标显示（幂等，跨面板开合只请求一次）。
+  void loadTermElevation();
   if (!tabs.value.length) addTab();
   else void nextTick(mountTerm);
 });
@@ -845,6 +873,30 @@ defineExpose({
   cursor: pointer;
 }
 .fw-term-shell:hover { color: var(--dsh-accent, #238636); border-color: var(--dsh-accent, #238636); }
+
+/* 权限徽标：提权时以强调色描边（盾牌图标），普通权限保持弱化灰色；两种主题均用 --dsh-* 变量自适应。 */
+.fw-term-admin {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--dsh-border, #30363d);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsh-fg-weak, #8b949e);
+  font-size: calc(10px * var(--dsh-fs-scale, 1));
+  cursor: pointer;
+  white-space: nowrap;
+}
+.fw-term-admin:hover { color: var(--dsh-accent, #238636); border-color: var(--dsh-accent, #238636); }
+.fw-term-admin.on {
+  color: var(--dsh-accent, #238636);
+  border-color: var(--dsh-accent, #238636);
+  background: color-mix(in srgb, var(--dsh-accent, #238636) 14%, transparent);
+  font-weight: 600;
+}
 
 /* 终端搜索条 */
 .fw-term-searchbar {
