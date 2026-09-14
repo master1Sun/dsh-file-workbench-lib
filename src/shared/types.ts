@@ -9,6 +9,12 @@ export interface ApiResponse<T> {
   data?: T;
   /** 当 ok === false 时存在。 */
   error?: string;
+  /**
+   * 机器可判别的错误码（当 ok === false 时可能存在）。
+   * 供前端分支处理（如 `mtime-conflict` 需弹确认后带 force 重试）；
+   * 缺省时前端只按 `error` 文案提示。见 useApi 的 ApiError.code。
+   */
+  code?: string;
 }
 
 /** 目录列表中的单条条目（对应 dsh-better-sidebar fs-tree.ts 的 row）。 */
@@ -168,6 +174,43 @@ export interface FileDetail {
   ext: string;
 }
 
+/* ---------- 文本编辑：编码与行尾（host fs/text-codec 与前端共用同一套取值） ---------- */
+
+/**
+ * 可直接以文本编辑的编码。`binary` 表示探测为非文本文件（前端只读提示，不给编辑器）。
+ * 中文环境回退用 `gb18030`（GBK/GB2312 的超集），不单列 `gbk`。
+ */
+export type TextEncoding = "utf8" | "utf16le" | "utf16be" | "gb18030" | "big5" | "latin1" | "binary";
+
+/** 行尾样式。编辑器内部一律以 `\n` 表示换行，此值仅作元数据随文件往返。 */
+export type EolStyle = "lf" | "crlf" | "cr";
+
+/** `/read` 的返回：编辑器打开文件所需的全部元数据（content 的行尾已归一为 `\n`）。 */
+export interface FileTextRead {
+  content: string;
+  size: number;
+  /** 落盘时间毫秒戳：保存时回传作 expectedMtime，用于外部改动检测。 */
+  mtime: number;
+  encoding: TextEncoding;
+  hasBom: boolean;
+  eol: EolStyle;
+  /** 探测为二进制时为 true，此时 content 为空串。 */
+  binary: boolean;
+}
+
+/** `/save` 的返回。 */
+export interface FileTextSaved {
+  path: string;
+  /** 落盘后的 mtime，供前端刷新外部改动基线。 */
+  mtime: number;
+}
+
+/** 打开文件时携带的编码/行尾选项（用户在状态栏手动切换时使用）。 */
+export interface TextReadOptions {
+  encoding?: TextEncoding;
+  hasBom?: boolean;
+}
+
 /** 一条待显示 git 状态（归一化）。 */
 export type GitFileStatus = "" | "untracked" | "added" | "modified" | "deleted";
 
@@ -241,13 +284,15 @@ export interface ClipboardEntry {
   paths: string[];
 }
 
-/** 右键菜单项（支持分隔线 / 禁用 / 选中 / 一级子菜单）。 */
+/** 右键菜单项（支持分隔线 / 禁用 / 选中 / 一级子菜单 / 快捷键提示）。 */
 export interface MenuItem {
   label?: string;
   icon?: string;
   disabled?: boolean;
   checked?: boolean;
   separator?: boolean;
+  /** 右侧快捷键提示（仅展示，如 "Ctrl+S"；不做按键绑定）。 */
+  hint?: string;
   children?: MenuItem[];
   onClick?: () => void;
 }

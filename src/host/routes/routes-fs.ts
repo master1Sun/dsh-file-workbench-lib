@@ -24,9 +24,10 @@ import {
   resolveExisting,
   resolveWritePath,
 } from "../fs/fs-tree.js";
-import { replaceInFiles, searchFiles } from "../fs/fs-search.js";
+import { replaceInFiles, searchFiles, listProjectFiles } from "../fs/fs-search.js";
 import { listDrives } from "../fs/fs-drives.js";
 import { saveText } from "../fs/fs-read.js";
+import { decodeText, encodeText, type EolStyle, type TextEncoding } from "../fs/text-codec.js";
 import { compressTo, extractTo } from "../fs/fs-zip.js";
 import { trashPath } from "../fs/recycle.js";
 import { getRoot, setRoot } from "../store/root-store.js";
@@ -67,9 +68,35 @@ async function guardWsRoot(key: string | undefined, target: string): Promise<voi
   );
 }
 
+/** 可被 `?encoding=` 指定的文本编码白名单（与 fs/text-codec 的 TextEncoding 对齐）。 */
+const TEXT_ENCODINGS = new Set<string>(["utf8", "utf16le", "utf16be", "gb18030", "big5", "latin1", "binary"]);
+
+/**
+ * 解析 `/read` 的编码覆盖参数。
+ * `?encoding=` 来自状态栏的手动切换；`?bom=1|0` 显式指定 BOM（缺省沿用探测结果）。
+ */
+function parseEncodingOverride(q: URLSearchParams): { encoding?: TextEncoding; hasBom?: boolean } {
+  const out: { encoding?: TextEncoding; hasBom?: boolean } = {};
+  const enc = q.get("encoding")?.trim();
+  if (enc && TEXT_ENCODINGS.has(enc)) out.encoding = enc as TextEncoding;
+  const bom = q.get("bom");
+  if (bom === "1") out.hasBom = true;
+  else if (bom === "0") out.hasBom = false;
+  return out;
+}
+
+/** 保存时的编码回退：无法识别（旧调用方未传）时按 UTF-8 处理，保持向后兼容。 */
+function saveEncodingOf(raw: string | undefined): TextEncoding {
+  return raw && TEXT_ENCODINGS.has(raw) ? (raw as TextEncoding) : "utf8";
+}
+
+/** 保存时的行尾回退：未传时按 LF（旧调用方语义保持原样）。 */
+function saveEolOf(raw: string | undefined): EolStyle {
+  return raw === "crlf" || raw === "cr" ? raw : "lf";
+}
+
 /** 资源路由：assets 静态产物 + 全部 fs 接口。 */
-export const fsResource: RouteMatcher = async (req, res, seg, q, method, host) => {
-  void host;
+export const fsResource: RouteMatcher = async (req, res, seg, q, method, host) => {  void host;
   // --- 静态资源（Vue 构建产物） ---
   if (seg[0] === "assets" && method === "GET") {
     serveAsset(res, seg.join("/"));
@@ -141,26 +168,71 @@ export const fsResource: RouteMatcher = async (req, res, seg, q, method, host) =
     );
   }
 
+  // --- 项目文件索引（「快速打开」用；只回相对路径，模糊匹配在前端本地做） ---
+  if (seg[0] === "files" && seg.length === 1 && method === "GET") {
+    const target = q.get("path")?.trim() || getRoot(q.get("key") ?? undefined) || "";
+    if (!target) return (json(res, 400, { ok: false, error: "no project folder — open a folder first" }), true);
+    const out = await listProjectFiles(requireAbsolute(target));
+    return (json(res, 200, { ok: true, data: out }), true);
+  }
+
   // --- 保存文件（任意绝对路径可写；root 内走工作区语义，root 外同样允许新建/覆盖） ---
+  // 内容一律以「LF 归一 + 纯文本」形态传入，编码与行尾由 encoding/hasBom/eol 三参还原，
+  // 避免 CRLF 文件被静默改成 LF、GBK 文件被写成 GBK 乱码（详见 fs/text-codec.ts）。
   if (seg[0] === "save" && seg.length === 1 && method === "POST") {
-    const body = (await readBody(req)) as { key?: string; path?: string; content?: string } | null;
+    const body = (await readBody(req)) as {
+      key?: string;
+      path?: string;
+      content?: string;
+      encoding?: string;
+      hasBom?: boolean;
+      eol?: string;
+      expectedMtime?: number;
+      force?: boolean;
+    } | null;
     if (!body?.path || typeof body?.content !== "string") {
       return (json(res, 400, { ok: false, error: "path and content required" }), true);
     }
     const abs = requireAbsolute(body.path);
     await guardWsRoot(body?.key, abs);
+
+    // 外部改动检测：调用方带上读取时拿到的 mtime，若磁盘已被别处改写则拒绝覆盖（除非 force）。
+    // 用 412 而不是 409——409 在客户端被统一映射为「未设置工作区根」，语义不符。
+    if (body.force !== true && typeof body.expectedMtime === "number") {
+      const cur = await stat(abs).catch(() => null);
+      if (cur?.isFile() && Math.abs(cur.mtimeMs - body.expectedMtime) >= 1) {
+        return (
+          json(res, 412, {
+            ok: false,
+            error: "file has been changed on disk since it was loaded",
+            code: "mtime-conflict",
+          }),
+          true
+        );
+      }
+    }
+
+    // 按原编码 / 原行尾 / 原 BOM 编码回字节；目标编码无法表示全部字符时抛 422（不写乱码）。
+    const bytes = encodeText(body.content, {
+      encoding: saveEncodingOf(body.encoding),
+      hasBom: body.hasBom === true,
+      eol: saveEolOf(body.eol),
+    });
+
     const root = getRoot(body?.key);
     let saved: string;
     if (root && isWithin(root, abs)) {
-      saved = await saveText(root, body.path, body.content);
+      saved = await saveText(root, body.path, bytes);
     } else {
       // 不限工作区：解析（解符号链接）后写入，必要时创建父目录，允许新建任意不存在的文件。
       const safe = await resolveWritePath(abs);
       await mkdir(dirname(safe), { recursive: true });
-      await writeFile(safe, body.content, "utf8");
+      await writeFile(safe, bytes);
       saved = safe;
     }
-    return (json(res, 200, { ok: true, data: { path: saved } }), true);
+    // 回传落盘后的 mtime，供前端刷新外部改动基线（否则自己刚写的文件会被下一轮轮询判为“被改动”）。
+    const after = await stat(saved).catch(() => null);
+    return (json(res, 200, { ok: true, data: { path: saved, mtime: after?.mtimeMs ?? 0 } }), true);
   }
 
   // --- 搜索（可指定任意绝对目录作为范围，不限于工作区；缺省用工作区根或 home） ---
@@ -264,7 +336,7 @@ export const fsResource: RouteMatcher = async (req, res, seg, q, method, host) =
     return (json(res, 200, { ok: true, data: detail }), true);
   }
 
-  // --- 读取文本文件内容（编辑 .txt 用；限文件 + 限大小，超出返回 413） ---
+  // --- 读取文本文件内容（编辑用；限文件 + 限大小，超出 413） ---
   if (seg[0] === "read" && seg.length === 1 && method === "GET") {
     const raw = q.get("path")?.trim() ?? "";
     if (!raw) return (json(res, 400, { ok: false, error: "path required" }), true);
@@ -276,15 +348,52 @@ export const fsResource: RouteMatcher = async (req, res, seg, q, method, host) =
     // 编辑场景仅针对文本，限制单次读取体积（8MB），避免大文件 / 二进制拖垮前端。
     const MAX = 8 * 1024 * 1024;
     if (info.size > MAX) return (json(res, 413, { ok: false, error: "file too large to edit" }), true);
-    const text = await readFile(target, "utf8");
-    return (json(res, 200, { ok: true, data: { content: text, size: info.size } }), true);
+    // 编码自动探测（可被 ?encoding= 覆盖以支持状态栏手动切换）；行尾一并探测供写回还原。
+    // 文本已把行尾归一为 \n：编辑器内部只用 LF，原样式随 eol 字段往返。
+    const decoded = decodeText(await readFile(target), parseEncodingOverride(q));
+    return (
+      json(res, 200, {
+        ok: true,
+        data: {
+          content: decoded.text,
+          size: info.size,
+          mtime: info.mtimeMs,
+          encoding: decoded.encoding,
+          hasBom: decoded.hasBom,
+          eol: decoded.eol,
+          binary: decoded.binary,
+        },
+      }),
+      true
+    );
+  }
+
+  // --- 批量 mtime 查询（编辑器「外部改动检测」轮询：一次请求覆盖全部已打开标签） ---
+  if (seg[0] === "mtimes" && seg.length === 1 && method === "POST") {
+    const body = (await readBody(req)) as { paths?: unknown } | null;
+    const list = Array.isArray(body?.paths) ? body.paths.filter((p): p is string => typeof p === "string") : [];
+    const items: Record<string, { mtimeMs: number; size: number } | null> = {};
+    // 上限 200 条：轮询接口，避免被构造超大请求拖住事件循环。
+    for (const p of list.slice(0, 200)) {
+      try {
+        const s = await stat(requireAbsolute(p));
+        items[p] = s.isFile() ? { mtimeMs: s.mtimeMs, size: s.size } : null;
+      } catch {
+        // 已删除 / 不可访问：以 null 告知前端，由前端决定提示或关闭标签。
+        items[p] = null;
+      }
+    }
+    return (json(res, 200, { ok: true, data: { items } }), true);
   }
 
   // --- 用系统默认程序打开 / 在资源管理器中打开 ---
   if (seg[0] === "openExternal" && seg.length === 1 && method === "POST") {
     const body = (await readBody(req)) as { path?: string } | null;
     const target = requireAbsolute(body?.path?.trim() ?? "");
-    const info = await stat(target);
+    // 目标可能刚被删除/重命名（列表是上一刻拉的），此时是 404 而不是 500。
+    const info = await stat(target).catch((error) => {
+      throw new FsError("not-found", `cannot open "${target}": ${error instanceof Error ? error.message : String(error)}`, 404);
+    });
     await spawnOpen(target, info.isDirectory());
     return (json(res, 200, { ok: true, data: { path: target } }), true);
   }

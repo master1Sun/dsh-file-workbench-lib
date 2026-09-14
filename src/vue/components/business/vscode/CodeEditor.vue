@@ -27,6 +27,12 @@ const props = defineProps<{
   path: string;
   /** 初始文档内容。 */
   initialContent: string;
+  /**
+   * 文档修订号：外部替换了同一路径的内容时由父组件自增，触发整体重建。
+   * 用于「外部改动自动重载」与「切换编码重读」——不能只靠 initialContent 变化判断，
+   * 因为它不是响应式的文档来源（用户编辑不会回写它）。
+   */
+  docRev?: number;
   /** 只读（工作区外 / 受保护目录）。 */
   readonly?: boolean;
   /** 是否使用深色主题（oneDark）。 */
@@ -182,6 +188,8 @@ onBeforeUnmount(() => {
 });
 
 watch(() => props.path, rebuild);
+// 同一文件内容被外部替换（重载 / 换编码重读）：整体重建以丢弃旧的撤销栈与选区。
+watch(() => props.docRev, rebuild);
 watch(
   () => props.readonly,
   () => {

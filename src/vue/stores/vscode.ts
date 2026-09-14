@@ -8,6 +8,7 @@
  */
 import { reactive, ref } from "vue";
 import * as api from "../composables/core/useApi";
+import type { EolStyle, TextEncoding } from "../../shared/types";
 
 /** 单个打开文件的查看器位置（编辑器滚动 + 光标）。 */
 export interface FileViewState {
@@ -17,9 +18,34 @@ export interface FileViewState {
   anchor?: number;
 }
 
+/**
+ * 一个已打开文件的编辑缓冲区。
+ *
+ * 文档内容一律以 `\n` 表示换行（编辑器内部只用 LF）；`encoding` / `hasBom` / `eol`
+ * 是随文件往返的元数据，保存时由 host 按它们还原字节，避免 CRLF 被静默改成 LF、
+ * GBK 文件被写成乱码。`mtime` 是「外部改动检测」的基线（读/写时刷新）。
+ */
+export interface OpenBuffer {
+  /** 已归一为 `\n` 的文本。 */
+  content: string;
+  /** 是否有未保存改动。 */
+  dirty: boolean;
+  encoding: TextEncoding;
+  hasBom: boolean;
+  eol: EolStyle;
+  /** 最近一次读/写时的落盘时间（毫秒戳）。 */
+  mtime: number;
+  /** 探测为非文本文件：不给编辑器，只提示用系统程序打开。 */
+  binary: boolean;
+  /** 检测到磁盘已被外部改写、而本地缓冲区又有未保存改动时的冲突标记。 */
+  conflict: boolean;
+}
+
 export interface VSCodeState {
   /** 项目根目录（独立选择，与工作区 root 解耦）。 */
   projectDir: string | null;
+  /** 最近打开过的项目目录（去重、新的在前，最多 10 条），供顶栏下拉一键切换。 */
+  recentProjects: string[];
   /** 已打开的文件绝对路径列表（标签顺序）。 */
   openTabs: string[];
   /** 当前激活标签的绝对路径。 */
@@ -46,6 +72,7 @@ export interface VSCodeState {
 
 const defaults: VSCodeState = {
   projectDir: null,
+  recentProjects: [],
   openTabs: [],
   activeTab: null,
   expanded: [],
@@ -66,6 +93,20 @@ export const vsState = reactive<VSCodeState>({ ...defaults });
  * 表现为「初次进去是展开的却没有内容」，要手动折叠再展开才出来。
  */
 export const vsReady = ref(false);
+
+/** 最近项目列表上限。 */
+const RECENT_MAX = 10;
+
+/**
+ * 记录一个项目目录到「最近项目」：去重后置顶，最多 10 条。
+ *
+ * 纯内存变更（与 `projectDir` 一起由 `persistVSCode()` 落盘）；调用方负责触发落盘。
+ */
+export function rememberProject(dir: string): void {
+  const key = dir.trim();
+  if (!key) return;
+  vsState.recentProjects = [key, ...vsState.recentProjects.filter((p) => p !== key)].slice(0, RECENT_MAX);
+}
 
 let loaded = false;
 
@@ -89,6 +130,13 @@ async function loadOnce(): Promise<void> {
   const data = (await api.loadPersist().catch(() => null)) as Record<string, unknown> | null;
   const raw = (data?.vscode as Record<string, unknown>) ?? {};
   if (typeof raw.projectDir === "string") vsState.projectDir = raw.projectDir;
+  if (Array.isArray(raw.recentProjects)) {
+    vsState.recentProjects = [
+      ...new Set(raw.recentProjects.filter((s): s is string => typeof s === "string" && s !== "")),
+    ].slice(0, RECENT_MAX);
+  }
+  // 当前项目必须在「最近项目」里：首版没有历史记录时也能立即作为最近项出现。
+  if (vsState.projectDir) rememberProject(vsState.projectDir);
   if (Array.isArray(raw.openTabs)) vsState.openTabs = raw.openTabs.filter((s) => typeof s === "string");
   if (typeof raw.activeTab === "string") vsState.activeTab = raw.activeTab;
   if (Array.isArray(raw.expanded)) vsState.expanded = raw.expanded.filter((s) => typeof s === "string");
@@ -164,4 +212,29 @@ export function rememberFileView(path: string, view: FileViewState): void {
 export function fileViewOf(path: string | null): FileViewState {
   if (!path) return {};
   return viewStaging[path] ?? vsState.views[path] ?? {};
+}
+
+/* ---------- 未保存缓冲的跨面板暂存 ---------- */
+
+/**
+ * 「文件编辑器」面板在 DSH 里是随 tab 激活/失活挂载卸载的（host 会 unmount 非激活面板），
+ * 而 buffer 内容按设计不落盘（以磁盘为准）。于是「切到别的 tab 再切回来」会丢掉未保存的编辑。
+ * 这里在卸载时把 **dirty** 的缓冲区留在模块级暂存里（模块不随面板卸载而重置），
+ * 重新挂载时恢复——既不需要持久化内容，也不会静默丢改动。
+ */
+let dirtyStash: Record<string, OpenBuffer> = {};
+
+/** 面板卸载前暂存未保存的缓冲区（只留 dirty 项，干净缓冲下次从磁盘重读即可）。 */
+export function stashOpenBuffers(buffers: Record<string, OpenBuffer>): void {
+  dirtyStash = {};
+  for (const [path, buf] of Object.entries(buffers)) {
+    if (buf.dirty) dirtyStash[path] = { ...buf };
+  }
+}
+
+/** 取出并清空暂存（重新挂载时调用一次，避免同一份内容被反复恢复）。 */
+export function takeStashedBuffers(): Record<string, OpenBuffer> {
+  const out = dirtyStash;
+  dirtyStash = {};
+  return out;
 }

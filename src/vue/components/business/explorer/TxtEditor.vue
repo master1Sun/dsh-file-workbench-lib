@@ -64,7 +64,8 @@
         <span class="fw-np-spacer"></span>
         <span class="fw-np-seg">Ln {{ cursorLine }}, Col {{ cursorCol }}</span>
         <span class="fw-np-seg">100%</span>
-        <span class="fw-np-seg fw-np-eol">Windows (CRLF)</span>
+        <span class="fw-np-seg fw-np-eol">{{ eolText }}</span>
+        <span class="fw-np-seg">{{ encodingText }}</span>
       </div>
     </div>
 
@@ -80,6 +81,7 @@ import * as api from "../../../composables/core/useApi";
 import { useI18n } from "../../../composables/core/i18n";
 import { confirmDialog } from "../../../composables/core/dialog";
 import { prefs, savePrefs } from "../../../composables/core/settings";
+import type { EolStyle, TextEncoding } from "../../../../shared/types";
 
 const props = defineProps<{ modelValue: boolean; path: string }>();
 const emit = defineEmits<{
@@ -106,6 +108,29 @@ const error = ref("");
 const dirty = ref(false);
 const readonly = ref(false);
 const taRef = ref<HTMLTextAreaElement | null>(null);
+
+/**
+ * 随文件往返的编码元数据（由 /read 探测得到，保存时原样交回 /save）。
+ *
+ * 记事本的 textarea 同样只在 `\n` 上工作（浏览器会把 CRLF 归一），所以必须显式带回
+ * 原行尾与编码，否则「打开一个 CRLF/GBK 的 .txt 再保存」会把它整篇改成 LF/UTF-8。
+ */
+const encoding = ref<TextEncoding>("utf8");
+const hasBom = ref(false);
+const eol = ref<EolStyle>("lf");
+/** 读取时的落盘时间，保存时回传做外部改动冲突检测。 */
+const mtime = ref(0);
+
+const EOL_TEXT: Record<EolStyle, string> = {
+  lf: "Unix (LF)",
+  crlf: "Windows (CRLF)",
+  cr: "Macintosh (CR)",
+};
+const eolText = computed(() => EOL_TEXT[eol.value]);
+const encodingText = computed(() => {
+  const base = encoding.value === "utf8" ? "UTF-8" : encoding.value.toUpperCase();
+  return hasBom.value ? `${base} BOM` : base;
+});
 
 /**
  * 菜单中的两个开关（格式 ▸ 自动换行、查看 ▸ 状态栏）直接读写持久化偏好：
@@ -170,8 +195,17 @@ async function load(): Promise<void> {
   readonly.value = !canOperatePath(props.path);
   try {
     const res = await api.readFile(props.path);
+    if (res.binary) {
+      // 误判为文本的二进制（如改名的 .txt）：不给编辑，避免把二进制写坏。
+      error.value = t("vsBinaryHint");
+      return;
+    }
     content.value = res.content;
     original.value = res.content;
+    encoding.value = res.encoding;
+    hasBom.value = res.hasBom;
+    eol.value = res.eol;
+    mtime.value = res.mtime;
     dirty.value = false;
   } catch (e) {
     error.value = t("txtReadError", { msg: (e as Error).message });
@@ -196,18 +230,49 @@ function updateCursor(): void {
   cursorCol.value = pos - lastNl;
 }
 
+/**
+ * 落盘一次（原行尾 / 原编码 / 原 BOM 一并交回；textarea 已把 CRLF 归一成 LF）。
+ * @param force - true 时跳过外部改动冲突检测（用户在确认框里选了覆盖）。
+ */
+async function writeToDisk(force: boolean): Promise<void> {
+  const res = await api.saveFile(props.path, content.value, {
+    key: wb.key,
+    encoding: encoding.value,
+    hasBom: hasBom.value,
+    eol: eol.value,
+    expectedMtime: mtime.value,
+    force,
+  });
+  mtime.value = res.mtime;
+  original.value = content.value;
+  dirty.value = false;
+  toast("ok", t("txtSaved"));
+  emit("saved");
+  visible.value = false;
+}
+
 async function save(): Promise<void> {
   if (readonly.value || !dirty.value || saving.value) return;
   if (!isTxt(props.path)) return; // 二次保险：非 txt 不写盘
   saving.value = true;
   try {
-    await api.saveFile(props.path, content.value, wb.key);
-    original.value = content.value;
-    dirty.value = false;
-    toast("ok", t("txtSaved"));
-    emit("saved");
-    visible.value = false;
+    await writeToDisk(false);
   } catch (e) {
+    if (e instanceof api.ApiError && e.code === "mtime-conflict") {
+      // 冲突：先复位保存态（确认框期间不该显示「保存中」），由用户决定是否覆盖。
+      saving.value = false;
+      const ok = await confirmDialog({
+        title: t("vsConflictTitle"),
+        message: t("vsConflictMsg", { name: fileName.value }),
+      });
+      if (!ok) return;
+      try {
+        await writeToDisk(true);
+      } catch (e2) {
+        toast("error", (e2 as Error).message);
+      }
+      return;
+    }
     toast("error", (e as Error).message);
   } finally {
     saving.value = false;

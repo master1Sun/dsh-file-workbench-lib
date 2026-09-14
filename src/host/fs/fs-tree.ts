@@ -303,9 +303,19 @@ export async function uniquePath(destDir: string, name: string): Promise<string>
   }
 }
 
-/** stat 详情（属性对话框用）。 */
+/**
+ * stat 详情（属性对话框用）。
+ *
+ * ⚠️ 目标不存在时**必须**抛 FsError(404) 而不是把裸 ENOENT 放出去：本接口除了「属性」对话框
+ * 还被当作**存在性探测**使用（另存为在落盘前判断目标是否已存在）。裸错误会被统一错误层
+ * 归入 500，前端表现为「服务器错误」——而这只是「目标不存在」这一正常结果。
+ */
 export async function statDetail(target: string): Promise<{ name: string; path: string; isDir: boolean; size: number; mtime: number; ext: string }> {
-  const info = await stat(target);
+  const info = await stat(target).catch((error: unknown) => {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") throw new FsError("not-found", `"${target}" does not exist`, 404);
+    throw new FsError("fs-error", `cannot stat "${target}": ${messageOf(error)}`, 400);
+  });
   let size = info.size;
   if (info.isDirectory()) {
     size = await countDirSize(target);

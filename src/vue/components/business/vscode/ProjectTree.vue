@@ -1,5 +1,5 @@
 <template>
-  <div ref="treeRef" class="vs-tree" @scroll.passive="onScroll">
+  <div ref="treeRef" class="vs-tree" @scroll.passive="onScroll" @contextmenu.prevent="onBlankMenu($event)">
     <div v-if="!root" class="vs-tree-empty">{{ t("vsNoProject") }}</div>
     <template v-else>
       <div
@@ -433,13 +433,18 @@ const cmX = ref(0);
 const cmY = ref(0);
 /** 当前右键目标（打开菜单时固定）。 */
 const cmTarget = ref<TreeEntry | null>(null);
+/** 本次右键是否来自**空白处**（目标节点仍是项目根，但菜单取「空白区」那一套项）。 */
+const cmBlank = ref(false);
 /**
  * 菜单项以 computed 生成：`gitMenuFor`/`svnMenuFor` 依据**响应式**的 git/svn 状态缓存判断
  * 是否在仓库/工作副本，因此右键后异步探测回来的结果会自动补上 Git/SVN 子菜单。
  */
-const cmItems = computed<MenuItem[]>(() => (cmTarget.value ? buildMenu(cmTarget.value) : []));
+const cmItems = computed<MenuItem[]>(() =>
+  cmTarget.value ? (cmBlank.value ? buildBlankMenu(cmTarget.value) : buildMenu(cmTarget.value)) : [],
+);
 
 function openMenu(node: TreeEntry, e: MouseEvent): void {
+  cmBlank.value = false;
   cmTarget.value = node;
   cmX.value = e.clientX;
   cmY.value = e.clientY;
@@ -447,6 +452,24 @@ function openMenu(node: TreeEntry, e: MouseEvent): void {
   const dir = menuDirOf(node);
   void refreshGitStatus(dir);
   void refreshSvnStatus(dir);
+  cmOpen.value = true;
+}
+
+/**
+ * 左栏**空白处**右键：作用对象是项目根，但只呈现与具体节点无关的动作
+ * （在根上新建 / 折叠全部 / 刷新 / 终端 / 路径 / Git 与 SVN），
+ * 不出现「打开 / 重命名 / 删除」这类必须针对某一项的项——避免误操作。
+ */
+function onBlankMenu(e: MouseEvent): void {
+  const rootNode = props.root ? nodes[props.root] : undefined;
+  // 未选择项目 / 树尚未建好：不弹空菜单（左栏已有「打开文件夹」入口）。
+  if (!rootNode) return;
+  cmBlank.value = true;
+  cmTarget.value = rootNode;
+  cmX.value = e.clientX;
+  cmY.value = e.clientY;
+  void refreshGitStatus(rootNode.path);
+  void refreshSvnStatus(rootNode.path);
   cmOpen.value = true;
 }
 
@@ -483,6 +506,96 @@ function buildMenu(node: TreeEntry): MenuItem[] {
     { label: t("vsRefresh"), icon: "refresh", onClick: () => void actRefresh(node) },
   );
   return items;
+}
+
+/** 空白处菜单：把项目根当目标，仅保留「与具体条目无关」的动作。 */
+function buildBlankMenu(rootNode: TreeEntry): MenuItem[] {
+  const dir = rootNode.path;
+  return [
+    { label: t("vsNewFile"), icon: "file", onClick: () => void actNewFile(rootNode) },
+    { label: t("vsNewFolder"), icon: "folder", onClick: () => void actNewFolder(rootNode) },
+    { separator: true },
+    { label: t("vsExpandAll"), icon: "chevronDown", onClick: () => void doExpandAll() },
+    { label: t("vsCollapseAll"), icon: "chevronRight", onClick: collapseAll },
+    // Git / SVN 子菜单：与节点菜单共用同一构建器（作用目录 = 项目根）。
+    ...gitMenuFor(dir, dir, repoAct),
+    ...svnMenuFor(dir, dir, repoAct),
+    { separator: true },
+    { label: t("menuCopyRelPath"), icon: "link", onClick: () => void copyRelPath(dir) },
+    { label: t("menuCopyAbsPath"), icon: "link", onClick: () => void copyAbsPath(dir) },
+    { label: t("menuOpenTerminal"), icon: "terminal", onClick: () => openTerminalHere(rootNode) },
+    { label: t("vsAddToSession"), icon: "sparkle", onClick: () => actAddToSession(rootNode) },
+    { separator: true },
+    { label: t("vsRefresh"), icon: "refresh", onClick: () => void actRefresh(rootNode) },
+  ];
+}
+
+/**
+ * 折叠全部：所有子层收起，只留根（与 VS Code 的「折叠全部」一致）。
+ * 持久化集合收敛为「仅根展开」，并记入已播种，避免下次重建被当成首次访问又全展开。
+ */
+function collapseAll(): void {
+  const rootNode = props.root ? nodes[props.root] : undefined;
+  if (!rootNode) return;
+  for (const n of Object.values(nodes)) n.expanded = n.depth === 0;
+  vsState.expanded = [rootNode.path];
+  vsState.expandedSeeded = [...new Set([...vsState.expandedSeeded, rootNode.path])];
+  persist();
+}
+
+/**
+ * 「展开全部」的目录数预算。
+ *
+ * 目录树是**懒加载**的：每展开一个目录都要发一次 `/list`（外加 git/svn 状态探测），
+ * 因此不能像 VS Code 那样无条件全展开——大仓库会瞬间打出成百上千个请求。
+ * 这里按目录数封顶，命中上限即停止并提示用户「只看展开了多少」。
+ */
+const EXPAND_ALL_LIMIT = 120;
+
+/**
+ * 展开全部：自根递归展开，跳过 `AUTO_EXPAND_SKIP` 里的重量级目录（node_modules/.git 等）。
+ *
+ * 展开过程中**不落盘**（`markExpanded(..., false)`），全部结束后统一持久化一次，避免逐目录写状态。
+ * @returns 是否因预算用尽而提前停止。
+ */
+async function expandAll(): Promise<boolean> {
+  const rootNode = props.root ? nodes[props.root] : undefined;
+  if (!rootNode) return false;
+  let budget = EXPAND_ALL_LIMIT;
+  let truncated = false;
+
+  const walk = async (path: string): Promise<void> => {
+    if (budget <= 0) {
+      truncated = true;
+      return;
+    }
+    budget -= 1;
+    const node = nodes[path];
+    if (!node?.isDir) return;
+    node.expanded = true;
+    markExpanded(node.path, true, false);
+    if (!node.loaded) await loadChildren(node);
+    for (const childPath of [...node.children]) {
+      const child = nodes[childPath];
+      if (!child?.isDir) continue;
+      if (AUTO_EXPAND_SKIP.has(child.name.toLowerCase())) continue;
+      await walk(childPath);
+      if (budget <= 0) {
+        truncated = true;
+        return;
+      }
+    }
+  };
+
+  await walk(rootNode.path);
+  persist();
+  return truncated;
+}
+
+/** 菜单入口：展开全部并把「因预算提前停止」如实告知用户。 */
+async function doExpandAll(): Promise<void> {
+  const truncated = await expandAll();
+  if (truncated) toast("info", t("vsExpandAllLimited", { n: String(EXPAND_ALL_LIMIT) }));
 }
 
 /* ---------- Git / SVN 管理面板与命令（复用既有实现） ---------- */
@@ -573,8 +686,9 @@ function openTerminalHere(node: TreeEntry): void {
  */
 function actAddToSession(node: TreeEntry): void {
   const ok = window.__DSH_FILE_WORKBENCH__?.appendSessionReference?.(node.path, node.isDir) ?? false;
-  if (ok) toast("ok", t("vsAddToSessionOk"));
-  else toast("error", t("vsAddToSessionFail"));
+  // if (ok) toast("ok", t("vsAddToSessionOk"));
+  // else toast("error", t("vsAddToSessionFail"));
+  if(!ok) toast("error", t("vsAddToSessionFail"));
 }
 
 /* ---------- 新建 / 重命名 / 删除 / 刷新 ---------- */

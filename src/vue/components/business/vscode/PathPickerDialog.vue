@@ -1,7 +1,7 @@
 <template>
   <el-dialog
     v-model="visible"
-    :title="t('vsPickFolderTitle')"
+    :title="title"
     width="720px"
     append-to-body
     class="fsp-dialog"
@@ -34,7 +34,7 @@
       </div>
       <div v-if="createErr" class="fsp-error">{{ createErr }}</div>
 
-      <!-- 两栏主体：左 = 我的电脑 / 快捷方式；右 = 当前选中位置的文件夹列表 -->
+      <!-- 两栏主体：左 = 我的电脑 / 快捷方式；右 = 当前选中位置的子目录（另存为模式还含文件） -->
       <div class="fsp-main">
         <div class="fsp-side">
           <div class="fsp-group">
@@ -80,30 +80,50 @@
             </template>
           </div>
 
-          <!-- 目录列表：单击仅高亮选中，双击才进入（与资源管理器一致；只列子目录） -->
+          <!-- 目录 / 文件列表：单击高亮选中，双击进入目录（另存为模式下双击文件 = 直接保存） -->
           <div class="fsp-list">
             <div v-if="loading" class="fsp-loading">{{ t("vsLoading") }}</div>
             <div v-else-if="error" class="fsp-error">{{ error }}</div>
             <template v-else>
               <div
-                v-for="e in entries"
+                v-for="e in visibleEntries"
                 :key="e.path"
                 class="fsp-row"
                 :class="{ dim: e.hidden, selected: e.path === selectedPath }"
-                @click="selectRow(e.path)"
-                @dblclick="enter(e.path)"
+                @click="onRowClick(e)"
+                @dblclick="onRowDblClick(e)"
               >
-                <span class="fsp-ico ico-dir"></span>
+                <span class="fsp-ico" :class="e.isDir ? 'ico-dir' : 'ico-file'"></span>
                 <span class="fsp-name">{{ e.name }}</span>
               </div>
-              <div v-if="entries.length === 0" class="fsp-empty">{{ t("vsEmptyDir") }}</div>
+              <div v-if="visibleEntries.length === 0" class="fsp-empty">{{ t("vsEmptyDir") }}</div>
             </template>
           </div>
         </div>
       </div>
 
-      <!-- 手动路径兜底 -->
-      <div class="fsp-manual">
+      <!-- 另存为模式：文件名 + 文件类型筛选（保存对话框的核心输入） -->
+      <div v-if="isFileMode" class="fsp-namerow">
+        <span class="fsp-namelabel">{{ t("vsFileName") }}</span>
+        <input
+          ref="nameInputRef"
+          v-model="fileName"
+          class="fsp-input"
+          :placeholder="t('vsFileNamePlaceholder')"
+          @keyup.enter="confirmFile"
+        />
+        <select v-model="fileFilter" class="fsp-input fsp-select" :title="t('vsFileType')">
+          <option value="">{{ t("vsFilterAll") }}</option>
+          <option v-if="fileExt" :value="fileExt">{{ t("vsFilterExt", { ext: fileExt }) }}</option>
+        </select>
+      </div>
+      <div v-if="isFileMode" class="fsp-hintline" :class="{ warn: nameExists }">
+        <template v-if="nameExists">{{ t("vsSaveAsExists") }}</template>
+        <template v-else>{{ resolvedTarget || t("vsSaveAsHint") }}</template>
+      </div>
+
+      <!-- 手动路径兜底（仅路径选择模式；另存为模式由文件名输入框直接支持绝对路径） -->
+      <div v-if="!isFileMode" class="fsp-manual">
         <input
           v-model="manualPath"
           class="fsp-input"
@@ -118,10 +138,14 @@
 
     <template #footer>
       <div class="fsp-foot">
-        <span class="fsp-hint">{{ t("vsPickEnterHint") }}</span>
+        <span class="fsp-hint">{{ isFileMode ? t("vsSaveAsHint") : t("vsPickEnterHint") }}</span>
         <span class="fsp-foot-spacer"></span>
         <button class="fsp-btn" @click="visible = false">{{ t("vsCancel") }}</button>
+        <button v-if="isFileMode" class="fsp-btn primary" :disabled="!canConfirmFile" @click="confirmFile">
+          {{ t("vsSave") }}
+        </button>
         <button
+          v-else
           class="fsp-btn primary"
           :disabled="(!selectedPath && !currentPath) || loading"
           :title="selectedPath || currentPath || undefined"
@@ -136,19 +160,20 @@
 
 <script setup lang="ts">
 /**
- * 应用内「选择项目文件夹」弹窗（资源管理器式两栏布局）：
- *  - **左栏** = 「我的电脑」（磁盘盘符）+「快捷方式」（主目录/桌面/下载/文档/图片/音乐/视频/工作区），
- *    数据来自插件既有的 `/mycomputer` 路由（`api.myComputer`），与工作台左侧导航同一数据源；
- *  - **右栏** = 左栏选中项对应的文件夹列表，单击目录行即进入（与 dsh-prompt-library-old 一致），
- *    底部「选择此文件夹」= 选中**当前所在的目录**；
- *  - 面包屑来自宿主返回的祖先链（可逐级跳转），上级按钮 = 面包屑倒数第二项；
- *  - 支持内联新建文件夹与手填绝对路径兜底；只列出子目录。
+ * 应用内「路径选择」弹窗（资源管理器式两栏布局），两种模式共用同一套浏览界面：
  *
- * 右栏数据源优先用**宿主官方目录浏览能力** `ctx.uiWorkspace.listDirectory`
- * （经 window 桥接透传：返回 `{ path, home, crumbs, entries, truncated }`）；
- * 能力不可用时回退到插件既有 `/list` 路由（自行推导目录列表与面包屑）。
+ *  - `mode="folder"`（默认，选择项目文件夹）：**只列子目录**，确认返回当前 / 高亮目录的绝对路径。
+ *    右栏数据源优先用**宿主官方目录浏览能力** `ctx.uiWorkspace.listDirectory`
+ *    （经 window 桥接透传：返回 `{ path, home, crumbs, entries, truncated }`）；
+ *    能力不可用时回退到插件既有 `/list` 路由（自行推导目录列表与面包屑）。
+ *  - `mode="file"`（另存为）：右栏**同时列出子目录与文件**，底部提供「文件名」输入框与「文件类型」筛选，
+ *    确认后返回「当前目录 + 文件名」拼出的绝对路径；文件名框也接受手填绝对路径。
+ *    该模式**必须**列出文件（宿主 `listDirectory` 只返回子目录），因此统一走插件自身的 `/list` 路由。
+ *
+ * 两种模式共用：左栏（「我的电脑」盘符 + 「快捷方式」，数据来自 `/mycomputer`）、面包屑逐级跳转、
+ * 内联新建文件夹、上一级导航。
  */
-import { computed, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 import type { DirectoryEntry, DirectoryListing, MyComputerItem } from "../../../../shared/types";
 import * as api from "../../../composables/core/useApi";
 import { t } from "../../../composables/core/i18n";
@@ -159,8 +184,12 @@ const VS_KEY = "vscode";
 
 const props = defineProps<{
   modelValue: boolean;
-  /** 初始目录（通常传当前已选项目目录），缺省从宿主 home（或「我的电脑」）开始。 */
+  /** `folder` = 选择文件夹（默认）；`file` = 另存为（列出文件、需填文件名）。 */
+  mode?: "folder" | "file";
+  /** 初始目录（通常传当前项目目录 / 当前文件所在目录），缺省从宿主 home（或「我的电脑」）开始。 */
   initialDir?: string | null;
+  /** `file` 模式的默认文件名（通常为当前文件名）。 */
+  initialName?: string;
 }>();
 const emit = defineEmits<{
   (e: "update:modelValue", v: boolean): void;
@@ -172,24 +201,83 @@ const visible = computed<boolean>({
   set: (v) => emit("update:modelValue", v),
 });
 
-const listing = ref<DirectoryListing | null>(null);
+const isFileMode = computed<boolean>(() => props.mode === "file");
+const title = computed<string>(() => (isFileMode.value ? t("vsSaveAsTitle") : t("vsPickFolderTitle")));
+
+/** 统一后的列表行：`folder` 模式全部视为目录，`file` 模式区分目录与文件。 */
+interface PickerRow {
+  name: string;
+  path: string;
+  hidden: boolean;
+  isDir: boolean;
+}
+
+/** 统一后的目录列表（两种数据源都归一成它，模板只认这一种形状）。 */
+interface PickerListing {
+  path: string;
+  home: string;
+  crumbs: DirectoryEntry[];
+  entries: PickerRow[];
+}
+
+const listing = ref<PickerListing | null>(null);
 const loading = ref(false);
 const error = ref<string | undefined>(undefined);
 const manualPath = ref("");
 const newFolderOpen = ref(false);
 const newFolderName = ref("");
-/** 右栏当前高亮（单击选中）的目录；双击才进入。切换目录时清空。 */
+/** 右栏当前高亮（单击选中）的行；双击才进入。切换目录时清空。 */
 const selectedPath = ref<string | null>(null);
 const creating = ref(false);
 const createErr = ref<string | undefined>(undefined);
+/** 另存为模式：文件名输入与类型筛选（`""` = 全部文件，否则为 `.ext` 小写）。 */
+const fileName = ref("");
+const fileFilter = ref("");
+const nameInputRef = ref<HTMLInputElement | null>(null);
 
 /** 左栏原始项（/mycomputer）。 */
 const sideItems = ref<MyComputerItem[]>([]);
 
 const crumbs = computed<DirectoryEntry[]>(() => listing.value?.crumbs ?? []);
-const entries = computed<DirectoryEntry[]>(() => listing.value?.entries ?? []);
+const entries = computed<PickerRow[]>(() => listing.value?.entries ?? []);
 /** 当前浏览到的目录（「选择此文件夹」即选中它）。 */
-const currentPath = computed<string | null>(() => listing.value?.path ?? null);
+const currentPath = computed<string | null>(() => listing.value?.path || null);
+
+/** 另存为模式：按「文件类型」筛选后的行（目录始终保留，文件按扩展名过滤）。 */
+const visibleEntries = computed<PickerRow[]>(() => {
+  const all = entries.value;
+  if (!isFileMode.value || !fileFilter.value) return all;
+  return all.filter((e) => e.isDir || e.name.toLowerCase().endsWith(fileFilter.value));
+});
+
+/** 默认文件名带的扩展名（用于「仅当前类型」筛选项）。 */
+const fileExt = computed<string>(() => {
+  const n = props.initialName ?? "";
+  const i = n.lastIndexOf(".");
+  return i > 0 ? n.slice(i).toLowerCase() : "";
+});
+
+/** 目标名是否与当前目录下已有文件同名（仅提示将被覆盖；真正的覆盖确认由调用方负责）。 */
+const nameExists = computed<boolean>(() => {
+  const n = fileName.value.trim().toLowerCase();
+  if (!n) return false;
+  return entries.value.some((e) => !e.isDir && e.name.toLowerCase() === n);
+});
+
+/** 由「当前目录 + 文件名」拼出的最终目标路径（文件名本身是绝对路径时直接采用）。 */
+const resolvedTarget = computed<string>(() => {
+  const raw = fileName.value.trim();
+  if (!raw) return "";
+  return isAbsolutePath(raw) ? raw : joinDir(currentPath.value, raw);
+});
+
+/** 可确认：名字非空、不以分隔符结尾（结尾是目录），且能拼出绝对路径。 */
+const canConfirmFile = computed<boolean>(() => {
+  const n = fileName.value.trim();
+  if (!n || /[\\/]$/.test(n)) return false;
+  // 「我的电脑」层（盘符列表，尚未进入任何目录）没有可拼接的目录：此时只接受手填的绝对路径。
+  return isAbsolutePath(n) || !!currentPath.value;
+});
 
 /** 左栏分组：「我的电脑」= 磁盘盘符；「快捷方式」= 快速访问与工作区（回收站为虚拟项，排除）。 */
 const drives = computed<MyComputerItem[]>(() => sideItems.value.filter((i) => i.type === "drive"));
@@ -255,6 +343,18 @@ function bridge(): Window["__DSH_FILE_WORKBENCH__"] {
   return window.__DSH_FILE_WORKBENCH__;
 }
 
+/** 判断手填的路径是否为绝对路径（win32 盘符 / UNC / POSIX 根）。 */
+function isAbsolutePath(p: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("/") || p.startsWith("\\\\");
+}
+
+/** 用与目录一致的分隔符拼接「目录 + 名字」（宿主会自行归一，这里只为展示与原生观感一致）。 */
+function joinDir(dir: string | null, name: string): string {
+  if (!dir) return name;
+  const sep = dir.includes("\\") ? "\\" : "/";
+  return `${dir.replace(/[\\/]+$/, "")}${sep}${name}`;
+}
+
 /** 由绝对路径推导祖先链（仅 /list 回退时用；官方 listDirectory 自带 crumbs）。 */
 function synthCrumbs(p: string): DirectoryEntry[] {
   const norm = p.replace(/\\/g, "/").replace(/\/+$/, "");
@@ -274,18 +374,20 @@ function synthCrumbs(p: string): DirectoryEntry[] {
   return out;
 }
 
+/** 无路径时列出磁盘盘符（两种模式共用）。 */
+async function driveListing(): Promise<PickerListing> {
+  const r = await api.drives();
+  return {
+    path: "",
+    home: "",
+    crumbs: [],
+    entries: (r.drives ?? []).map((d) => ({ name: driveName(d), path: d.path, hidden: false, isDir: true })),
+  };
+}
+
 /** 回退数据源：/list 路由（任意绝对目录可列）→ 仅目录 + 推导面包屑；无路径时列出盘符。 */
-async function fallbackListing(path?: string): Promise<DirectoryListing> {
-  if (!path) {
-    const r = await api.drives();
-    return {
-      path: "",
-      home: "",
-      crumbs: [],
-      entries: (r.drives ?? []).map((d) => ({ name: driveName(d), path: d.path, hidden: false })),
-      truncated: false,
-    };
-  }
+async function fallbackListing(path?: string): Promise<PickerListing> {
+  if (!path) return await driveListing();
   const r = await api.listDir(path);
   return {
     path,
@@ -294,9 +396,21 @@ async function fallbackListing(path?: string): Promise<DirectoryListing> {
     entries: (r.entries ?? [])
       .filter((e) => e.isDir && !e.hidden)
       .sort((a, b) => a.name.localeCompare(b.name, "zh"))
-      .map((e) => ({ name: e.name, path: e.path, hidden: !!e.hidden })),
-    truncated: false,
+      .map((e) => ({ name: e.name, path: e.path, hidden: !!e.hidden, isDir: true })),
   };
+}
+
+/**
+ * 另存为模式的数据源：`/list`（含文件 + 子目录，目录优先排序）；无路径时列出磁盘盘符。
+ * 隐藏项保留但置灰——保存目标目录里可能存在点文件，直接隐藏会让人误以为文件不存在。
+ */
+async function fileListing(path?: string): Promise<PickerListing> {
+  if (!path) return await driveListing();
+  const r = await api.listDir(path);
+  const entries = (r.entries ?? [])
+    .map((e) => ({ name: e.name, path: e.path, hidden: !!e.hidden, isDir: !!e.isDir }))
+    .sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name, "zh") : a.isDir ? -1 : 1));
+  return { path, home: "", crumbs: synthCrumbs(path), entries };
 }
 
 /** 加载某目录一层（缺省用宿主 home / 「我的电脑」）。 */
@@ -305,8 +419,22 @@ async function load(path?: string): Promise<void> {
   error.value = undefined;
   selectedPath.value = null;
   try {
+    if (isFileMode.value) {
+      listing.value = await fileListing(path);
+      return;
+    }
     const br = bridge();
-    listing.value = br?.listDirectory ? await br.listDirectory(path) : await fallbackListing(path);
+    if (br?.listDirectory) {
+      const l = (await br.listDirectory(path)) as DirectoryListing;
+      listing.value = {
+        path: l.path,
+        home: l.home,
+        crumbs: l.crumbs ?? [],
+        entries: (l.entries ?? []).map((e) => ({ name: e.name, path: e.path, hidden: !!e.hidden, isDir: true })),
+      };
+      return;
+    }
+    listing.value = await fallbackListing(path);
   } catch (e) {
     listing.value = null;
     error.value = (e as Error).message;
@@ -321,15 +449,22 @@ function goto(path: string): void {
   void load(path);
 }
 
-/** 右栏单击目录行：只做高亮选中，不进入（避免误点就跳走）。 */
-function selectRow(path: string): void {
-  selectedPath.value = path;
+/** 右栏单击：高亮选中；另存为模式下点文件同时把文件名填进输入框。 */
+function onRowClick(e: PickerRow): void {
+  selectedPath.value = e.path;
+  if (isFileMode.value && !e.isDir) fileName.value = e.name;
 }
 
-/** 右栏双击目录行 → 进入该目录。 */
-function enter(path: string): void {
-  if (path === currentPath.value) return;
-  void load(path);
+/** 右栏双击：目录 → 进入；文件（另存为）→ 直接以该文件名确认保存。 */
+function onRowDblClick(e: PickerRow): void {
+  if (e.isDir) {
+    if (e.path === currentPath.value) return;
+    void load(e.path);
+    return;
+  }
+  if (!isFileMode.value) return;
+  fileName.value = e.name;
+  confirmFile();
 }
 
 /** 面包屑跳转到祖先项（末项为当前目录，点击无效）。 */
@@ -384,6 +519,15 @@ function confirmCurrent(): void {
   visible.value = false;
 }
 
+/** 另存为：把「当前目录 + 文件名」拼成绝对路径交回调用方（文件名可手填绝对路径）。 */
+function confirmFile(): void {
+  if (!canConfirmFile.value) return;
+  const target = resolvedTarget.value;
+  if (!target) return;
+  emit("confirm", target);
+  visible.value = false;
+}
+
 function confirmManual(): void {
   const p = manualPath.value.trim();
   if (!p) return;
@@ -408,13 +552,26 @@ function onOpen(): void {
   newFolderOpen.value = false;
   newFolderName.value = "";
   manualPath.value = props.initialDir ?? "";
+  fileName.value = props.initialName ?? "";
+  fileFilter.value = "";
   void loadSide();
   void load(props.initialDir || undefined);
+  if (isFileMode.value) {
+    // 文件名框预聚焦，且只选中主名（不含扩展名），方便直接改名——与系统保存对话框一致。
+    void nextTick(() => {
+      const el = nameInputRef.value;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(0, fileExt.value ? el.value.length - fileExt.value.length : el.value.length);
+    });
+  }
 }
 
 function onClosed(): void {
   listing.value = null;
   manualPath.value = "";
+  fileName.value = "";
+  fileFilter.value = "";
 }
 </script>
 
@@ -588,6 +745,12 @@ function onClosed(): void {
   mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='black' d='M1.5 3.5h5l1.5 1.5h6.5v8h-13z'/></svg>");
   color: #dcb67a;
 }
+/* 文件行图标（另存为模式）：文档轮廓 + 两条内容线 */
+.ico-file {
+  -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='black' d='M4 1.5h5L12.5 5v9.5h-8.5z'/><path fill='black' d='M4.5 7.5h7v1h-7zM4.5 10h7v1h-7z'/></svg>");
+  mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='black' d='M4 1.5h5L12.5 5v9.5h-8.5z'/><path fill='black' d='M4.5 7.5h7v1h-7zM4.5 10h7v1h-7z'/></svg>");
+  color: #8b949e;
+}
 .ico-folder {
   -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='black' d='M1.5 3.5h5l1.5 1.5h6.5v8h-13z'/></svg>");
   mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='black' d='M1.5 3.5h5l1.5 1.5h6.5v8h-13z'/></svg>");
@@ -642,6 +805,35 @@ function onClosed(): void {
 }
 .fsp-error {
   color: #f85149;
+}
+/* 另存为：文件名 + 类型筛选行 */
+.fsp-namerow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fsp-namelabel {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--dsh-fg-weak, #8b949e);
+}
+.fsp-select {
+  flex: 0 0 130px;
+  height: 26px;
+}
+.fsp-hintline {
+  font-size: 11px;
+  color: var(--dsh-fg-weak, #8b949e);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+/* 同名冲突提示：琥珀色，并改回从左到右（避免路径被 rtl 重排打乱可读性） */
+.fsp-hintline.warn {
+  color: #d29922;
+  direction: ltr;
 }
 .fsp-manual {
   display: flex;

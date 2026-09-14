@@ -125,7 +125,7 @@ export async function createEntry(name: string, isDir: boolean): Promise<void> {
   if (!parent) throw new Error(translate("openFolderFirst"));
   const target = `${parent.replace(/[\\/]+$/, "")}/${name}`;
   if (isDir) await api.mkdir(target, wb.key);
-  else await api.saveFile(target, "", wb.key);
+  else await api.saveFile(target, "", { key: wb.key });
   toast("ok", isDir ? translate("dirCreated") : translate("fileCreated"));
 }
 

@@ -20,6 +20,7 @@
           >
             <span class="fw-cm-ico"><icon v-if="hasIcon(item.icon ?? '')" :name="item.icon ?? ''" :size="14" /><span v-else>{{ item.icon ?? "" }}</span></span>
             <span class="fw-cm-label">{{ item.label }}</span>
+            <span v-if="item.hint" class="fw-cm-hint">{{ item.hint }}</span>
             <span class="fw-cm-check">{{ item.checked ? "●" : "" }}</span>
             <span class="fw-cm-arrow" v-if="item.children?.length"><icon name="chevronRight" :size="10" /></span>
             <!-- 子菜单（查看/排序方式/新建/Git 等）：内嵌在父项内做绝对定位 -->
@@ -211,7 +212,23 @@ onBeforeUnmount(() => {
   text-align: center;
   font-size: calc(13px * var(--dsh-fs-scale, 1));
 }
-.fw-cm-label { flex: 1; }
+/* 主标签：占满剩余空间，过长时省略（如「最近项目」的完整路径） */
+.fw-cm-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 右侧提示（快捷键 / 次要信息）：右对齐、弱化，仅作展示（不做按键绑定） */
+.fw-cm-hint {
+  margin-left: 16px;
+  max-width: 52%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--dsh-fg-weak, #8b949e);
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
+  white-space: nowrap;
+}
 .fw-cm-check { width: 10px; text-align: center; color: var(--dsh-accent, #58a6ff); font-size: calc(8px * var(--dsh-fs-scale, 1)); }
 .fw-cm-arrow { font-size: calc(8px * var(--dsh-fs-scale, 1)); opacity: 0.6; }
 .fw-cm-item.hasChild { position: relative; }

@@ -12,7 +12,10 @@ import type {
   ApiResponse,
   BrowseListing,
   DriveInfo,
+  EolStyle,
   FileDetail,
+  FileTextRead,
+  FileTextSaved,
   FsListing,
   GitAction,
   GitDirStatus,
@@ -25,6 +28,8 @@ import type {
   SearchHit,
   TaskArchiveMap,
   TaskLogRecord,
+  TextEncoding,
+  TextReadOptions,
 } from "../../../shared/types";
 import { t } from "./i18n";
 
@@ -71,6 +76,27 @@ export class AbortRequestError extends Error {
     this.name = "AbortRequestError";
   }
 }
+
+/**
+ * 携带 HTTP 状态与业务错误码的 API 错误。
+ * 调用方按 `code` 分支处理（如 `mtime-conflict` 弹确认后带 force 重试）。
+ */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+/**
+ * 由**调用方**分支处理的错误码：这类错误不自动弹 toast，避免与调用方的
+ * 确认弹窗/自定义提示重复。新增码时必须同时在前端补齐对应处理，否则用户会「点了没反应」。
+ */
+const CALLER_HANDLED_CODES = new Set(["mtime-conflict"]);
 
 /* ---------- 统一请求封装：错误码映射 / 可取消 / 静默 ---------- */
 
@@ -133,13 +159,16 @@ async function request<T>(method: string, url: string, body?: unknown, opts?: Re
     const payload = (await res.json().catch(() => ({ ok: false, error: "bad response" }))) as ApiResponse<T>;
     if (!payload.ok) {
       const err = payload.error || `HTTP ${res.status}`;
-      // 工作区外操作被禁止的前端提示（服务端以 403 + “outside root/workspace” 标识）。
-      if (res.status === 403 && /outside (root|workspace)/i.test(err)) {
+      const callerHandled = !!payload.code && CALLER_HANDLED_CODES.has(payload.code);
+      if (callerHandled) {
+        // 交由调用方分支处理（例如 mtime 冲突 → 确认覆盖）：此处静默，不重复提示。
+      } else if (res.status === 403 && /outside (root|workspace)/i.test(err)) {
+        // 工作区外操作被禁止的前端提示（服务端以 403 + “outside root/workspace” 标识）。
         if (!opts?.silent) ElMessage.error(t("workspaceOutside"));
       } else if (!opts?.silent) {
         ElMessage.error(mapError(res.status, err));
       }
-      throw new Error(err);
+      throw new ApiError(err, res.status, payload.code);
     }
     return payload.data as T;
   } finally {
@@ -174,9 +203,41 @@ export function fetchParent(path: string, key?: string): Promise<{ root: string;
   return request("GET", `/parent${qs({ key, path })}`);
 }
 
-/** 保存文件。 */
-export function saveFile(path: string, content: string, key?: string): Promise<{ path: string }> {
-  return request("POST", "/save", { key, path, content });
+/** 保存文件（编码 / 行尾 / BOM 按原样还原；带 expectedMtime 时做外部改动冲突检测）。 */
+export interface SaveTextOptions {
+  key?: string;
+  encoding?: TextEncoding;
+  hasBom?: boolean;
+  eol?: EolStyle;
+  /** 读取时拿到的 mtime：磁盘已变动时服务端返回 412 + code=mtime-conflict。 */
+  expectedMtime?: number;
+  /** true 时跳过冲突检测，强制覆盖。 */
+  force?: boolean;
+}
+
+export function saveFile(path: string, content: string, opts: SaveTextOptions = {}): Promise<FileTextSaved> {
+  return request("POST", "/save", {
+    key: opts.key,
+    path,
+    content,
+    encoding: opts.encoding,
+    hasBom: opts.hasBom,
+    eol: opts.eol,
+    expectedMtime: opts.expectedMtime,
+    force: opts.force,
+  });
+}
+
+/** 批量查询文件落盘时间（编辑器外部改动检测轮询；silent 以免网络抖动时反复弹错）。 */
+export function mtimes(
+  paths: string[],
+): Promise<{ items: Record<string, { mtimeMs: number; size: number } | null> }> {
+  return request("POST", "/mtimes", { paths }, { silent: true });
+}
+
+/** 项目文件索引（「快速打开」用）：返回相对路径列表（'/' 分隔）+ 是否被预算截断。 */
+export function projectFiles(path: string, key?: string): Promise<{ files: string[]; truncated: boolean }> {
+  return request("GET", `/files${qs({ key, path })}`);
 }
 
 /** 搜索（可指定任意绝对目录作范围，path 缺省用工作区根）。caseSensitive/regex 控制匹配模式。 */
@@ -404,9 +465,41 @@ export function detail(path: string): Promise<FileDetail> {
   return request("GET", `/detail${qs({ path })}`);
 }
 
-/** 读取文本文件内容（编辑 .txt 用；大文件由后端以 413 拒绝）。 */
-export function readFile(path: string): Promise<{ content: string; size: number }> {
-  return request("GET", `/read${qs({ path })}`);
+/**
+ * 目标是否存在（**silent** 存在性探测）。
+ *
+ * 与 `detail()` 的区别在于语义：只有当服务端**明确**回答「不存在」时才返回 false，
+ * 且这种情况属于预期结果（另存为新文件），不能弹错误提示。
+ *  - 404 → `false`，静默；
+ *  - 其它失败（网络中断 / 500 / 被取消）→ 提示后**抛出**，绝不能退化成 `false`：
+ *    调用方把「探测失败」当成「不存在」就会跳过覆盖确认，直接写坏同名文件。
+ */
+export async function exists(path: string): Promise<boolean> {
+  try {
+    await request<FileDetail>("GET", `/detail${qs({ path })}`, undefined, { silent: true });
+    return true;
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return false;
+    if (!isAbortError(e)) {
+      ElMessage.error(e instanceof ApiError ? mapError(e.status, e.message) : t("errNetwork"));
+    }
+    throw e;
+  }
+}
+
+/**
+ * 读取文本文件内容（编辑用；大文件由后端以 413 拒绝）。
+ * 返回内容 + 编码 / 行尾 / BOM / mtime 元数据；编码可显式覆盖以支持状态栏手动切换。
+ */
+export function readFile(path: string, opts: TextReadOptions = {}): Promise<FileTextRead> {
+  return request(
+    "GET",
+    `/read${qs({
+      path,
+      encoding: opts.encoding,
+      bom: opts.hasBom === undefined ? undefined : opts.hasBom ? "1" : "0",
+    })}`,
+  );
 }
 
 /** 压缩单文件或目录为 .zip（to 缺省放源同目录）。 */

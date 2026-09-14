@@ -8,6 +8,8 @@
  *    大小上限 CONTENT_MAX_BYTES，并按空字节判定跳过二进制文件。
  * 命中路径相对搜索根、'系统分隔符' 归一为 '/'。跳过噪声目录（.git / node_modules / 构建缓存
  * 等），对称链接目录不下钻（循环安全）。预算用尽即提前截断，绝不让一个巨大的家目录拖垮 host。
+ *
+ * 另提供 `listProjectFiles`：同一套遍历约束下的**文件路径索引**，供前端「快速打开」使用。
  */
 import { join, relative, sep } from "node:path";
 import { opendir, stat } from "node:fs/promises";
@@ -325,4 +327,67 @@ export async function searchFiles(
     snippets,
     truncated,
   };
+}
+
+/* ---------- 项目文件索引（「快速打开」用） ---------- */
+
+export interface FileIndexOutcome {
+  /** 文件相对路径列表（'/' 分隔，已按字典序排序）。 */
+  files: string[];
+  /** 超出行数 / 访问数预算而提前停止时为 true。 */
+  truncated: boolean;
+}
+
+/** 索引文件数上限：索引只服务于「按名字找文件」，不需要把超大仓库全量塞给前端。 */
+const INDEX_MAX_FILES = 8000;
+/** 索引遍历的目录项总数预算。 */
+const INDEX_MAX_VISITED = 120_000;
+
+/**
+ * 列出 `root` 下全部**文件**的相对路径（'/' 分隔），供前端「快速打开」做本地模糊匹配。
+ *
+ * 与 `searchFiles` 同一套遍历约束：跳过噪声目录（复用 `SEARCH_SKIP_DIRS`）、
+ * 遇到符号链接一律不入索引（既防循环，也避免同一文件重复出现）、预算用尽即截断。
+ * 只做一次遍历，前端拿到索引后按需在本地过滤，不按每次按键回打 host。
+ */
+export async function listProjectFiles(
+  root: string,
+  opts: { maxFiles?: number; maxVisited?: number } = {},
+): Promise<FileIndexOutcome> {
+  const maxFiles = opts.maxFiles ?? INDEX_MAX_FILES;
+  const maxVisited = opts.maxVisited ?? INDEX_MAX_VISITED;
+  const files: string[] = [];
+  let visited = 0;
+  let truncated = false;
+
+  const walk = async (dir: string): Promise<void> => {
+    if (truncated) return;
+    const level = await opendir(dir).catch(() => undefined);
+    if (level === undefined) return; // 无权限目录跳过，不整树失败
+    for await (const dirent of level) {
+      visited += 1;
+      if (visited > maxVisited) {
+        truncated = true;
+        return;
+      }
+      if (dirent.isSymbolicLink()) continue; // 链接不入索引：防循环、防重复
+      if (dirent.isFile()) {
+        files.push(normalize(join(relative(root, dir), dirent.name)));
+        if (files.length >= maxFiles) {
+          truncated = true;
+          return;
+        }
+        continue;
+      }
+      if (dirent.isDirectory()) {
+        if (SEARCH_SKIP_DIRS.has(dirent.name.toLowerCase())) continue;
+        await walk(join(dir, dirent.name));
+        if (truncated) return;
+      }
+    }
+  };
+
+  await walk(root);
+  files.sort();
+  return { files, truncated };
 }
