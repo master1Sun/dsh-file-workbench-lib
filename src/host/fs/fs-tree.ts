@@ -104,7 +104,7 @@ export async function listMyComputer(workspaceRoot?: string): Promise<MyComputer
 /** 统一的业务错误：带 wire code 与 HTTP 状态。 */
 export class FsError extends Error {
   constructor(
-    readonly code: "fs-error" | "forbidden" | "bad-request" | "not-found" | "too-large",
+    readonly code: "fs-error" | "forbidden" | "bad-request" | "not-found" | "too-large" | "not-implemented",
     message: string,
     readonly status: number,
   ) {

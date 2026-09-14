@@ -6,7 +6,7 @@
  * 每次调用均基于用户提供的绝对路径向上查找仓库根（存在 .git 即视为仓库），
  * 再在该仓库上执行对应命令；非仓库目录一律返回 { inRepo:false }，写操作则抛 403。
  */
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { stat, readFile, appendFile } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
@@ -318,6 +318,118 @@ async function gitSync(dir: string, action: "fetch" | "pull" | "push"): Promise<
   return { ok: r.code === 0, repo: root, output: r.stderr || r.stdout || `${action} 完成` };
 }
 
+/**
+ * 解析仓库的 GitHub 上下文：origin URL → owner/repo slug + 凭据管理器令牌。
+ * 非 GitHub 远程 / 本机无凭据时返回 { skipped }（前端提示但不视为失败）。
+ * 令牌仅在内存中使用，不落盘、不写入日志。
+ */
+async function ghCtx(root: string): Promise<{ slug: string; token: string } | { skipped: string }> {
+  const remote = await gitRun(["remote", "get-url", "origin"], root);
+  if (remote.code !== 0) return { skipped: "无法读取 origin 远程地址" };
+  // https://github.com/owner/repo(.git) 与 git@github.com:owner/repo(.git) 两种形态
+  const m = String(remote.stdout).trim().match(/github\.com[:/](.+?)\/(.+?)(?:\.git)?\/?$/i);
+  if (!m) return { skipped: "origin 不是 GitHub 仓库" };
+  const credentialFill = (): Promise<string> =>
+    new Promise((resolveP) => {
+      const child = spawn("git", ["credential", "fill"], { cwd: root, windowsHide: true });
+      let out = "";
+      child.stdout.on("data", (d: Buffer) => (out += d.toString("utf8")));
+      child.on("error", () => resolveP(""));
+      child.on("close", () => resolveP(out));
+      child.stdin.write("protocol=https\nhost=github.com\n\n");
+      child.stdin.end();
+    });
+  const credOut = await credentialFill();
+  const token = credOut
+    .split(/\r?\n/)
+    .find((l) => l.startsWith("password="))
+    ?.slice(9);
+  if (!token) return { skipped: "本机没有 GitHub 凭据（请先用 https 方式推送一次）" };
+  return { slug: `${m[1]}/${m[2]}`, token };
+}
+
+/** GitHub API 请求头（凭据管理器令牌）。 */
+function ghHeaders(token: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "User-Agent": "dsh-file-workbench",
+  };
+}
+
+/**
+ * GitHub Release 创建（幂等）：release 已存在 → 直接返回其 URL 不重复创建；
+ * origin 非 GitHub / 本机无凭据 / API 失败 → 返回 skipped（前端提示但不视为失败）。
+ */
+async function gitGhRelease(
+  dir: string,
+  tag: string,
+  title: string,
+  body: string,
+): Promise<{ created: boolean; url: string; skipped?: string }> {
+  const root = await repoOf(dir);
+  const ctx = await ghCtx(root);
+  if ("skipped" in ctx) return { created: false, url: "", skipped: ctx.skipped };
+
+  const base = `https://api.github.com/repos/${ctx.slug}`;
+  try {
+    // 已有同名 release → 幂等返回其地址
+    const existing = await fetch(`${base}/releases/tags/${encodeURIComponent(tag)}`, { headers: ghHeaders(ctx.token) });
+    if (existing.ok) {
+      const rel = (await existing.json()) as { html_url?: string };
+      return { created: false, url: rel.html_url ?? "", skipped: "GitHub Release 已存在" };
+    }
+    const created = await fetch(`${base}/releases`, {
+      method: "POST",
+      headers: { ...ghHeaders(ctx.token), "Content-Type": "application/json" },
+      body: JSON.stringify({ tag_name: tag, name: title, body }),
+    });
+    if (!created.ok) {
+      const err = ((await created.json()) as { message?: string }).message ?? String(created.status);
+      return { created: false, url: "", skipped: `GitHub API: ${err}` };
+    }
+    const rel = (await created.json()) as { html_url?: string };
+    return { created: true, url: rel.html_url ?? "" };
+  } catch (e) {
+    return { created: false, url: "", skipped: `GitHub API 不可达: ${(e as Error).message}` };
+  }
+}
+
+/** GitHub Releases 列表（最近 20 条）：供 Git 面板「版本」tab 展示。 */
+async function gitGhListReleases(
+  dir: string,
+): Promise<{ list: Array<{ tag: string; name: string; url: string; date: string }>; skipped?: string }> {
+  const root = await repoOf(dir);
+  const ctx = await ghCtx(root);
+  if ("skipped" in ctx) return { list: [], skipped: ctx.skipped };
+  try {
+    const res = await fetch(`https://api.github.com/repos/${ctx.slug}/releases?per_page=20`, {
+      headers: ghHeaders(ctx.token),
+    });
+    if (!res.ok) {
+      const err = ((await res.json()) as { message?: string }).message ?? String(res.status);
+      return { list: [], skipped: `GitHub API: ${err}` };
+    }
+    const raw = (await res.json()) as Array<{
+      tag_name?: string;
+      name?: string;
+      html_url?: string;
+      published_at?: string;
+      created_at?: string;
+    }>;
+    return {
+      list: raw.map((r) => ({
+        tag: r.tag_name ?? "",
+        name: r.name || r.tag_name || "",
+        url: r.html_url ?? "",
+        date: (r.published_at ?? r.created_at ?? "").slice(0, 10),
+      })),
+    };
+  } catch (e) {
+    return { list: [], skipped: `GitHub API 不可达: ${(e as Error).message}` };
+  }
+}
+
 /** 资源路由：git 只读状态 / diff 不做写保护；add/commit/discard 拒绝受保护区域。 */
 export const gitResource: RouteMatcher = async (req, res, seg, q, method, host) => {
   void host;
@@ -366,9 +478,16 @@ export const gitResource: RouteMatcher = async (req, res, seg, q, method, host) 
     return (json(res, 200, { ok: true, data }), true);
   }
 
+  // —— GitHub Releases 列表（Git 面板「版本」tab） ——
+  if (op === "gh-releases" && method === "GET" && seg.length === 2) {
+    const dir = requireAbsolute(q.get("path")?.trim() ?? "");
+    const data = await gitGhListReleases(dir);
+    return (json(res, 200, { ok: true, data }), true);
+  }
+
   // —— 写操作：解析请求体 ——
   if (method === "POST" && seg.length === 2) {
-    const body = (await readBody(req)) as { path?: string; message?: string; action?: string; name?: string; args?: unknown[] } | null;
+    const body = (await readBody(req)) as { path?: string; message?: string; action?: string; name?: string; tag?: string; body?: string; args?: unknown[] } | null;
     const path = requireAbsolute(body?.path?.trim() ?? "");
     if (op === "add") {
       const data = await gitAdd(path);
@@ -398,6 +517,14 @@ export const gitResource: RouteMatcher = async (req, res, seg, q, method, host) 
     }
     if (op === "sync") {
       const data = await gitSync(path, body?.action === "fetch" || body?.action === "push" ? body.action : "pull");
+      return (json(res, 200, { ok: true, data }), true);
+    }
+    if (op === "gh-release") {
+      const releaseTag = (body?.tag as string)?.trim() ?? "";
+      if (!releaseTag) return (json(res, 400, { ok: false, error: "tag required" }), true);
+      const title = (body?.name as string)?.trim() || releaseTag;
+      const text = (body?.body as string)?.trim() ?? "";
+      const data = await gitGhRelease(path, releaseTag, title, text);
       return (json(res, 200, { ok: true, data }), true);
     }
     if (op === "run") {

@@ -45,7 +45,7 @@
           <el-button size="small" :loading="busy.sync === 'fetch'" @click="sync('fetch')">Fetch</el-button>
           <el-button size="small" :loading="busy.sync === 'pull'" @click="sync('pull')">Pull</el-button>
           <el-button size="small" :loading="busy.sync === 'push'" @click="sync('push')">Push</el-button>
-          <el-button size="small" :loading="busy.refresh" @click="reload()"><icon name="refresh" :size="13" /></el-button>
+          <el-button size="small" :disabled="busy.refresh" :title="t('gitRefresh')" @click="reload()"><span class="fw-gp-refresh-ic" :class="{ spin: busy.refresh }"><icon name="refresh" :size="13" /></span></el-button>
           <el-button size="small" :title="t('gitConfig')" @click="openConfig"><icon name="gear" :size="13" /></el-button>
         </span>
       </div>
@@ -291,51 +291,99 @@
 
           <!-- ══ 标签 ══ -->
           <div v-else-if="sec === 'tags'" class="fw-gp-one">
-            <div class="fw-gp-form">
-              <el-input v-model="newTag" size="small" class="fw-gp-in-name" :placeholder="t('gitTagNamePlaceholder')" />
-              <el-input v-model="tagTarget" size="small" class="fw-gp-in-target" :placeholder="t('gitTagTargetPlaceholder')" />
-              <el-input v-model="tagMsg" size="small" class="fw-gp-in-msg" :placeholder="t('gitTagMessagePlaceholder')" />
-              <el-button size="small" type="primary" :disabled="!newTag.trim()" @click="createTag">{{ t("gitTagCreate") }}</el-button>
+            <!-- 区块内 tab：标签信息 / 版本信息 -->
+            <div class="fw-gp-sectabs">
+              <button class="fw-gp-sectab" :class="{ active: tagTab === 'tags' }" @click="showTagTab('tags')">
+                {{ t("gitTabTags") }}<span v-if="tags.length" class="fw-gp-sectab-n">{{ tags.length }}</span>
+              </button>
+              <button class="fw-gp-sectab" :class="{ active: tagTab === 'releases' }" @click="showTagTab('releases')">
+                {{ t("gitTabReleases") }}<span v-if="releases.length" class="fw-gp-sectab-n">{{ releases.length }}</span>
+              </button>
             </div>
-            <div class="fw-gp-form" style="margin: 0 0 6px; border-bottom: 1px solid var(--dsh-border, #30363d);">
-              <el-button
-                size="small"
-                :loading="busy.op"
-                :disabled="!hasRemote"
-                :title="hasRemote ? '' : t('gitTagNoRemote')"
-                @click="fetchTags"
-              >{{ t("gitTagFetchAll") }}</el-button>
-              <el-button
-                size="small"
-                type="primary"
-                :disabled="!hasRemote"
-                :title="hasRemote ? '' : t('gitTagNoRemote')"
-                @click="openRelease"
-              >{{ t("gitReleaseBtn") }}</el-button>
-              <span v-if="!hasRemote" class="fw-gp-subject">{{ t("gitTagNoRemote") }}</span>
-            </div>
-            <div v-if="!tags.length" class="fw-gp-empty">{{ t("gitTagEmpty") }}</div>
-            <div v-for="tg in tags" :key="tg.name" class="fw-gp-row" :title="tagTip(tg)">
-              <span class="fw-gp-st st-tag"><icon name="tag" :size="12" /></span>
-              <span class="fw-gp-path">
-                {{ tg.name }}
-                <span v-if="tg.deref" class="fw-gp-badge">{{ t("gitTagAnnotated") }}</span>
-                <span v-if="tg.remoteOnly" class="fw-gp-badge fw-gp-badge-remote">{{ t("gitTagRemoteOnly") }}</span>
-              </span>
-              <span v-if="tg.date" class="fw-gp-date">{{ tg.date }}</span>
-              <span v-if="tg.subject" class="fw-gp-subject" :title="tg.subject">{{ tg.subject }}</span>
-              <span class="fw-gp-hash">{{ tg.hash }}</span>
-              <span class="fw-gp-rowacts">
-                <el-button text size="small" @click="viewTag(tg)">{{ t("gitView") }}</el-button>
-                <template v-if="tg.remoteOnly">
-                  <el-button text size="small" @click="pullRemoteTag(tg)">{{ t("gitTagPull") }}</el-button>
-                </template>
-                <template v-else>
-                  <el-button text size="small" @click="pushTag(tg.name)">{{ t("gitPushBranch") }}</el-button>
-                  <el-button text size="small" @click="deleteTag(tg.name)">{{ t("gitDelete") }}</el-button>
-                </template>
-              </span>
-            </div>
+
+            <!-- ── 标签 tab：独立创建标签 + 标签列表 ── -->
+            <template v-if="tagTab === 'tags'">
+              <div class="fw-gp-form">
+                <el-input v-model="newTag" size="small" class="fw-gp-in-name" :placeholder="t('gitTagNamePlaceholder')" />
+                <el-input v-model="tagTarget" size="small" class="fw-gp-in-target" :placeholder="t('gitTagTargetPlaceholder')" />
+                <el-input v-model="tagMsg" size="small" class="fw-gp-in-msg" :placeholder="t('gitTagMessagePlaceholder')" />
+                <el-button size="small" type="primary" :disabled="!newTag.trim()" @click="createTag">{{ t("gitTagCreate") }}</el-button>
+                <el-button
+                  size="small"
+                  :loading="busy.op"
+                  :disabled="!hasRemote"
+                  :title="hasRemote ? '' : t('gitTagNoRemote')"
+                  @click="fetchTags"
+                >{{ t("gitTagFetchAll") }}</el-button>
+              </div>
+              <div v-if="!tags.length" class="fw-gp-empty">{{ t("gitTagEmpty") }}</div>
+              <div v-for="tg in tags" :key="tg.name" class="fw-gp-row" :title="tagTip(tg)">
+                <span class="fw-gp-st st-tag"><icon name="tag" :size="12" /></span>
+                <span class="fw-gp-path">
+                  {{ tg.name }}
+                  <span v-if="tg.deref" class="fw-gp-badge">{{ t("gitTagAnnotated") }}</span>
+                  <span v-if="tg.remoteOnly" class="fw-gp-badge fw-gp-badge-remote">{{ t("gitTagRemoteOnly") }}</span>
+                </span>
+                <span v-if="tg.date" class="fw-gp-date">{{ tg.date }}</span>
+                <span v-if="tg.subject" class="fw-gp-subject" :title="tg.subject">{{ tg.subject }}</span>
+                <span class="fw-gp-hash">{{ tg.hash }}</span>
+                <span class="fw-gp-rowacts">
+                  <el-button text size="small" @click="viewTag(tg)">{{ t("gitView") }}</el-button>
+                  <template v-if="tg.remoteOnly">
+                    <el-button text size="small" @click="pullRemoteTag(tg)">{{ t("gitTagPull") }}</el-button>
+                  </template>
+                  <template v-else>
+                    <el-button text size="small" @click="pushTag(tg.name)">{{ t("gitPushBranch") }}</el-button>
+                    <el-button text size="small" @click="deleteTag(tg.name)">{{ t("gitDelete") }}</el-button>
+                  </template>
+                </span>
+              </div>
+            </template>
+
+            <!-- ── 版本 tab：发布新版本（标签+版本一起）/ 为现有标签单独建 Release + 版本列表 ── -->
+            <template v-else>
+              <div class="fw-gp-form">
+                <el-button
+                  size="small"
+                  type="primary"
+                  :disabled="!hasRemote"
+                  :title="hasRemote ? '' : t('gitTagNoRemote')"
+                  @click="openRelease"
+                >{{ t("gitReleaseBtn") }}</el-button>
+                <el-button size="small" :loading="releasesLoading" @click="loadReleases">{{ t("gitRefresh") }}</el-button>
+                <span v-if="!hasRemote" class="fw-gp-subject">{{ t("gitTagNoRemote") }}</span>
+              </div>
+              <!-- 独立创建：只为已有标签补建 Release（不新建标签、不推送） -->
+              <div class="fw-gp-form">
+                <el-select v-model="relTag" size="small" class="fw-gp-in-name" :placeholder="t('gitReleaseChooseTag')" filterable>
+                  <el-option v-for="tg in tags" :key="tg.name" :label="tg.name" :value="tg.name" />
+                </el-select>
+                <el-input
+                  v-model="relNotes"
+                  size="small"
+                  type="textarea"
+                  :rows="2"
+                  resize="none"
+                  :placeholder="t('gitReleaseNotesPlaceholder')"
+                />
+                <el-button size="small" :disabled="!relTag.trim() || !relNotes.trim()" @click="createReleaseOnly">
+                  {{ t("gitReleaseCreateForTag") }}
+                </el-button>
+              </div>
+              <div v-if="releasesSkipped" class="fw-gp-empty">{{ t("gitReleaseLoadSkip", { reason: releasesSkipped }) }}</div>
+              <div v-else-if="!releases.length && !releasesLoading" class="fw-gp-empty">{{ t("gitReleaseEmpty") }}</div>
+              <div v-for="r in releases" :key="r.url || r.tag" class="fw-gp-row" :title="r.name">
+                <span class="fw-gp-st st-tag"><icon name="tag" :size="12" /></span>
+                <span class="fw-gp-path">
+                  {{ r.name || r.tag }}
+                  <span class="fw-gp-badge">{{ r.tag }}</span>
+                </span>
+                <span v-if="r.date" class="fw-gp-date">{{ r.date }}</span>
+                <span class="fw-gp-rowacts">
+                  <el-button text size="small" @click="openReleaseUrl(r.url)">{{ t("gitReleaseOpen") }}</el-button>
+                </span>
+              </div>
+            </template>
           </div>
 
           <!-- ══ 远程 ══ -->
@@ -512,7 +560,7 @@
           <div class="fw-gp-crow"><span class="k">{{ t("gitCommitHash") }}</span><span class="v mono">{{ commitInfo.hash }}</span></div>
           <div class="fw-gp-crow"><span class="k">{{ t("gitCommitAuthor") }}</span><span class="v">{{ commitInfo.author }} &lt;{{ commitInfo.email }}&gt;</span></div>
           <div class="fw-gp-crow"><span class="k">{{ t("gitCommitDate") }}</span><span class="v">{{ absTime(commitInfo.ts) }} · {{ commitInfo.date }}</span></div>
-          <pre class="fw-gp-cbody">{{ commitInfo.body || commitInfo.subject }}</pre>
+          <pre class="fw-gp-cbody fw-gp-cbody-clamp">{{ commitInfo.body || commitInfo.subject }}</pre>
         </div>
         <div class="fw-gp-cv-body">
           <div class="fw-gp-cv-files">
@@ -693,6 +741,20 @@ const releaseOpen = ref(false);
 const releaseName = ref("");
 const releaseTarget = ref("");
 const releaseMsg = ref("");
+/** 标签区块内部 tab：tags=标签信息，releases=版本（GitHub Release）信息。 */
+const tagTab = ref<"tags" | "releases">("tags");
+interface GhReleaseItem {
+  tag: string;
+  name: string;
+  url: string;
+  date: string;
+}
+const releases = ref<GhReleaseItem[]>([]);
+const releasesSkipped = ref("");
+const releasesLoading = ref(false);
+/** 独立创建 Release：选中的已有标签 + 版本说明。 */
+const relTag = ref("");
+const relNotes = ref("");
 const newRemoteName = ref("");
 const newRemoteUrl = ref("");
 interface StashItem {
@@ -953,16 +1015,17 @@ async function loadRemoteTags(): Promise<void> {
       const m = /^([0-9a-f]+)\t(refs\/tags\/(.+))$/.exec(line.trim());
       if (!m) continue;
       const hash = m[1];
-      const full = m[2];
-      if (full.endsWith("^{}")) {
-        const nm = full.slice(0, -3);
+      // m[3] 已是去掉 refs/tags/ 前缀的标签名（附注标签解引用行带 ^{} 后缀）
+      const name = m[3];
+      if (name.endsWith("^{}")) {
+        const nm = name.slice(0, -3);
         const e = byName.get(nm);
         if (e) e.deref = hash;
         else byName.set(nm, { hash, deref: hash });
       } else {
-        const e = byName.get(full);
+        const e = byName.get(name);
         if (e) e.hash = hash;
-        else byName.set(full, { hash });
+        else byName.set(name, { hash });
       }
     }
     for (const [name, e] of byName) {
@@ -1356,7 +1419,68 @@ function openRelease(): void {
   releaseOpen.value = true;
 }
 
-/** 发布远程 release：创建附注标签（强制需要说明）+ 推送到 origin。 */
+/** 切换标签区块内部 tab；进「版本」tab 时懒加载 GitHub Releases。 */
+function showTagTab(t: "tags" | "releases"): void {
+  tagTab.value = t;
+  if (t === "releases") void loadReleases();
+}
+
+/** 拉取 GitHub Releases 列表（最近 20 条；非 GitHub / 无凭据时展示 skipped 原因）。 */
+async function loadReleases(): Promise<void> {
+  const repo = panel.value?.repo;
+  if (!repo || releasesLoading.value) return;
+  releasesLoading.value = true;
+  try {
+    const r = await api.gitGhReleases(repo);
+    releases.value = r.list;
+    releasesSkipped.value = r.skipped ?? "";
+  } catch (e) {
+    releasesSkipped.value = (e as Error).message;
+  } finally {
+    releasesLoading.value = false;
+  }
+}
+
+/** 独立创建 Release：为已有标签补建版本（不新建标签、不推送）。 */
+async function createReleaseOnly(): Promise<void> {
+  const tag = relTag.value.trim();
+  const notes = relNotes.value.trim();
+  if (!tag || !notes) {
+    toast("error", t("gitReleaseRequireMsg"));
+    return;
+  }
+  const repo = panel.value?.repo;
+  if (!repo) {
+    toast("error", t("gitNotRepo"));
+    return;
+  }
+  busy.op = true;
+  try {
+    const r = await api.gitGhRelease(repo, tag, tag, notes);
+    if (r.url) {
+      toast("ok", t("gitReleaseCreated", { url: r.url }));
+      relNotes.value = "";
+      await loadReleases();
+    } else {
+      toast("info", t("gitReleaseGhSkip", { reason: r.skipped ?? "" }));
+    }
+  } catch (e) {
+    toast("error", (e as Error).message);
+  } finally {
+    busy.op = false;
+  }
+}
+
+/** 在浏览器中打开 Release 页面。 */
+function openReleaseUrl(url: string): void {
+  if (url) window.open(url, "_blank", "noopener");
+}
+
+/**
+ * 发布远程 release：创建附注标签（强制需要说明）+ 推送到 origin + GitHub 上建 Release。
+ * 全程幂等：标签已存在则跳过创建（重复发布不再报 already exists）；GitHub Release
+ * 已存在则复用其地址；origin 非 GitHub / 无凭据时提示但不视为失败。
+ */
 async function publishRelease(): Promise<void> {
   const name = releaseName.value.trim();
   const msg = releaseMsg.value.trim();
@@ -1365,14 +1489,34 @@ async function publishRelease(): Promise<void> {
     toast("error", t("gitReleaseRequireMsg"));
     return;
   }
+  const repo = panel.value?.repo;
+  if (!repo) {
+    toast("error", t("gitNotRepo"));
+    return;
+  }
   busy.op = true;
   try {
-    const args = ["tag", "-a", name, "-m", msg];
-    if (target) args.push(target);
-    await runOrThrow(args);
+    // 1. 标签：本地不存在才创建
+    const exist = await git(["rev-parse", "-q", "--verify", `refs/tags/${name}`]);
+    if (exist.code !== 0) {
+      const args = ["tag", "-a", name, "-m", msg];
+      if (target) args.push(target);
+      await runOrThrow(args);
+    }
+    // 2. 推送标签（远程已有时输出 Everything up-to-date，退出码 0，不算失败）
     await runOrThrow(["push", "origin", name]);
-    toast("ok", t("gitReleased", { name }));
+    // 3. GitHub 仓库：幂等补建 GitHub Release
+    let ghUrl = "";
+    try {
+      const rel = await api.gitGhRelease(repo, name, name, msg);
+      if (rel.url) ghUrl = rel.url;
+      else if (rel.skipped) toast("info", t("gitReleaseGhSkip", { reason: rel.skipped }));
+    } catch (e) {
+      toast("info", t("gitReleaseGhSkip", { reason: (e as Error).message }));
+    }
+    toast("ok", ghUrl ? `${t("gitReleased", { name })}  ${ghUrl}` : t("gitReleased", { name }));
     releaseOpen.value = false;
+    if (tagTab.value === "releases") void loadReleases();
     await reload();
   } catch (err) {
     toast("error", (err as Error).message);
@@ -1661,6 +1805,54 @@ function focusCli(): void {
   animation: fw-gp-spin 0.8s linear infinite;
 }
 @keyframes fw-gp-spin { to { transform: rotate(360deg); } }
+/* 刷新按钮：加载时 refresh 图标自身旋转（不再叠加 el-button 的 loading 转圈） */
+.fw-gp-refresh-ic { display: inline-flex; align-items: center; }
+.fw-gp-refresh-ic.spin { animation: fw-gp-spin 0.8s linear infinite; }
+/* 标签区块内 tab（标签/版本）：分段控件 */
+.fw-gp-sectabs {
+  display: flex;
+  gap: 2px;
+  margin: 0 0 8px;
+  padding: 2px;
+  border: 1px solid var(--dsh-border, #30363d);
+  border-radius: 6px;
+  background: var(--dsh-bg, #0d1117);
+  user-select: none;
+}
+.fw-gp-sectab {
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsh-fg-weak, #8b949e);
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+.fw-gp-sectab:hover {
+  background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
+  color: var(--dsh-fg, #c9d1d9);
+}
+.fw-gp-sectab.active {
+  color: var(--dsh-accent, #3fb950);
+  background: var(--dsh-accent-weak, rgba(63, 185, 80, 0.15));
+  font-weight: 600;
+}
+.fw-gp-sectab-n {
+  min-width: 16px;
+  text-align: center;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--dsh-hover, rgba(255, 255, 255, 0.1));
+  font-variant-numeric: tabular-nums;
+}
 
 .fw-gp-content { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 /* 左右分栏：列表 + 详情 */
@@ -1944,6 +2136,12 @@ function focusCli(): void {
 .fw-gp-cv { display: flex; flex-direction: column; height: 560px; min-height: 0; }
 .fw-gp-cv-meta { flex: 0 0 auto; padding: 8px 10px; border-bottom: 1px solid var(--dsh-border, #30363d); }
 .fw-gp-cv-meta .fw-gp-cbody { border-bottom: none; padding: 8px 0 0; }
+/* 提交描述最多显示 3 行，超出部分滚动查看 */
+.fw-gp-cbody-clamp {
+  max-height: calc(3 * 1.5 * calc(12px * var(--dsh-fs-scale, 1)));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .fw-gp-cv-body { flex: 1 1 auto; display: flex; min-height: 0; }
 .fw-gp-cv-files {
   flex: 0 0 42%;

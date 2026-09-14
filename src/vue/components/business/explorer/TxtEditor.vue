@@ -486,8 +486,9 @@ function onClose(): void {
    因此这里不用 scoped，改用唯一的 fw-np- 前缀做全局限定，确保能命中对话框根节点。 */
 /* 强制记事本浅色外观，不受 IDE 主题影响 */
 .fw-np-dialog.el-dialog {
-  width: 800px !important;
-  height: 800px !important;
+  /* 默认 800×800，页面不够大时随视口收缩（width 属性也给了 800px，此处 min() 覆盖生效） */
+  width: min(800px, 92vw) !important;
+  height: min(800px, 88vh) !important;
   max-width: none !important;
   margin-top: 5vh;
   display: flex !important;

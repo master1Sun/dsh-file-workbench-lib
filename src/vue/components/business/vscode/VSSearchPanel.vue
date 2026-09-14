@@ -1,6 +1,6 @@
 <template>
   <div class="vs-sp">
-    <!-- 搜索头：输入框 + 大小写/正则开关（对齐 VS Code 搜索面板的 Aa / .* 按钮） -->
+    <!-- 搜索头：输入框 + 大小写/正则开关 + 限定文件夹（对齐 VS Code「搜索范围」） -->
     <div class="vs-sp-head">
       <div class="vs-sp-inputwrap">
         <input
@@ -15,6 +15,26 @@
         </button>
         <button class="vs-sp-toggle" :class="{ on: regex }" :title="t('vsGrepRegex')" @click="toggleRegex">
           <span>.*</span>
+        </button>
+      </div>
+      <!-- 搜索范围：仅在该子目录下搜（相对项目根，如 src/components）；空 = 全项目 -->
+      <div class="vs-sp-scope" :class="{ on: scope.trim().length > 0 }">
+        <icon name="folder" :size="12" />
+        <input
+          v-model="scope"
+          class="vs-sp-scope-input"
+          :placeholder="t('vsGrepScopePlaceholder')"
+          :title="t('vsGrepScopeTitle')"
+          @keydown.enter.prevent="run()"
+          @input="onInput"
+        />
+        <button
+          v-if="scope.trim()"
+          class="vs-sp-toggle"
+          :title="t('cancel')"
+          @click="clearScope"
+        >
+          <span>×</span>
         </button>
       </div>
     </div>
@@ -80,6 +100,8 @@ const emit = defineEmits<{
 }>();
 
 const q = ref("");
+/** 搜索范围：项目内子目录（相对路径，如 src/components）；空 = 全项目。 */
+const scope = ref("");
 const caseSensitive = ref(false);
 const regex = ref(false);
 const searching = ref(false);
@@ -105,6 +127,7 @@ async function run(): Promise<void> {
   try {
     const r = await api.grep(needle, {
       path: props.projectDir,
+      sub: scope.value.trim() || undefined,
       caseSensitive: caseSensitive.value,
       regex: regex.value,
     });
@@ -137,6 +160,11 @@ function toggleRegex(): void {
   regex.value = !regex.value;
   if (searched.value) void run();
 }
+/** 清空搜索范围并立即重搜（有关键字时）。 */
+function clearScope(): void {
+  scope.value = "";
+  if (q.value.trim().length >= 2) void run();
+}
 function toggleFile(rel: string): void {
   const next = new Set(openFiles.value);
   if (next.has(rel)) next.delete(rel);
@@ -151,6 +179,7 @@ watch(
     outcome.value = null;
     searched.value = false;
     openFiles.value = new Set();
+    scope.value = "";
   },
 );
 
@@ -243,6 +272,37 @@ const dirOf = (rel: string): string => {
 .vs-sp-toggle.on {
   color: var(--dsh-accent, #3fb950);
   background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
+}
+/* 搜索范围行：主输入框下方的弱化小输入行，填了子目录时高亮 */
+.vs-sp-scope {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 0 6px;
+  height: 22px;
+  border: 1px dashed var(--dsh-border, #30363d);
+  border-radius: 5px;
+  color: var(--dsh-fg-weak, #8b949e);
+}
+.vs-sp-scope.on {
+  border-style: solid;
+  border-color: var(--dsh-accent, #238636);
+  color: var(--dsh-accent, #3fb950);
+}
+.vs-sp-scope-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 20px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--dsh-fg, #c9d1d9);
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
+}
+.vs-sp-scope-input::placeholder {
+  color: var(--dsh-fg-weak, #8b949e);
+  opacity: 0.7;
 }
 .vs-sp-summary {
   flex: 0 0 auto;

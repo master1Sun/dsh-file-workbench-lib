@@ -295,6 +295,13 @@ export interface MenuItem {
   hint?: string;
   children?: MenuItem[];
   onClick?: () => void;
+  /** 每行右侧的操作按钮（如最近项目的单条清除）。点击不触发整行 onClick。 */
+  trailing?: {
+    icon: string;
+    title?: string;
+    disabled?: boolean;
+    onClick: () => void;
+  };
 }
 
 /** DSH locale 服务的最小形状（由 client 桥接从 ctx.locale 透传）。 */

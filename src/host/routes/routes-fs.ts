@@ -6,7 +6,7 @@
  */
 import { createWriteStream, existsSync, statSync } from "node:fs";
 import { cp, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
-import { basename, dirname } from "node:path";
+import { basename, dirname, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 
 import {
@@ -248,14 +248,27 @@ export const fsResource: RouteMatcher = async (req, res, seg, q, method, host) =
     }
 
   // --- 全局内容搜索（grep 式）：按行命中、按文件分组，供左栏「搜索」tab 展示与跳转 ---
+  // sub：限定在项目内某子目录下搜索（VSCode「搜索范围」）。rel 仍加回子目录前缀，
+  // 保持相对项目根，前端点击跳转逻辑不变；sub 解析后逃逸出 base 则忽略。
   if (seg[0] === "grep" && seg.length === 1 && method === "GET") {
     const qText = q.get("q") ?? "";
     const scoped = q.get("path")?.trim();
-    const base = scoped ? requireAbsolute(scoped) : getRoot(q.get("key") ?? undefined) ?? homedir();
+    const base = resolve(scoped ? requireAbsolute(scoped) : getRoot(q.get("key") ?? undefined) ?? homedir());
     const caseSensitive = q.get("case") === "1";
     const regex = q.get("regex") === "1";
-    const outcome = await grepFiles(base, qText, { caseSensitive, regex });
-    return (json(res, 200, { ok: true, data: { ...outcome, scope: base } }), true);
+    const subRaw = (q.get("sub") ?? "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    let scanRoot = base;
+    let sub = "";
+    if (subRaw) {
+      const resolved = resolve(base, subRaw);
+      if (resolved === base || resolved.startsWith(base + sep)) {
+        scanRoot = resolved;
+        sub = subRaw;
+      }
+    }
+    const outcome = await grepFiles(scanRoot, qText, { caseSensitive, regex });
+    const files = sub ? outcome.files.map((f) => ({ ...f, rel: `${sub}/${f.rel}` })) : outcome.files;
+    return (json(res, 200, { ok: true, data: { files, total: outcome.total, truncated: outcome.truncated, scope: scanRoot } }), true);
   }
 
   // --- 建目录 ---

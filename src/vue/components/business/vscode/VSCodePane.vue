@@ -177,14 +177,24 @@
       :y="fileMenuY"
       @close="fileMenuOpen = false"
     />
-    <!-- 顶栏「最近项目」菜单 -->
+    <!-- 顶栏「最近项目」菜单：列表限高缩短、底部「打开文件夹…」固定不滚动 -->
     <ContextMenu
       v-if="recentMenuOpen"
       :items="recentMenuItems"
       :x="recentMenuX"
       :y="recentMenuY"
+      max-height="min(42vh, 330px)"
+      :footer-items="recentFooterItems"
       @close="recentMenuOpen = false"
-    />
+    >
+      <template #header>
+        <span class="vs-recent-title">{{ t("vsRecentProjects") }}</span>
+        <button class="vs-recent-clear" :disabled="vsState.recentProjects.length === 0" :title="t('vsRecentClearAll')" @click="confirmClearAll">
+          <icon name="trash" :size="13" />
+          <span>{{ t("vsRecentClearAll") }}</span>
+        </button>
+      </template>
+    </ContextMenu>
     <!-- 状态栏：编码选择器 -->
     <ContextMenu
       v-if="encMenuOpen"
@@ -567,42 +577,64 @@ function shortenDir(p: string, max = 32): string {
 }
 
 /**
- * 最近项目菜单：列出打开过的项目目录（当前项目标记并置灰），底部附「清除记录」
- * （子菜单：逐条移除 / 清空全部）与「打开文件夹…」。
- * 切换复用 `onPickFolder`——它已经带有未保存改动的确认与标签清理；清除操作立即落盘。
+ * 最近项目菜单：列出打开过的项目目录（当前项目标记并置灰），每条记录右侧带「✕ 单条清除」按钮；
+ * 菜单头部右侧另有「全部清除」按钮（见模板 #header 插槽）。「打开文件夹…」固定在底部（footerItems），
+ * 不随列表滚动、始终可见（见模板 :footer-items）。单条清除 / 全部清除均先关下拉再弹确认框。
+ * 切换复用 `onPickFolder`——它已经带有未保存改动的确认与标签清理。
  */
-const recentMenuItems = computed<MenuItem[]>(() => {
-  const items: MenuItem[] = vsState.recentProjects.map((p) => ({
+const recentMenuItems = computed<MenuItem[]>(() =>
+  vsState.recentProjects.map((p) => ({
     label: basename(p) || p,
     hint: shortenDir(dirnameOf(p)),
     checked: p === vsState.projectDir,
     disabled: p === vsState.projectDir,
     onClick: () => void onPickFolder(p),
-  }));
-  items.push({ separator: true });
-  items.push({
-    label: t("vsRecentClear"),
-    icon: "trash",
-    disabled: vsState.recentProjects.length === 0,
-    children: [
-      ...vsState.recentProjects.map<MenuItem>((p) => ({
-        label: basename(p) || p,
-        hint: shortenDir(dirnameOf(p)),
-        icon: "close",
-        onClick: () => store.forgetProject(p),
-      })),
-      { separator: true },
-      {
-        label: t("vsRecentClearAll"),
-        icon: "trash",
-        disabled: vsState.recentProjects.length === 0,
-        onClick: () => store.clearRecentProjects(),
-      },
-    ],
+    trailing: {
+      icon: "close",
+      title: t("vsRecentForgetTitle"),
+      onClick: () => void forgetRecent(p),
+    },
+  })),
+);
+
+/** 固定在菜单底部、始终可见，不随最近项目列表滚动。 */
+const recentFooterItems: MenuItem[] = [
+  { label: t("vsOpenFolder"), icon: "folderOpen", onClick: selectProject },
+];
+
+/**
+ * 头部「全部清除」：先关掉下拉，再弹确认框；确认才清空全部记录并落盘。
+ * 关下拉在弹框之前，避免确认框与菜单浮层叠在一起。
+ */
+async function confirmClearAll(): Promise<void> {
+  recentMenuOpen.value = false;
+  if (vsState.recentProjects.length === 0) return;
+  const ok = await confirmDialog({
+    title: t("vsRecentClearAllTitle"),
+    message: t("vsRecentClearAllConfirm"),
   });
-  items.push({ label: t("vsOpenFolder"), icon: "folderOpen", onClick: selectProject });
-  return items;
-});
+  if (ok) {
+    store.clearRecentProjects();
+    toast("ok", t("vsRecentCleared"));
+  }
+}
+
+/**
+ * 单条清除某个最近项目记录：先关下拉，再弹确认框；确认才将该记录从列表移除并落盘。
+ * 关下拉在弹框之前，避免确认框被菜单浮层（高 z-index）遮住。
+ */
+async function forgetRecent(p: string): Promise<void> {
+  recentMenuOpen.value = false;
+  const name = basename(p) || p;
+  const ok = await confirmDialog({
+    title: t("vsRecentForgetTitle"),
+    message: t("vsRecentForgetConfirm", { name }),
+  });
+  if (ok) {
+    store.forgetProject(p);
+    toast("ok", t("vsRecentForgot", { name }));
+  }
+}
 
 function openRecentMenu(): void {
   const r = recentBtnRef.value?.getBoundingClientRect();
@@ -1630,6 +1662,38 @@ onBeforeUnmount(() => {
   border-top: 4px solid currentColor;
   opacity: 0.75;
 }
+/* 最近项目菜单头部：标题居左、操作居右（布局在 ContextMenu 的 .fw-cm-header 上） */
+.vs-recent-title {
+  font-weight: 600;
+  color: var(--dsh-fg, #c9d1d9);
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+  white-space: nowrap;
+}
+/* 最近项目菜单头部右侧的「全部清除」按钮：紧凑文字按钮，悬停显形 */
+.vs-recent-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--dsh-border, #30363d);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsh-fg-weak, #8b949e);
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.vs-recent-clear:hover:not(:disabled) {
+  color: #f85149;
+  border-color: #f85149;
+  background: rgba(248, 81, 73, 0.12);
+}
+.vs-recent-clear:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 .vs-body {
   display: flex;
   align-items: stretch;
@@ -1646,13 +1710,16 @@ onBeforeUnmount(() => {
   background: var(--dsh-bg2, #161b22);
   border-right: 1px solid var(--dsh-border, #30363d);
 }
-/* 左栏顶部 tab：文件 / 搜索 */
+/* 左栏顶部 tab：文件 / 搜索 —— 分段控件样式（两端等宽胶囊，明显可切换） */
 .vs-left-tabs {
   flex: 0 0 auto;
   display: flex;
   gap: 2px;
-  padding: 3px 6px;
-  border-bottom: 1px solid var(--dsh-border, #30363d);
+  margin: 4px 6px;
+  padding: 2px;
+  border: 1px solid var(--dsh-border, #30363d);
+  border-radius: 6px;
+  background: var(--dsh-bg, #0d1117);
   user-select: none;
 }
 .vs-left-tab:disabled {
@@ -1663,10 +1730,13 @@ onBeforeUnmount(() => {
   background: transparent;
 }
 .vs-left-tab {
+  flex: 1 1 0;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
+  justify-content: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
   border: none;
   border-radius: 4px;
   background: transparent;
@@ -1674,14 +1744,15 @@ onBeforeUnmount(() => {
   font-size: calc(11px * var(--dsh-fs-scale, 1));
   cursor: pointer;
   white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
 }
 .vs-left-tab:hover {
   background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
   color: var(--dsh-fg, #c9d1d9);
 }
 .vs-left-tab.active {
-  color: var(--dsh-fg, #c9d1d9);
-  background: var(--dsh-hover, rgba(255, 255, 255, 0.1));
+  color: var(--dsh-accent, #3fb950);
+  background: var(--dsh-accent-weak, rgba(63, 185, 80, 0.15));
   font-weight: 600;
 }
 /* 搜索 tab 时目录树隐藏，搜索面板吃掉剩余高度（.vs-sp 自带 flex:1） */

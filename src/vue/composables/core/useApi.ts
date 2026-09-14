@@ -274,10 +274,11 @@ export function batchReplace(
   });
 }
 
-/** 全局内容搜索（grep 式）：按行命中、按文件分组，供左栏「搜索」tab 展示与跳转。 */
+/** 全局内容搜索（grep 式）：按行命中、按文件分组，供左栏「搜索」tab 展示与跳转。
+ *  sub：限定在项目内某子目录下搜索（相对项目根的文件夹路径，可空）。 */
 export function grep(
   q: string,
-  opts: { key?: string; path?: string; caseSensitive?: boolean; regex?: boolean } = {},
+  opts: { key?: string; path?: string; sub?: string; caseSensitive?: boolean; regex?: boolean } = {},
 ): Promise<{
   files: Array<{ rel: string; hits: Array<{ ln: number; text: string }> }>;
   total: number;
@@ -290,6 +291,7 @@ export function grep(
       key: opts.key,
       q,
       path: opts.path,
+      sub: opts.sub || undefined,
       case: opts.caseSensitive ? "1" : undefined,
       regex: opts.regex ? "1" : undefined,
     })}`,
@@ -599,6 +601,24 @@ export function gitSync(path: string, action: "fetch" | "pull" | "push"): Promis
 /** 命令台：在仓库根执行任意 git 命令（args 不含开头的 git）。 */
 export function gitRun(path: string, args: string[]): Promise<GitRunResult> {
   return request("POST", "/git/run", { path, args });
+}
+
+/** GitHub Release 创建（幂等）：origin 为 GitHub 时用本机凭据创建/复用 release。 */
+export function gitGhRelease(
+  path: string,
+  tag: string,
+  name: string,
+  body: string,
+): Promise<{ created: boolean; url: string; skipped?: string }> {
+  return request("POST", "/git/gh-release", { path, tag, name, body });
+}
+
+/** GitHub Releases 列表（最近 20 条）：origin 非 GitHub / 无凭据时返回 skipped。 */
+export function gitGhReleases(path: string): Promise<{
+  list: Array<{ tag: string; name: string; url: string; date: string }>;
+  skipped?: string;
+}> {
+  return request("GET", `/git/gh-releases${qs({ path })}`);
 }
 
 /** 读取 git user 全局配置（name/email）。 */
