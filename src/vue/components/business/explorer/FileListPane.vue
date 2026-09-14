@@ -282,6 +282,7 @@ import { thumbHref } from "../../../composables/core/useApi";
 import { explorer, browseTo, goBack, goForward, goUp, refreshListing, refreshRecycle } from "../../../stores/explorer";
 import { wb, toast, openPreview, canOperatePath, openTerminal } from "../../../stores/workbench";
 import { useI18n } from "../../../composables/core/i18n";
+import { openProjectInEditor } from "../../../composables/core/sidebarRight";
 import { dragPath } from "../../../composables/ui/dnd";
 import { copyPaths, cutPaths, clearClipboard, clipboardHas, clipboardOf } from "../../../composables/ui/clipboard";
 import { confirmDialog, promptDialog } from "../../../composables/core/dialog";
@@ -1058,6 +1059,16 @@ function openTerminalHere(entry: FsEntry): void {
   openTerminal(dir);
 }
 
+/**
+ * 在「文件编辑器」面板中把该目录作为**项目**打开。
+ *
+ * 走宿主右侧栏的页 tab 导航通道（`openTab('vscode', { params: { projectDir } })`）：
+ * 编辑器已打开时聚焦它并送达参数，未打开时新开一个 —— 本插件不需要自己找面板实例。
+ */
+function openInEditor(dirPath: string): void {
+  openProjectInEditor(dirPath);
+}
+
 // —— 子代理（宿主 0.1.5）：官方 spawn 创建会话并直接在官方子代理会话视图展示 ——
 /** 发起一次子代理；instruction 为空也在官方会话里给出目标上下文。 */
 async function spawnSubagentDialog(title: string, path: string, isDir: boolean): Promise<void> {
@@ -1137,6 +1148,10 @@ function onFileCtx(e: MouseEvent, entry: FsEntry): void {
   if (isTxt) {
     items.push({ label: t("menuEdit"), icon: "edit", disabled: ro, onClick: () => openTxtEditor(entry.path) });
   }
+  // 目录：可直接在「文件编辑器」里作为项目打开（分栏后还能与另一个项目并排看）。
+  if (entry.isDir) {
+    items.push({ label: t("menuOpenInEditor"), icon: "code", onClick: () => openInEditor(entry.path) });
+  }
   items.push({ separator: true });
   items.push(
     { label: t("menuCut"), icon: "cut", disabled: ro, onClick: () => { cutPaths([entry.path]); toast("ok", t("menuCutDone")); } },
@@ -1175,6 +1190,7 @@ function onBlankCtx(e: MouseEvent): void {
   const ro = !canOperatePath(path);
   openMenu(e, [
     { label: t("menuRefresh"), icon: "refresh", onClick: refreshListing },
+    { label: t("menuOpenInEditor"), icon: "code", onClick: () => openInEditor(path) },
     { separator: true },
     { label: t("menuView"), icon: "eye", children: viewItems() },
     { label: t("menuSort"), icon: "sort", children: sortItems() },

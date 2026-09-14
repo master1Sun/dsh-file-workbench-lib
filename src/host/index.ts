@@ -19,14 +19,14 @@ export const name = "dsh-file-workbench";
 export const inject: string[] = [];
 
 export function apply(ctx: Context): void {
-  // 纯后端自更新：启动后延迟检测 git 更新版本并自动安装（失败静默，不阻塞）。
-  const timer = setTimeout(() => {
-    void autoUpdate();
-  }, 5000);
-  timer.unref?.();
-  ctx.effect(() => () => clearTimeout(timer), "dsh-file-workbench: self-update");
-  // 注册 /api/dsh-file-workbench 下的路由（webServer 可用时）。
+  // 官方自更新：启动后延迟检测 dsh 插件市场更高版本并自动安装
+  // （委托 /dsh-market/api/v1，失败静默，不阻塞）。
   ctx.inject(["webServer"], (httpCtx: Context) => {
+    const timer = setTimeout(() => {
+      void autoUpdate(httpCtx);
+    }, 5000);
+    timer.unref?.();
+    httpCtx.effect(() => () => clearTimeout(timer), "dsh-file-workbench: self-update");
     httpCtx.effect(() => {
       // 传入插件级 ctx，供路由在运行时按名解析宿主服务。
       const routes = makeFileWorkbenchRoutes(() => ctx);

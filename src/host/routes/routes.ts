@@ -19,7 +19,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 // 供其它模块 / index.ts 引用的常量与工具。
 export { PREFIX, WEB_DIR } from "./routes-util.js";
-import { PREFIX, fail, queryOf, type RouteHost } from "./routes-util.js";
+import { FsError, PREFIX, fail, queryOf, type RouteHost } from "./routes-util.js";
 import { fsResource } from "./routes-fs.js";
 import { gitResource } from "./routes-git.js";
 import { svnResource } from "./routes-svn.js";
@@ -50,7 +50,9 @@ export function makeFileWorkbenchRoutes(ctxProvider?: () => Context): WebRoute[]
       if (await sessionStreamResource(req, res, seg, q, method, host)) return;
       if (await persistResource(req, res, seg, q, method, host)) return;
       if (await taskArchiveResource(req, res, seg, q, method, host)) return;
-      return fail(res, new Error(`no route ${method} ${pathname}`));
+      // 未命中：**必须是 404**。不能抛裸 Error —— fail() 只把 FsError 映射成它的 status，
+      // 其余一律 500，会让「路径不存在」这种最常规的情况被前端报成「服务端处理失败」。
+      return fail(res, new FsError("not-found", `no route ${method} ${pathname}`, 404));
     } catch (error) {
       return fail(res, error);
     }

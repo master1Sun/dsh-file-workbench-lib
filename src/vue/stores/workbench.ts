@@ -66,6 +66,27 @@ export function openTerminal(path = ""): void {
   wb.termMinimized = false;
 }
 
+/**
+ * 「新建终端」请求序号：终端浮窗**已打开**时，从「文件」菜单点「新建终端」会自增它，
+ * TerminalDialog 监听后新增一个终端标签页（首屏若没有则 onMounted 已自建，无需走这里）。
+ */
+export const termNewSeq = ref(0);
+
+/**
+ * 新建一个终端：终端未开则打开（首屏标签页落到 path），已开则追加一个标签页。
+ *
+ * 仅在「文件编辑器」的「文件」菜单下使用 —— 让新建的终端直接落在当前编辑器项目目录下。
+ */
+export function openNewTerminal(path = ""): void {
+  wb.termRequestCwd = path;
+  if (!wb.termOpen) {
+    wb.termOpen = true;
+    wb.termMinimized = false;
+  } else {
+    termNewSeq.value++;
+  }
+}
+
 /** 设置工作区根并回到根目录。 */
 export async function openFolder(path: string): Promise<string> {
   const { root } = await api.setRoot(path, wb.key);

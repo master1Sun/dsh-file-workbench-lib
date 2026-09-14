@@ -6,9 +6,9 @@
  */
 import { zh, en } from "../shared/locales.js";
 import type { ReactNode } from "react";
-import { RightPaneBridge, VSCodePaneBridge } from "./RightPaneBridge.js";
+import { RightPaneBridge, VSCodePaneBridge, vsKindInUse, vsKindTabId, vsOpenKindCount } from "./RightPaneBridge.js";
 import { ComposerBridge } from "./ComposerBridge.js";
-import { setOpenTab } from "./api.js";
+import { setSidebarRight } from "./api.js";
 
 /** 前端资源基址（host REST + 静态资源前缀）。 */
 export const PREFIX = "/api/dsh-file-workbench";
@@ -39,10 +39,30 @@ const KIND = "workbench";
 /** 本实现在 tab 系统中的身份，也是主体/标题注册时用的 key（约定用包名）。 */
 const ID = "@sunjuntao/dsh-file-workbench";
 
-/** 「文件编辑器」tab 的 kind（openTab(kind) 用到的名字）。 */
+/** 「文件编辑器」tab 的 kind（openTab(kind) 用到的名字，也是 guide 入口指向的那个）。 */
 const KIND_VS = "vscode";
 /** 「文件编辑器」tab 的身份 key（主体/标题注册用，与主工作台区分）。 */
 const ID_VS = "@sunjuntao/dsh-file-workbench.vscode";
+
+/**
+ * 编辑器 kind 池的容量 —— 即**同一分栏内最多能平级并存多少个编辑器 tab**。
+ *
+ * 宿主对页 tab 的唯一性判定是「每分栏每 kind 至多一个」（页地址 = `sidebar://<kind>`，
+ * 且页 tab 的 `duplicateTab` 是空操作），所以「平级多开」只能让每个编辑器各占一个 kind。
+ * 池在 apply 时**全量注册**：布局里可能持久化过任意一个池内 kind，重启后必须有类型在册，
+ * 否则该 tab 会渲染成「没有类型能查看它」。
+ */
+const VS_KIND_POOL = 8;
+
+/** 池内第 n 个（1 起）编辑器 kind。第 1 个沿用 `vscode`，以兼容既有持久化与工作台入口。 */
+function vsKindAt(n: number): string {
+  return n <= 1 ? KIND_VS : `${KIND_VS}-${n}`;
+}
+
+/** 池内第 n 个编辑器 kind 的注册身份 key（正文注册的 key 必须与类型注册的 id 一致）。 */
+function vsIdAt(n: number): string {
+  return n <= 1 ? ID_VS : `${ID_VS}.${n}`;
+}
 
 /** 翻译字典注册到 DSH locale registry 的命名空间。 */
 const LOCALE_NS = "dsh-file-workbench";
@@ -140,9 +160,29 @@ interface ClientCtx {
     register(definition: Record<string, unknown>): () => void;
   };
   sidebarRight?: {
-    openTab(kind: string): void;
+    /**
+     * 打开一个页 tab。`options.paneId` 落位到指定分栏、`options.params` 作为导航参数
+     * 送达该 tab 的正文（`useTabInfo().tab.navigation.params`，并让 `revision` 自增）。
+     *
+     * 页 tab 只在**目标分栏内**去重：同 kind 在另一分栏会另开一份 → 这是「多个文件编辑器
+     * 窗口」成立的基础（配合 `split()`）。
+     */
+    openTab(kind: string, options?: Record<string, unknown>): void;
     /** 打开一个资源地址（`dsh-resource://…`），由注册的查看器认领。 */
     openResource(address: string, options?: Record<string, unknown>): void;
+    /**
+     * 把停靠分栏再分一格（右侧栏上限两格），并在新格播种默认页。
+     * @returns 新分栏 id；窗口宽度不足 / 已达两格上限时为 undefined。
+     */
+    split(paneId?: string): string | undefined;
+    /** 把停靠 tab 弹出为独立浮窗。 */
+    float(tabId: string): void;
+    /** 把浮窗收回停靠位。 */
+    dock(paneId: string): void;
+    /** 关闭一个 tab（唯一停靠的引导页不可关）。 */
+    close(tabId: string): void;
+    /** 右侧栏当前是否展开。 */
+    isExpanded(): boolean;
   };
   workspaces?: {
     pickDirectory?: () => Promise<string | null>;
@@ -443,8 +483,64 @@ export function apply(ctx: ClientCtx): void {
   // ---- 注册「新版右侧面板」tab（类型 + 主体 + 标题）----
   // 工作台仅经由右侧栏进入；右侧栏服务（slots / sidebarRightTabs / sidebarRight）缺失时静默降级。
   try {
-    // 把「打开 tab」的能力交给桥接层（组件拿不到 ctx）。
-    setOpenTab((kind) => ctx.sidebarRight?.openTab(kind));
+    // 把右侧栏导航能力交给桥接层 / Vue 侧（组件拿不到 ctx）。
+    //
+    // 这里**逐方法惰性转发**而不是缓存 `ctx.sidebarRight` 对象：Cordis 的 ctx 是 proxy，
+    // 读未声明在 inject 里的属性会抛错（见 uiWorkspaceSafe），转发式取值天然容错，
+    // 且服务晚于 apply 注册时也能取到。
+    /**
+     * 在当前分栏里**平级**再开一个编辑器 tab（至多池容量个；不新建分栏）。
+     *
+     * 分配规则，按优先级：
+     *  ① 取池内第一个尚未被占用的 kind 并 `openTab` —— **不传 `paneId`**，于是落位到当前活动的
+     *     停靠分栏，也就是用户点按钮时所在的那一格；
+     *  ② 池已满（8 个都在用）时，**顶替池内编号最小的那一个**：`openTab(kind, { replaceTab })`。
+     *     宿主对该选项的语义是「顶替它的分栏与 tab 条位置，并在同一步里把它关掉」，是原子操作，
+     *     因此不会出现「先关后开」的中间态。
+     *
+     * @param params - 新实例的导航参数（`{ fresh: true }` = 空白窗口；`{ projectDir }` = 直接
+     *   打开某项目）。池满替换时同样会把这些参数送达新实例。
+     * @returns 是否成功发起（宿主右侧栏服务不可用或全部 `openTab` 抛错时为 false）。
+     */
+    function openNextEditorTab(params?: Record<string, unknown>): boolean {
+      for (let n = 1; n <= VS_KIND_POOL; n++) {
+        const kind = vsKindAt(n);
+        if (vsKindInUse(kind)) continue;
+        try {
+          ctx.sidebarRight?.openTab(kind, { params });
+          return true;
+        } catch (e) {
+          console.warn(`[dsh-file-workbench] 新建编辑器窗口失败（${kind}）：`, e);
+          return false;
+        }
+      }
+      // 池满：顶替编号最小的那一个（对应用户说的「替换掉第一个」）。
+      for (let n = 1; n <= VS_KIND_POOL; n++) {
+        const kind = vsKindAt(n);
+        const tabId = vsKindTabId(kind);
+        if (!tabId) continue;
+        try {
+          ctx.sidebarRight?.openTab(kind, { replaceTab: tabId, params });
+          return true;
+        } catch (e) {
+          console.warn(`[dsh-file-workbench] 替换编辑器窗口失败（${kind}）：`, e);
+          return false;
+        }
+      }
+      return false;
+    }
+
+    setSidebarRight({
+      openTab: (kind, options) => ctx.sidebarRight?.openTab(kind, options as Record<string, unknown> | undefined),
+      split: (paneId) => ctx.sidebarRight?.split(paneId),
+      float: (tabId: string) => ctx.sidebarRight?.float(tabId),
+      dock: (paneId) => ctx.sidebarRight?.dock(paneId),
+      close: (tabId) => ctx.sidebarRight?.close(tabId),
+      isExpanded: () => ctx.sidebarRight?.isExpanded() ?? false,
+      newEditorTab: (params) => openNextEditorTab(params),
+      editorTabCount: () => vsOpenKindCount(),
+      editorTabLimit: () => VS_KIND_POOL,
+    });
 
     // ① 类型 + guide 入口（在右侧栏 guide 区提供可点击的开卡项）。
     //    title 由注册表在打开 tab 时捕获，作为 chip 文案（随 DSH 语言取词）。
@@ -481,39 +577,62 @@ export function apply(ctx: ClientCtx): void {
       "dsh-file-workbench: sidebar tab body",
     );
 
-    // ③ 第二个 tab：「VS Code 编辑器」（kind=vscode，order=101 排在文件工作台下方）。
-    ctx.effect(
-      () =>
-        ctx.sidebarRightTabs?.register({
-          id: ID_VS,
-          kind: KIND_VS,
-          title: () => tr("tabVSCode"),
-          guide: [
-            {
-              order: 101,
-              title: () => tr("tabVSCode"),
-              description: () => tr("tabVSCodeDesc"),
-              icon: VSCodeGlyph,
-            },
-          ],
-        }),
-      "dsh-file-workbench: vscode tab type",
-    );
+    // ③ 编辑器 tab **类型池**（kind = vscode / vscode-2 / … / vscode-8）。
+    //    宿主对页 tab 的唯一性是「每分栏每 kind 至多一个」，所以「平级多开编辑器」必须让每个
+    //    tab 各占一个 kind。只有第 1 个带 guide 入口 —— 其余若都挂 guide，胶囊会重复堆一串。
+    ctx.effect(() => {
+      const offs: Array<() => void> = [];
+      for (let n = 1; n <= VS_KIND_POOL; n++) {
+        try {
+          const off = ctx.sidebarRightTabs?.register({
+            id: vsIdAt(n),
+            kind: vsKindAt(n),
+            title: () => (n === 1 ? tr("tabVSCode") : `${tr("tabVSCode")} ${n}`),
+            ...(n === 1
+              ? {
+                  guide: [
+                    {
+                      order: 101,
+                      title: () => tr("tabVSCode"),
+                      description: () => tr("tabVSCodeDesc"),
+                      icon: VSCodeGlyph,
+                    },
+                  ],
+                }
+              : {}),
+          });
+          if (off) offs.push(off);
+        } catch (e) {
+          console.warn(`[dsh-file-workbench] 编辑器类型注册失败（${vsKindAt(n)}）：`, e);
+        }
+      }
+      return () => {
+        for (const off of offs) off();
+      };
+    }, "dsh-file-workbench: vscode tab types");
 
-    // ④ 第二个 tab 的主体（sidebar.right.pane.tab，key = ID_VS）：把文件编辑器主体挂进插槽容器。
-    ctx.effect(
-      () => {
-        const slots = ctx.slots;
-        if (!slots) return;
-        return slots.inject("sidebar.right.pane.tab", () =>
-          slots.register(
-            { name: "sidebar.right.pane.tab", key: ID_VS },
-            VSCodePaneBridge as (props: unknown) => ReactNode,
-          ),
-        );
-      },
-      "dsh-file-workbench: vscode tab body",
-    );
+    // ④ 编辑器 tab 正文（sidebar.right.pane.tab，key = 各自的注册 id）：把编辑器主体挂进插槽容器。
+    ctx.effect(() => {
+      const slots = ctx.slots;
+      if (!slots) return;
+      return slots.inject("sidebar.right.pane.tab", () => {
+        const offs: Array<() => void> = [];
+        for (let n = 1; n <= VS_KIND_POOL; n++) {
+          try {
+            const off = slots.register(
+              { name: "sidebar.right.pane.tab", key: vsIdAt(n) },
+              VSCodePaneBridge as (props: unknown) => ReactNode,
+            );
+            if (off) offs.push(off);
+          } catch (e) {
+            console.warn(`[dsh-file-workbench] 编辑器正文注册失败（${vsKindAt(n)}）：`, e);
+          }
+        }
+        return () => {
+          for (const off of offs) off();
+        };
+      });
+    }, "dsh-file-workbench: vscode tab bodies");
   } catch (e) {
     console.warn("[dsh-file-workbench] 右侧面板注册失败（已降级）：", e);
   }

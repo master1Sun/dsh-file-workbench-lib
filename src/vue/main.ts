@@ -24,6 +24,25 @@ import { cancelAll } from "./composables/core/useApi";
 import { openPreview, toast } from "./stores/workbench";
 import { browseTo, refreshListing, syncToSession } from "./stores/explorer";
 import { connectSessionSse } from "./composables/session/sessionSse";
+import { acquireVSCodeSlot, getVSCodeStore, VS_STORE_KEY, type VSCodeStore } from "./stores/vscode";
+
+/** 面板挂载时由桥接层透传的身份与 API 基址。 */
+export interface PaneMountOptions {
+  apiBase?: string;
+  /** DSH 右侧栏 tab id（页面生命周期内稳定）→ 决定文件编辑器实例槽位。 */
+  instanceId?: string;
+  /** 该 tab 所在分栏 id（浮窗时为其浮窗 pane id）。 */
+  panelId?: string;
+  /** 为 true 时该编辑器实例从空白开始（不恢复、不继承任何项目目录）。 */
+  fresh?: boolean;
+}
+
+/** 面板挂载句柄：除卸载外，还支持把「打开某目录」的请求投递给该实例。 */
+export interface PaneHandle {
+  unmount: () => void;
+  /** 仅文件编辑器实例提供：请求本实例打开某个项目目录（含未保存改动的确认）。 */
+  openProject?: (dir: string) => void;
+}
 
 /** 已挂载的活动实例（按元素记录：同一元素重复挂载先卸载旧实例，避免 “App already mounted”）。 */
 const instances = new Map<HTMLElement, VueApp>();
@@ -58,8 +77,15 @@ function wireWorkbenchBridge(): void {
 /**
  * 通用挂载入口：按 pane 选择根组件挂进 el，并桥接宿主能力。
  * 右侧面板桥接组件（RightPaneBridge / VSCodePaneBridge）分别调用各自的全局挂载函数。
+ *
+ * 文件编辑器是**多实例**的：按 `opts.instanceId`（DSH tab id）分配实例槽，并把该实例
+ * `app.provide(VS_STORE_KEY, store)` 给面板内的子树（目录树等）注入使用。
  */
-export function mountPane(el: HTMLElement, opts?: { apiBase?: string }, pane: PaneKind = "workbench"): { unmount: () => void } {
+export function mountPane(
+  el: HTMLElement,
+  opts?: PaneMountOptions,
+  pane: PaneKind = "workbench",
+): PaneHandle {
   if (opts?.apiBase) {
     window.__DSH_FILE_WORKBENCH__ = window.__DSH_FILE_WORKBENCH__ ?? {};
     window.__DSH_FILE_WORKBENCH__.apiBase = opts.apiBase;
@@ -75,6 +101,16 @@ export function mountPane(el: HTMLElement, opts?: { apiBase?: string }, pane: Pa
     instances.delete(el);
   }
   const app = createApp(pane === "vscode" ? AppVSCode : AppFileWorkbench);
+
+  // 文件编辑器实例：按 tab id 取槽（同一 tab 卸载再挂载会拿回同一份状态与未保存缓冲）。
+  let store: VSCodeStore | null = null;
+  if (pane === "vscode") {
+    store = getVSCodeStore(acquireVSCodeSlot(opts?.instanceId));
+    if (opts?.fresh) store.markFresh();
+    store.bindTab(opts?.instanceId ?? null, opts?.panelId ?? null);
+    app.provide(VS_STORE_KEY, store);
+  }
+
   app.mount(el);
   instances.set(el, app);
 
@@ -88,6 +124,7 @@ export function mountPane(el: HTMLElement, opts?: { apiBase?: string }, pane: Pa
 
   // 捕获本实例的 app 引用（instances 是 Map，但防御性保留），确保本实例卸载只影响自己。
   const localApp = app;
+  const localStore = store;
   return {
     unmount: () => {
       try {
@@ -114,16 +151,18 @@ export function mountPane(el: HTMLElement, opts?: { apiBase?: string }, pane: Pa
         }, 3000);
       }
     },
+    // 文件编辑器：把「打开某目录」投递给本实例（槽位由 tab id 决定，因此投递到对的那个）。
+    openProject: localStore ? (dir: string) => localStore.requestOpenProject(dir) : undefined,
   };
 }
 
 /** 文件工作台面板挂载（右侧面板桥接组件挂载时使用）。 */
-export function mountFileWorkbenchPane(el: HTMLElement, opts?: { apiBase?: string }): { unmount: () => void } {
+export function mountFileWorkbenchPane(el: HTMLElement, opts?: PaneMountOptions): PaneHandle {
   return mountPane(el, opts, "workbench");
 }
 
 /** VS Code 编辑器面板挂载（右侧面板桥接组件挂载时使用）。 */
-export function mountVSCodePane(el: HTMLElement, opts?: { apiBase?: string }): { unmount: () => void } {
+export function mountVSCodePane(el: HTMLElement, opts?: PaneMountOptions): PaneHandle {
   return mountPane(el, opts, "vscode");
 }
 

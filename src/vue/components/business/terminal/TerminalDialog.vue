@@ -136,7 +136,7 @@ import type { ISearchOptions } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { useI18n } from "../../../composables/core/i18n";
-import { toast, wb } from "../../../stores/workbench";
+import { toast, wb, termNewSeq } from "../../../stores/workbench";
 import { prefs, savePrefs, termWin, saveTermWin } from "../../../composables/core/settings";
 import {
   closeAllTerminals,
@@ -636,6 +636,14 @@ onMounted(() => {
   void loadTermElevation();
   if (!tabs.value.length) addTab();
   else void nextTick(mountTerm);
+});
+
+/**
+ * 「文件」菜单点「新建终端」且终端浮窗已打开：追加一个新终端标签页（落在请求的工作目录）。
+ * 终端处于关闭态时走 `wb.termOpen = true`，由上面 onMounted 自建首屏标签，这里不重复创建。
+ */
+watch(termNewSeq, () => {
+  if (tabs.value.length < TERMINAL_LIMIT) addTab();
 });
 
 /** 关闭指定终端（断开流并终止其后端常驻进程）。 */

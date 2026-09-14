@@ -1,12 +1,16 @@
 <template>
   <div ref="rootRef" class="vs-pane" :data-theme="theme" :style="rootStyle">
-    <!-- 顶栏：标题 + 「文件」下拉菜单 + 项目目录 -->
-    <div class="vs-topbar">
-      <span class="vs-brand">{{ t("vsBrand") }}</span>
+    <!-- 顶栏：标题 + 「文件」下拉菜单 + 项目目录。空间不足时文本标签折叠成图标（compact） -->
+    <div ref="topbarRef" class="vs-topbar" :class="{ compact: topbarCompact }">
+      <span class="vs-brand" :title="t('vsBrand')">
+        <icon class="vs-topbar-ico" name="code" :size="14" />
+        <span class="vs-topbar-txt">{{ t("vsBrand") }}</span>
+      </span>
       <span class="vs-sep"></span>
       <!-- 「文件」菜单：打开文件夹 / 保存 / 另存为 / 全部保存（对齐 VS Code 的菜单组织方式） -->
-      <button ref="fileBtnRef" class="vs-btn vs-btn-menu" :class="{ open: fileMenuOpen }" @click="openFileMenu">
-        {{ t("vsMenuFile") }}
+      <button ref="fileBtnRef" class="vs-btn vs-btn-menu" :class="{ open: fileMenuOpen }" :title="t('vsMenuFile')" @click="openFileMenu">
+        <icon class="vs-topbar-ico" name="folder" :size="13" />
+        <span class="vs-topbar-txt">{{ t("vsMenuFile") }}</span>
         <span class="vs-caret"></span>
       </button>
       <span class="vs-proj" :title="vsState.projectDir ?? ''">{{ vsState.projectDir || t("vsNoProject") }}</span>
@@ -47,16 +51,29 @@
         </div>
       </div>
       <!-- 最近项目：一键切回打开过的项目目录（当前项目标记并置灰） -->
-      <button ref="recentBtnRef" class="vs-btn vs-btn-menu" :class="{ open: recentMenuOpen }" @click="openRecentMenu">
-        {{ t("vsRecentProjects") }}
+      <button ref="recentBtnRef" class="vs-btn vs-btn-menu" :class="{ open: recentMenuOpen }" :title="t('vsRecentProjects')" @click="openRecentMenu">
+        <icon class="vs-topbar-ico" name="clock" :size="13" />
+        <span class="vs-topbar-txt">{{ t("vsRecentProjects") }}</span>
         <span class="vs-caret"></span>
       </button>
     </div>
 
     <div class="vs-body">
-      <!-- 左栏：项目目录树 -->
+      <!-- 左栏：顶部「文件 / 搜索」tab + 项目目录树 + 底部 Git 提交记录栏（只占左栏） -->
       <div class="vs-left" :style="leftStyle">
+        <!-- 左栏 tab：默认「文件」（目录树），可切「搜索」（全局内容搜索，点击命中行跳转） -->
+        <div class="vs-left-tabs">
+          <button class="vs-left-tab" :class="{ active: leftTab === 'files' }" :title="t('vsLeftTabFiles')" @click="leftTab = 'files'">
+            <icon name="folder" :size="12" />
+            <span>{{ t("vsLeftTabFiles") }}</span>
+          </button>
+          <button class="vs-left-tab" :class="{ active: leftTab === 'search' }" :title="t('vsLeftTabSearch')" @click="leftTab = 'search'">
+            <icon name="search" :size="12" />
+            <span>{{ t("vsLeftTabSearch") }}</span>
+          </button>
+        </div>
         <ProjectTree
+          v-show="leftTab === 'files'"
           ref="treeRef"
           :root="vsState.projectDir"
           :active-path="vsState.activeTab"
@@ -64,6 +81,10 @@
           @file-removed="onFileRemoved"
           @file-renamed="onFileRenamed"
         />
+        <!-- 全局内容搜索：按文件分组展示命中行，点击打开文件并跳到对应行 -->
+        <VSSearchPanel v-if="leftTab === 'search'" :project-dir="vsState.projectDir || ''" @open="onSearchOpen" />
+        <!-- Git 提交记录栏：非 git 仓库时整个不渲染；文件详情按钮 → 右栏展示 diff -->
+        <vs-git-bar @open-diff="showDiffPane" />
       </div>
       <!-- 拖拽分隔条 -->
       <div
@@ -77,7 +98,7 @@
       <div class="vs-right">
         <TabBar
           :tabs="tabs"
-          :active="vsState.activeTab"
+          :active="activeTabId"
           @select="selectTab"
           @close="closeTab"
           @save="savePath"
@@ -87,7 +108,11 @@
           @close-all="closeAllOpen"
         />
         <div class="vs-editor-wrap">
-          <div v-if="!vsState.activeTab" class="vs-empty">
+          <!-- 提交文件详情（diff）：来自左栏 Git 记录栏的文件按钮，选中任何标签页时自动关闭 -->
+          <div v-if="diffPane" class="vs-diffpane">
+            <GitDiffView :lines="diffPane.lines" :empty="t('gitDiffEmpty')" />
+          </div>
+          <div v-else-if="!vsState.activeTab" class="vs-empty">
             <div class="vs-empty-hint">{{ t("vsEmptyHint") }}</div>
             <button class="vs-btn" @click="selectProject">{{ t("vsOpenFolder") }}</button>
           </div>
@@ -177,7 +202,7 @@
     <!-- 选择文件夹弹窗（替代原生目录选择器） -->
     <path-picker-dialog
       v-model="pickerVisible"
-      :initial-dir="vsState.projectDir"
+      :initial-dir="projectPickerDir"
       @confirm="onPickFolder"
     />
     <!-- 另存为弹窗：浏览到目标文件夹 + 填文件名（替代手输绝对路径的输入框） -->
@@ -192,36 +217,49 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import ProjectTree from "./ProjectTree.vue";
 import TabBar, { type TabInfo } from "./TabBar.vue";
 import CodeEditor from "./CodeEditor.vue";
 import PathPickerDialog from "./PathPickerDialog.vue";
+import VsGitBar from "./VSGitBar.vue";
+import VSSearchPanel from "./VSSearchPanel.vue";
+import GitDiffView from "../git/GitDiffView.vue";
+import Icon from "../../common/Icon.vue";
 import ConfirmDialog from "../../common/ConfirmDialog.vue";
 import ContextMenu from "../../common/ContextMenu.vue";
 import type { EolStyle, MenuItem, TextEncoding } from "../../../../shared/types";
-import {
-  vsState,
-  vsReady,
-  initVSCodeState,
-  persistVSCode,
-  fileViewOf,
-  rememberFileView,
-  rememberProject,
-  stashOpenBuffers,
-  takeStashedBuffers,
-  type OpenBuffer,
-} from "../../../stores/vscode";
+import { VS_STORE_KEY, defaultVSCodeStore, type OpenBuffer, type VSCodeStore } from "../../../stores/vscode";
 import * as api from "../../../composables/core/useApi";
+import { clearPendingEditorProject, floatTab, openNewEditorTab, takePendingEditorProject } from "../../../composables/core/sidebarRight";
 import { confirmDialog } from "../../../composables/core/dialog";
-import { toast } from "../../../stores/workbench";
+import { toast, openNewTerminal } from "../../../stores/workbench";
 import { t } from "../../../composables/core/i18n";
 import { useTheme } from "../../../composables/core/theme";
 import { prefs } from "../../../composables/core/settings";
 import { languageLabelFor } from "./langResolver";
 
-/** VS Code 面板使用的独立根 key（与工作区 default 互不干扰）。 */
-const VS_KEY = "vscode";
+/**
+ * 本面板所属的**文件编辑器实例**。
+ *
+ * 面板可以同时挂载多份（DSH 右侧栏分栏 / 浮窗各一份），实例由 `main.ts` 按 DSH tab id
+ * 分槽后 provide 下来 —— 每份实例有独立的项目目录、标签、展开态与未保存缓冲。
+ * 注入缺失时（独立调试、旧版宿主）退化为槽 1 的兜底实例，行为与改造前一致。
+ */
+const store: VSCodeStore = inject(VS_STORE_KEY) ?? defaultVSCodeStore();
+/** 存储字段的本地别名：模板与既有逻辑沿用改造前的命名，避免大范围改写。 */
+const vsState = store.state;
+const vsReady = store.ready;
+/** 本实例在宿主侧的独立根 key（`vscode` / `vscode-2` / …），读写守卫按它隔离。 */
+const VS_KEY = store.rootKey;
+const initVSCodeState = (): Promise<void> => store.init();
+const persistVSCode = (): void => store.persist();
+const rememberProject = (dir: string): void => store.rememberProject(dir);
+const fileViewOf = (path: string | null): { scrollTop?: number; anchor?: number } => store.fileViewOf(path);
+const rememberFileView = (path: string, view: { scrollTop?: number; anchor?: number }): void =>
+  store.rememberFileView(path, view);
+const stashOpenBuffers = (buffers: Record<string, OpenBuffer>): void => store.stashOpenBuffers(buffers);
+const takeStashedBuffers = (): Record<string, OpenBuffer> => store.takeStashedBuffers();
 
 /** 外部改动检测轮询间隔：足以发现外部保存，又不至于把 host 打满。 */
 const POLL_MS = 2500;
@@ -246,12 +284,36 @@ const docRevs = reactive<Record<string, number>>({});
 const saving = ref(false);
 /** 选择文件夹弹窗可见性。 */
 const pickerVisible = ref(false);
+/**
+ * 选择文件夹弹窗的起始目录：**项目目录的父目录**，而不是项目目录本身。
+ *
+ * 若直接用 `vsState.projectDir`，每次「选择项目文件夹」都会把弹窗定位进该文件夹内部；
+ * 停在父目录则重开时看到项目目录本身（可再次选中），不会一打开就「进入文件夹内」。
+ * 项目目录为空（空白窗口）或无父级（盘符根）时回退到 null（弹窗从「我的电脑」开始）。
+ */
+const projectPickerDir = computed<string | null>(() => {
+  const d = vsState.projectDir;
+  if (!d) return null;
+  const norm = d.replace(/[\\/]+$/, "");
+  const i = Math.max(norm.lastIndexOf("/"), norm.lastIndexOf("\\"));
+  if (i <= 0) return null;
+  const parent = norm.slice(0, i);
+  return /^[A-Za-z]:$/.test(parent) ? null : parent;
+});
 /** 另存为弹窗可见性 + 初始目录 / 初始文件名（打开时按当前文件算出）。 */
 const saveAsVisible = ref(false);
 const saveAsDir = ref<string | null>(null);
 const saveAsName = ref("");
 /** 目录树实例（挂载后显式重建一次，兜住「切回面板内容为空」）。 */
 const treeRef = ref<InstanceType<typeof ProjectTree> | null>(null);
+/** 左栏 tab：'files' = 目录树（默认），'search' = 全局内容搜索。 */
+const leftTab = ref<"files" | "search">("files");
+
+/** 左栏搜索结果点击：相对路径 → 绝对路径后打开并跳行。 */
+function onSearchOpen(rel: string, ln: number): void {
+  if (!vsState.projectDir) return;
+  void openFile(absOf(rel, vsState.projectDir), { line: ln });
+}
 /** 光标位置（状态栏）。 */
 const cursor = reactive({ line: 1, col: 1 });
 /** 外部改动检测的定时器句柄。 */
@@ -278,13 +340,29 @@ function isWithin(root: string, target: string): boolean {
   return p === r || p.startsWith(`${r}\\`) || p.startsWith(`${r}/`);
 }
 
-const tabs = computed<TabInfo[]>(() =>
-  vsState.openTabs.map((path) => ({
+/* 「变更详情」伪标签：路径 = vs-diff://<标题>，TabBar 用 basename 显示标题。 */
+const DIFF_PREFIX = "vs-diff://";
+
+const tabs = computed<TabInfo[]>(() => {
+  const list: TabInfo[] = vsState.openTabs.map((path) => ({
     path,
     dirty: buffers[path]?.dirty ?? false,
     conflict: buffers[path]?.conflict ?? false,
-  })),
+  }));
+  // diff 详情打开时在末尾追加一个伪标签（不进 openTabs、不持久化）
+  if (diffPane.value) list.push({ path: DIFF_PREFIX + diffPane.value.title, dirty: false, icon: "fileOut" });
+  return list;
+});
+
+/** TabBar 高亮：diff 详情打开时高亮伪标签，否则高亮真实文件标签。 */
+const activeTabId = computed<string | null>(() =>
+  diffPane.value ? DIFF_PREFIX + diffPane.value.title : vsState.activeTab,
 );
+
+/** 是否为「变更详情」伪标签路径。 */
+function isDiffTab(path: string): boolean {
+  return path.startsWith(DIFF_PREFIX);
+}
 
 const activeBuffer = computed<OpenBuffer | undefined>(() =>
   vsState.activeTab ? buffers[vsState.activeTab] : undefined,
@@ -433,6 +511,12 @@ const dirtyPaths = computed<string[]>(() => vsState.openTabs.filter((p) => buffe
 const fileMenuItems = computed<MenuItem[]>(() => [
   { label: t("vsOpenFolder"), icon: "folderOpen", onClick: selectProject },
   { separator: true },
+  // 多窗口：在当前分栏的 tab 条上**平级**再开一个编辑器 / 把本编辑器弹出为浮窗。
+  { label: t("vsNewWindow"), icon: "panellayout", onClick: newEditorWindow },
+  { label: t("vsFloatWindow"), icon: "float", disabled: !store.tabId, onClick: floatThisWindow },
+  // 新建终端：在当前编辑器项目目录下开一个独立的终端标签页（全局单例、多标签）。
+  { label: t("vsNewTerminal"), icon: "terminal", onClick: newTerminalInEditor },
+  { separator: true },
   {
     label: t("vsSave"),
     icon: "save",
@@ -468,8 +552,9 @@ function shortenDir(p: string, max = 32): string {
 }
 
 /**
- * 最近项目菜单：列出打开过的项目目录（当前项目标记并置灰），底部附「打开文件夹…」。
- * 切换复用 `onPickFolder`——它已经带有未保存改动的确认与标签清理。
+ * 最近项目菜单：列出打开过的项目目录（当前项目标记并置灰），底部附「清除记录」
+ * （子菜单：逐条移除 / 清空全部）与「打开文件夹…」。
+ * 切换复用 `onPickFolder`——它已经带有未保存改动的确认与标签清理；清除操作立即落盘。
  */
 const recentMenuItems = computed<MenuItem[]>(() => {
   const items: MenuItem[] = vsState.recentProjects.map((p) => ({
@@ -480,6 +565,26 @@ const recentMenuItems = computed<MenuItem[]>(() => {
     onClick: () => void onPickFolder(p),
   }));
   items.push({ separator: true });
+  items.push({
+    label: t("vsRecentClear"),
+    icon: "trash",
+    disabled: vsState.recentProjects.length === 0,
+    children: [
+      ...vsState.recentProjects.map<MenuItem>((p) => ({
+        label: basename(p) || p,
+        hint: shortenDir(dirnameOf(p)),
+        icon: "close",
+        onClick: () => store.forgetProject(p),
+      })),
+      { separator: true },
+      {
+        label: t("vsRecentClearAll"),
+        icon: "trash",
+        disabled: vsState.recentProjects.length === 0,
+        onClick: () => store.clearRecentProjects(),
+      },
+    ],
+  });
   items.push({ label: t("vsOpenFolder"), icon: "folderOpen", onClick: selectProject });
   return items;
 });
@@ -674,6 +779,69 @@ function selectProject(): void {
   pickerVisible.value = true;
 }
 
+/* ---------- 多窗口（同分栏平级再开 / 浮窗） ---------- */
+
+/**
+ * 新建编辑器窗口：在**当前分栏的 tab 条上平级**再开一个编辑器 tab（**不做分栏**）。
+ *
+ * 宿主对页 tab 的唯一性判定是「每分栏每 kind 至多一个」（页地址 = `sidebar://<kind>`），
+ * 因此「平级多开」的做法是由 client 侧给每个新 tab 分配一个尚未占用的 kind
+ * （`vscode` / `vscode-2` / …）再 `openTab`；新 tab 落在当前活动分栏，即用户点按钮时所在的
+ * 那一格，所以不会把右侧栏分成两格。池满（8 个）时会顶替编号最小的那一个。
+ *
+ * 新实例是**空白窗口**（经 `params.fresh` 下发）：既不恢复持久化状态，也不继承任何项目目录。
+ */
+function newEditorWindow(): void {
+  // 先落盘当前实例：池满替换时被顶替的那一份可能正是自己，别把它的最新状态丢掉。
+  persistVSCode();
+  if (!openNewEditorTab({ fresh: true })) toast("info", t("vsNewWindowLimit"));
+}
+
+/** 把本编辑器弹出为独立浮窗（浮窗与停靠面板共用同一份实例状态）。 */
+function floatThisWindow(): void {
+  if (!store.tabId) return;
+  floatTab(store.tabId);
+}
+
+/**
+ * 新建终端：在当前编辑器的项目目录下开一个独立终端标签页。
+ *
+ * 终端是全局单例（多标签），`openNewTerminal` 会按「已开则追加标签、未开则打开并自建首屏标签」
+ * 处理；请求的目录经 `wb.termRequestCwd` 落到新建标签上，因此新终端直接停在项目目录里。
+ */
+function newTerminalInEditor(): void {
+  openNewTerminal(vsState.projectDir ?? "");
+}
+
+/**
+ * 处理外部「在文件编辑器中打开某项目」的请求。
+ *
+ * 请求由桥接层从该 tab 的导航参数里取出后投递
+ * （`openTab('vscode', { params: { projectDir } })` → `useTabInfo().tab.navigation.params`）。
+ * 复用 `onPickFolder`：它已包含未保存改动的确认、host 根注册与标签清理。
+ */
+async function applyExternalProject(): Promise<void> {
+  // 先等持久化状态就绪：请求可能在 init 尚未完成时到达（工作台右键「在文件编辑器中打开」
+  // 新开窗口的典型时序）—— 若不等，init 稍后的「恢复/继承项目目录」会把这里刚设置的目录
+  // 覆盖掉，表现为「打开的不是右键选中的文件夹」。
+  await store.init();
+  // 等待期间可能有更新的请求到达：以最新一条为准。
+  const req = store.projectRequest.value;
+  if (!req) return;
+  // 先消费请求再切换：切换过程里可能弹确认框（用户取消也不该反复追问）。
+  store.projectRequest.value = null;
+  // 参数通道已送达 → 作废兜底投递，避免切面板重挂载时把用户后来换掉的项目又跳回来。
+  clearPendingEditorProject();
+  if (req.dir === vsState.projectDir) return;
+  await onPickFolder(req.dir);
+}
+
+// 外部请求的监听放在 setup 顶层（自动随组件卸载失效）；挂载瞬间就存在的请求由 onMounted 补做。
+watch(
+  () => store.projectRequest.value?.n,
+  () => void applyExternalProject(),
+);
+
 /** 弹窗确认：设置项目目录并注册为独立根；**选择新文件夹时关闭右侧所有已打开文件**。 */
 async function onPickFolder(dir: string): Promise<void> {
   const changed = dir !== vsState.projectDir;
@@ -710,12 +878,18 @@ function closeAllTabs(): void {
   vsState.activeTab = null;
 }
 
-/** 打开一个文件：加入标签并加载内容。 */
-async function openFile(path: string): Promise<void> {
+/** 打开一个文件：加入标签并加载内容；opts.line 传入时打开后跳到该行（左栏搜索结果跳转用）。 */
+async function openFile(path: string, opts?: { line?: number }): Promise<void> {
+  diffPane.value = null; // 打开文件时关闭提交文件详情
   if (!vsState.openTabs.includes(path)) vsState.openTabs.push(path);
   vsState.activeTab = path;
   // 已有缓冲区（含跨面板暂存恢复的未保存内容）不再覆盖。
   if (!buffers[path]) await loadContent(path);
+  if (opts?.line) {
+    // 等编辑器挂载完成再跳行（内容加载后 v-else 分支才渲染 CodeEditor）。
+    await nextTick();
+    editorRef.value?.revealLine(opts.line);
+  }
   persistVSCode();
 }
 
@@ -760,9 +934,18 @@ async function loadContent(path: string, opts: LoadOptions = {}): Promise<void> 
 }
 
 function selectTab(path: string): void {
+  if (isDiffTab(path)) return; // 伪标签：详情已在展示，无需处理
+  diffPane.value = null; // 切换标签页时关闭提交文件详情
   vsState.activeTab = path;
   if (!buffers[path] && !errors[path]) void loadContent(path);
   persistVSCode();
+}
+
+/* ── 提交文件详情（diff）：由左栏 Git 记录栏的文件详情按钮打开，以伪标签形式占据顶部标签栏 ── */
+const diffPane = ref<{ title: string; lines: string[] } | null>(null);
+
+function showDiffPane(p: { title: string; lines: string[] }): void {
+  diffPane.value = p;
 }
 
 function onEditorChange(value: string): void {
@@ -982,6 +1165,10 @@ function openActiveExternal(): void {
 
 /** 关闭标签（有未保存改动时确认）。 */
 async function closeTab(path: string): Promise<void> {
+  if (isDiffTab(path)) {
+    diffPane.value = null; // 伪标签：直接关闭详情，回到此前激活的真实标签
+    return;
+  }
   const b = buffers[path];
   if (b?.dirty) {
     const ok = await confirmDialog({ title: t("vsUnsavedTitle"), message: t("vsUnsavedMsg") });
@@ -1008,6 +1195,7 @@ async function closeSaveTab(path: string): Promise<void> {
 
 /** 关闭除指定标签外的全部标签。 */
 async function closeOthers(path: string): Promise<void> {
+  if (isDiffTab(path)) return; // 伪标签：不参与真实标签的批量关闭
   for (const p of [...vsState.openTabs]) {
     if (p !== path) await closeTab(p);
   }
@@ -1015,6 +1203,7 @@ async function closeOthers(path: string): Promise<void> {
 
 /** 关闭指定标签右侧的全部标签。 */
 async function closeRight(path: string): Promise<void> {
+  if (isDiffTab(path)) return; // 伪标签恒在最右，无「右侧」可关
   const idx = vsState.openTabs.indexOf(path);
   if (idx < 0) return;
   for (const p of vsState.openTabs.slice(idx + 1)) await closeTab(p);
@@ -1127,7 +1316,34 @@ function onBeforeUnload(e: BeforeUnloadEvent): void {
   }
 }
 
+/* ── 顶栏紧凑模式：宽度不够放下全部文本（文本会折行）时，把「文件编辑器 / 文件 / 最近项目」折叠成图标 ── */
+const topbarRef = ref<HTMLElement | null>(null);
+const topbarCompact = ref(false);
+let topbarRO: ResizeObserver | null = null;
+
+/**
+ * 确定性评估：临时移除 compact（直接操作 DOM，绕过 Vue 异步更新）测展开态溢出量，
+ * 放不下就折回 compact。每次评估都从展开态测起，状态由当前宽度唯一决定——
+ * 不会出现「折叠后内容变窄 → 以为放得下 → 退出 → 又溢出」的震荡，
+ * 因此拉宽后必然恢复文字（旧实现按 compact 态 scrollWidth 判断，震荡后卡死在图标态）。
+ */
+function evalTopbarCompact(): void {
+  const bar = topbarRef.value;
+  if (!bar) return;
+  bar.classList.remove("compact");
+  const overflow = bar.scrollWidth - bar.clientWidth;
+  const compact = overflow > 1;
+  bar.classList.toggle("compact", compact);
+  topbarCompact.value = compact;
+}
+
 onMounted(async () => {
+  // 顶栏宽度监听：内容放不下（会折行）时把文本标签折叠成图标。
+  if (topbarRef.value) {
+    topbarRO = new ResizeObserver(() => evalTopbarCompact());
+    topbarRO.observe(topbarRef.value);
+    evalTopbarCompact();
+  }
   await initVSCodeState();
   // 恢复本会话内、上次面板卸载时暂存的未保存缓冲区（切面板不丢改动）。
   const stashed = takeStashedBuffers();
@@ -1157,9 +1373,16 @@ onMounted(async () => {
   void pollExternal();
   // 后台预取一次项目文件索引：让首次 Ctrl+P / 聚焦搜索框立刻有结果。
   void ensureFileIndex();
+  // 兜底：宿主未下发 tab 信息钩子（拿不到导航参数）时，取用工作台投递的待打开目录。
+  const pendingDir = takePendingEditorProject();
+  if (pendingDir) store.requestOpenProject(pendingDir);
+  // 挂载前就投递过来的「打开某项目」请求在这里补做（挂载后的请求由 watch 处理）。
+  if (store.projectRequest.value) await applyExternalProject();
 });
 
 onBeforeUnmount(() => {
+  topbarRO?.disconnect();
+  topbarRO = null;
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("beforeunload", onBeforeUnload);
   window.removeEventListener("beforeunload", persistVSCode);
@@ -1198,10 +1421,20 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 .vs-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-weight: 600;
   letter-spacing: 0.4px;
   color: var(--dsh-fg, #c9d1d9);
+  white-space: nowrap;
 }
+/* 顶栏紧凑模式：正常态只显示文本；空间不足（.compact）时文本换成图标，避免折行 */
+.vs-topbar .vs-topbar-ico { display: none; color: var(--dsh-fg, #c9d1d9); }
+.vs-topbar.compact .vs-topbar-ico { display: inline-flex; }
+.vs-topbar.compact .vs-topbar-txt { display: none; }
+.vs-topbar.compact .vs-sep { display: none; }
+.vs-topbar.compact .vs-search-input { width: 120px; }
 .vs-sep {
   width: 1px;
   height: 16px;
@@ -1312,6 +1545,7 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  white-space: nowrap;
 }
 .vs-btn-menu.open {
   background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
@@ -1336,8 +1570,48 @@ onBeforeUnmount(() => {
   min-width: 0;
   height: 100%;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
   background: var(--dsh-bg2, #161b22);
   border-right: 1px solid var(--dsh-border, #30363d);
+}
+/* 左栏顶部 tab：文件 / 搜索 */
+.vs-left-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 2px;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--dsh-border, #30363d);
+  user-select: none;
+}
+.vs-left-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsh-fg-weak, #8b949e);
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
+  cursor: pointer;
+  white-space: nowrap;
+}
+.vs-left-tab:hover {
+  background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
+  color: var(--dsh-fg, #c9d1d9);
+}
+.vs-left-tab.active {
+  color: var(--dsh-fg, #c9d1d9);
+  background: var(--dsh-hover, rgba(255, 255, 255, 0.1));
+  font-weight: 600;
+}
+/* 搜索 tab 时目录树隐藏，搜索面板吃掉剩余高度（.vs-sp 自带 flex:1） */
+/* 目录树吃掉剩余高度，Git 记录栏固定在左栏底部。 */
+.vs-left :deep(.vs-tree) {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
 }
 .vs-split {
   flex: 0 0 6px;
@@ -1445,5 +1719,23 @@ onBeforeUnmount(() => {
 .vs-status-btn:disabled {
   cursor: default;
   opacity: 0.6;
+}
+/* ── 提交文件详情（diff）：覆盖编辑区的只读视图（标题在顶部伪标签上，无内部标题栏） ── */
+.vs-diffpane {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--dsh-bg, #0d1117);
+  z-index: 5;
+}
+/* 长行自动换行，不出横向滚动条（只作用于本视图，GitPanel 的 diff 仍保持不换行） */
+.vs-diffpane :deep(.fw-diff-body) {
+  overflow-x: hidden;
+}
+.vs-diffpane :deep(.fw-diff-line) {
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 </style>

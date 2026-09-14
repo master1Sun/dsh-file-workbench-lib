@@ -274,6 +274,28 @@ export function batchReplace(
   });
 }
 
+/** 全局内容搜索（grep 式）：按行命中、按文件分组，供左栏「搜索」tab 展示与跳转。 */
+export function grep(
+  q: string,
+  opts: { key?: string; path?: string; caseSensitive?: boolean; regex?: boolean } = {},
+): Promise<{
+  files: Array<{ rel: string; hits: Array<{ ln: number; text: string }> }>;
+  total: number;
+  truncated: boolean;
+  scope: string;
+}> {
+  return request(
+    "GET",
+    `/grep${qs({
+      key: opts.key,
+      q,
+      path: opts.path,
+      case: opts.caseSensitive ? "1" : undefined,
+      regex: opts.regex ? "1" : undefined,
+    })}`,
+  );
+}
+
 /** “我的电脑”顶层入口（盘符/Home/下载/工作区/回收站）。 */
 export function myComputer(key?: string): Promise<{ items: MyComputerItem[] }> {
   return request("GET", `/mycomputer${qs({ key })}`);

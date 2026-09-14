@@ -24,7 +24,7 @@ import {
   resolveExisting,
   resolveWritePath,
 } from "../fs/fs-tree.js";
-import { replaceInFiles, searchFiles, listProjectFiles } from "../fs/fs-search.js";
+import { replaceInFiles, searchFiles, grepFiles, listProjectFiles } from "../fs/fs-search.js";
 import { listDrives } from "../fs/fs-drives.js";
 import { saveText } from "../fs/fs-read.js";
 import { decodeText, encodeText, type EolStyle, type TextEncoding } from "../fs/text-codec.js";
@@ -246,6 +246,17 @@ export const fsResource: RouteMatcher = async (req, res, seg, q, method, host) =
       const outcome = await searchFiles(base, qText, { maxMatches: limit, caseSensitive, regex });
       return (json(res, 200, { ok: true, data: { ...outcome, scope: base } }), true);
     }
+
+  // --- 全局内容搜索（grep 式）：按行命中、按文件分组，供左栏「搜索」tab 展示与跳转 ---
+  if (seg[0] === "grep" && seg.length === 1 && method === "GET") {
+    const qText = q.get("q") ?? "";
+    const scoped = q.get("path")?.trim();
+    const base = scoped ? requireAbsolute(scoped) : getRoot(q.get("key") ?? undefined) ?? homedir();
+    const caseSensitive = q.get("case") === "1";
+    const regex = q.get("regex") === "1";
+    const outcome = await grepFiles(base, qText, { caseSensitive, regex });
+    return (json(res, 200, { ok: true, data: { ...outcome, scope: base } }), true);
+  }
 
   // --- 建目录 ---
   if (seg[0] === "mkdir" && seg.length === 1 && method === "POST") {

@@ -254,7 +254,10 @@ function updatePos(): void {
   const centerX = r.left + r.width / 2;
   const width = Math.min(PANEL_W, Math.max(vw - EDGE * 2, 200));
   const maxLeft = Math.max(vw - width - EDGE, EDGE);
-  const left = Math.min(Math.max(centerX - width / 2, EDGE), maxLeft);
+  // 按钮位于视口左半侧（现在它就贴在状态栏最左）→ 面板左沿对齐按钮左沿、向右展开，
+  // 避免「以按钮为中心」把面板甩到工作台左边界之外；按钮偏右时仍按中心对齐。
+  const anchor = centerX < vw / 2 ? r.left - 2 : centerX - width / 2;
+  const left = Math.min(Math.max(anchor, EDGE), maxLeft);
   pos.width = Math.round(width);
   pos.left = Math.round(left);
   pos.bottom = Math.round(vh - r.top + ARROW_GAP);
@@ -453,7 +456,8 @@ function onDocDown(e: MouseEvent): void {
 .fw-bg-task-fab {
   position: relative;
   flex: 0 0 auto;
-  margin-left: auto;
+  /* 贴在状态栏最左：不再用 auto 外边距把按钮推向右侧（那是它居中时的写法）。 */
+  margin: 0 0 0 0;
   width: 26px;
   height: 22px;
   border: 1px solid var(--dsh-border, #d0d7de);

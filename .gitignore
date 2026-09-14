@@ -18,3 +18,4 @@
 /_*.txt
 # Windows 保留名垃圾文件（会导致 git add -A 报 invalid path）
 /nul
+tmp

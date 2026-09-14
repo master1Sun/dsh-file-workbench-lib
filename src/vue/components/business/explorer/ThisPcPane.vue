@@ -121,6 +121,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watchEffect } from "vue";
 import { useI18n } from "../../../composables/core/i18n";
+import { openProjectInEditor } from "../../../composables/core/sidebarRight";
 import { explorer, browseTo, refreshListing } from "../../../stores/explorer";
 import {
   toggleFavorite,
@@ -276,12 +277,13 @@ function openMenu(e: MouseEvent, items: MenuItem[]): void {
   cmOpen.value = true;
 }
 
-/** 驱动器右键：打开 / 收藏 / 复制完整路径 / 属性（对齐 Win11 的常用项）。 */
+/** 驱动器右键：打开 / 在文件编辑器中打开 / 收藏 / 复制完整路径 / 属性（对齐 Win11 的常用项）。 */
 function onDriveCtx(e: MouseEvent, d: DriveInfo): void {
   sel.value = d.path;
   const fav = isFavorite(d.path);
   openMenu(e, [
     { label: t("menuOpen"), icon: "arrowRight", onClick: () => open(d) },
+    { label: t("menuOpenInEditor"), icon: "code", onClick: () => openProjectInEditor(d.path) },
     { separator: true },
     {
       label: fav ? t("favoriteRemove") : t("favoriteAdd"),

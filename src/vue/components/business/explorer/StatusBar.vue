@@ -1,16 +1,20 @@
 <template>
   <!--
     最底部 footer（Win11 风格）：
-    - 左：等待中的操作高亮提示（优先）→ 文件信息（项目数 / 选中数 · 状态文本，原文件列表
-      内部底栏已并入此处）→ 此电脑 / 回收站的条目数；
-    - 中：后台任务面板 + 最小化终端（整条 footer 的水平中点）；
+    - 左：后台任务按钮（贴面板左下角；弹窗由组件自身按按钮位置定位）→ 等待中的操作高亮提示（优先）
+      → 文件信息（项目数 / 选中数 · 状态文本，原文件列表内部底栏已并入此处）→ 此电脑 / 回收站的条目数；
     - 右：视图切换按钮（与文件列表同源，点击回落到 FileListPane.quickView）。
   -->
   <div class="fw-statusbar" :class="{ busy }">
     <!-- 顶部流动进度条：任何等待中的操作都显示，颜色跟随「设置 → 强调色」 -->
     <div v-if="busy" class="fw-status-progress" aria-hidden="true"></div>
 
-    <!-- 左：等待提示 > 文件信息 > 视图自带计数 -->
+    <!-- 最左：后台任务按钮（贴左下角）。弹窗是 fixed 定位，不参与本行布局。 -->
+    <div class="fw-status-tasks">
+      <BgTaskPanel />
+    </div>
+
+    <!-- 中：等待提示 > 文件信息 > 视图自带计数 -->
     <div class="fw-status-left">
       <span v-if="busyText" class="fw-status-busy">
         <span class="fw-status-busy-dot" aria-hidden="true"></span>
@@ -23,11 +27,6 @@
       </span>
       <span v-else-if="explorer.view === 'computer'">{{ t("statusDrivesCount", { count: explorer.drives.length }) }}</span>
       <span v-else-if="explorer.view === 'recycle'">{{ t("statusItemsCount", { count: explorer.recycleItems.length }) }}</span>
-    </div>
-
-    <!-- 中：后台任务（含历史归档，点击展开完整面板）；最小化终端改由全局 dock 栏承载 -->
-    <div class="fw-status-center">
-      <BgTaskPanel />
     </div>
 
     <!-- 右：视图切换（仅文件列表挂载期间可用） -->
@@ -97,8 +96,8 @@ const busyText = computed(() => {
   position: relative;
   flex: 0 0 auto;
   display: grid;
-  /* 三栏：左右等宽（各 1fr）→ 中间那一栏永远落在整条 footer 的水平中点 */
-  grid-template-columns: 1fr auto 1fr;
+  /* 三栏：任务按钮（内容宽）→ 信息（占满剩余）→ 视图切换（内容宽） */
+  grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 8px;
   height: 26px;
@@ -163,13 +162,13 @@ const busyText = computed(() => {
   text-overflow: ellipsis;
 }
 
-/* —— 中：后台任务 + 最小化终端 —— */
-.fw-status-center {
+/* —— 最左：后台任务按钮 —— */
+/* 刻意不设 overflow:hidden：按钮的运行数角标会上溢到按钮上沿之外，裁掉就看不见了。
+   （这也是它不放进 .fw-status-left 的原因 —— 那一格要裁剪过长文本。） */
+.fw-status-tasks {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 4px;
-  justify-self: center;
+  justify-self: start;
 }
 
 /* —— 右：视图切换 —— */

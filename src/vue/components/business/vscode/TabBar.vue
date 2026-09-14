@@ -1,5 +1,6 @@
 <template>
-  <div class="vs-tabs">
+  <!-- 标签过多时横向溢出：隐藏滚动条，鼠标滚轮悬停即可横向滚动（onWheel） -->
+  <div ref="tabsEl" class="vs-tabs" @wheel="onWheel">
     <div
       v-for="tab in tabs"
       :key="tab.path"
@@ -9,6 +10,7 @@
       @click="$emit('select', tab.path)"
       @contextmenu.prevent.stop="openMenu(tab, $event)"
     >
+      <icon v-if="tab.icon" :name="tab.icon" :size="12" />
       <span class="vs-tab-name">{{ basename(tab.path) }}</span>
       <span
         v-if="tab.dirty"
@@ -32,12 +34,30 @@ import { computed, ref } from "vue";
 import type { MenuItem } from "../../../../shared/types";
 import { t } from "../../../composables/core/i18n";
 import ContextMenu from "../../common/ContextMenu.vue";
+import Icon from "../../common/Icon.vue";
+
+/** 标签条元素（滚轮横向滚动用）。 */
+const tabsEl = ref<HTMLElement | null>(null);
+
+/**
+ * 滚轮横向滚动标签条：标签放不下时不显示滚动条（太窄难点），改用滚轮——
+ * 普通滚轮纵向增量、触控板/Shift+滚轮横向增量都映射到 scrollLeft。
+ * 无横向溢出时不拦截，交给默认行为。
+ */
+function onWheel(e: WheelEvent): void {
+  const el = tabsEl.value;
+  if (!el || el.scrollWidth <= el.clientWidth) return;
+  e.preventDefault();
+  el.scrollLeft += Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+}
 
 export interface TabInfo {
   path: string;
   dirty: boolean;
   /** 外部改动冲突（磁盘已变 + 本地有未保存改动），用醒目的圆点区分。 */
   conflict?: boolean;
+  /** 可选图标（伪标签用，如「变更详情」的 fileOut）。 */
+  icon?: string;
 }
 
 const props = defineProps<{
@@ -107,6 +127,13 @@ const menuItems = computed<MenuItem[]>(() => {
   background: var(--dsh-bg2, #161b22);
   border-bottom: 1px solid var(--dsh-border, #30363d);
   overflow-x: auto;
+  scrollbar-width: none; /* Firefox：隐藏横向滚动条，滚轮滚动（见 onWheel） */
+}
+.vs-tabs::-webkit-scrollbar {
+  height: 0;
+  display: none; /* Chrome/Edge：隐藏横向滚动条 */
+}
+.vs-tabs {
   overflow-y: hidden;
 }
 .vs-tab {

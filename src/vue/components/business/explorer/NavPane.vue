@@ -138,6 +138,7 @@ import { computed, ref } from "vue";
 import { explorer, browseTo, enterRecycle, openThisPc, refreshListing } from "../../../stores/explorer";
 import { openTerminal } from "../../../stores/workbench";
 import { useI18n } from "../../../composables/core/i18n";
+import { openProjectInEditor } from "../../../composables/core/sidebarRight";
 import { openPreview, toast } from "../../../stores/workbench";
 import { sessionSse } from "../../../composables/session/sessionSse";
 import { favorites, layout, saveLayout, toggleFavorite, isFavorite } from "../../../composables/core/settings";
@@ -373,11 +374,12 @@ function openMenu(e: MouseEvent, items: MenuItem[]): void {
   cmOpen.value = true;
 }
 
-/** 路径型条目的右键菜单：打开 / 收藏 / 复制完整路径（属性需递归统计目录大小，故不在此提供）。 */
+/** 路径型条目的右键菜单：打开 / 在文件编辑器中打开 / 收藏 / 复制完整路径（属性需递归统计目录大小，故不在此提供）。 */
 function onPathCtx(e: MouseEvent, path: string): void {
   const fav = isFavorite(path);
   openMenu(e, [
     { label: t("menuOpen"), icon: "arrowRight", onClick: () => void browseTo(path) },
+    { label: t("menuOpenInEditor"), icon: "code", onClick: () => openProjectInEditor(path) },
     { separator: true },
     {
       label: fav ? t("favoriteRemove") : t("favoriteAdd"),

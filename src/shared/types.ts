@@ -382,14 +382,73 @@ declare global {
       appendSessionReference?: (path: string, isDir?: boolean) => boolean;
     };
     /** 右侧面板模式挂载：把工作台主体（App.vue）挂进 DSH 右侧面板容器。 */
-    __dshFileWorkbenchMountPane__?: (el: HTMLElement, opts?: { apiBase?: string }) => {
-      unmount: () => void;
-    };
-    /** 右侧面板模式挂载：把 VS Code 编辑器主体（VSCodePane.vue）挂进 DSH 右侧面板容器。 */
-    __dshVSCodeMountPane__?: (el: HTMLElement, opts?: { apiBase?: string }) => {
-      unmount: () => void;
-    };
+    __dshFileWorkbenchMountPane__?: (el: HTMLElement, opts?: PaneMountOptions) => PaneMountHandle;
+    /** 右侧面板模式挂载：把文件编辑器主体（VSCodePane.vue）挂进 DSH 右侧面板容器。 */
+    __dshVSCodeMountPane__?: (el: HTMLElement, opts?: PaneMountOptions) => PaneMountHandle;
+    /**
+     * 右侧栏导航能力门面（由 client 侧 apply 发布）。
+     *
+     * 必须走 window 而不是模块导入：client（esbuild）与 Vue（vite）是两个独立的 bundle，
+     * 各自持有一份模块状态，直接 import 会导致 Vue 侧读到永远为空的引用。
+     */
+    __DSH_SIDEBAR_RIGHT__?: SidebarRightBridge;
   }
+}
+
+/** 右侧面板挂载选项（由桥接组件透传 tab 身份，决定文件编辑器实例槽位）。 */
+export interface PaneMountOptions {
+  apiBase?: string;
+  /** DSH 右侧栏 tab id（页面生命周期内稳定）。 */
+  instanceId?: string;
+  /** 该 tab 所在分栏 id（浮窗时为其浮窗 pane id）。 */
+  panelId?: string;
+}
+
+/** 面板挂载句柄。 */
+export interface PaneMountHandle {
+  unmount: () => void;
+  /** 仅文件编辑器实例提供：请求本实例打开某个项目目录。 */
+  openProject?: (dir: string) => void;
+}
+
+/** 右侧栏导航能力门面（`ctx.sidebarRight` 的安全包装，所有方法都不抛错）。 */
+export interface SidebarRightBridge {
+  /** 打开页 tab；`options.paneId` 落位到指定分栏、`params` 作为导航参数送达正文。 */
+  openTab(kind: string, options?: SidebarRightOpenOptions): void;
+  /** 把停靠分栏再分一格（上限两格）。@returns 新分栏 id；不可分时为 undefined。 */
+  split(paneId?: string): string | undefined;
+  /** 把停靠 tab 弹出为独立浮窗。 */
+  float(tabId: string): void;
+  /** 把浮窗收回停靠位。 */
+  dock(paneId: string): void;
+  /** 关闭一个 tab。 */
+  close(tabId: string): void;
+  /** 右侧栏当前是否展开。 */
+  isExpanded(): boolean;
+  /**
+   * 在当前分栏里**平级**再开一个文件编辑器 tab（不新建分栏）。
+   *
+   * 由 client 侧分配 kind 空槽（页 tab 在同一分栏内按 kind 唯一，故多开靠多占 kind）；
+   * 池已满（8 个都在用）时**顶替编号最小的那一个**，因此正常路径下不会失败。
+   *
+   * @param params - 新实例的导航参数：`{ fresh: true }` = 空白窗口；`{ projectDir }` = 直接
+   *   打开某项目。
+   * @returns 是否成功发起；宿主右侧栏服务不可用或 `openTab` 抛错时为 false（调用方据此提示）。
+   */
+  newEditorTab(params?: Record<string, unknown>): boolean;
+  /** 当前在册的编辑器 tab 数（= 已占用的 kind 数），供新建前判断池是否已满。 */
+  editorTabCount(): number;
+  /** 编辑器 kind 池容量。 */
+  editorTabLimit(): number;
+}
+
+/** 打开页 tab 的落位与参数选项。 */
+export interface SidebarRightOpenOptions {
+  paneId?: string;
+  replaceTab?: string;
+  revealIfOpened?: boolean;
+  /** 该 kind 的导航参数（页类型自行约定形状，宿主运行时不校验）。 */
+  params?: Record<string, unknown>;
 }
 
 /** 后台任务日志时间线上的一个步骤（任务过程中记录的每条中间/结束日志）。 */

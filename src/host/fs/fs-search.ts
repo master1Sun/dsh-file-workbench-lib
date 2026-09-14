@@ -329,6 +329,125 @@ export async function searchFiles(
   };
 }
 
+/* ---------- 全局内容搜索（grep 式：按行命中，按文件分组） ---------- */
+
+export interface GrepLineHit {
+  /** 1 起始行号。 */
+  ln: number;
+  /** 行文本（超长截断）。 */
+  text: string;
+}
+
+export interface GrepFileHit {
+  /** 相对搜索根的路径（'/' 分隔）。 */
+  rel: string;
+  hits: GrepLineHit[];
+}
+
+export interface GrepOutcome {
+  files: GrepFileHit[];
+  /** 命中行总数（受预算截断前）。 */
+  total: number;
+  truncated: boolean;
+}
+
+/** 单文件命中行数上限（防单文件刷屏）。 */
+const GREP_MAX_LINES_PER_FILE = 50;
+/** 命中文件数上限。 */
+const GREP_MAX_FILES = 200;
+/** 命中行总预算。 */
+const GREP_MAX_TOTAL = 2000;
+/** 单行展示截断长度。 */
+const GREP_LINE_MAX_CHARS = 400;
+
+/**
+ * grep 式全文搜索：遍历工作区文本文件，返回每个文件的命中行（行号 + 行文本）。
+ * 复用 searchFiles 的遍历约束（跳过噪声目录、大小上限、二进制跳过、预算截断）。
+ */
+export async function grepFiles(
+  root: string,
+  query: string,
+  opts: { caseSensitive?: boolean; regex?: boolean; maxFiles?: number; maxTotal?: number; maxVisited?: number } = {},
+): Promise<GrepOutcome> {
+  const needle = query.trim();
+  if (needle.length < CONTENT_MIN_QUERY) return { files: [], total: 0, truncated: false };
+  const maxFiles = opts.maxFiles ?? GREP_MAX_FILES;
+  const maxTotal = opts.maxTotal ?? GREP_MAX_TOTAL;
+  const maxVisited = opts.maxVisited ?? DEFAULT_MAX_VISITED;
+
+  // 内容判定统一走正则（字面量查询也已转义为正则），g 才能在一行内找多处。
+  const flags = opts.caseSensitive ? "g" : "gi";
+  const lineRe =
+    opts.regex
+      ? (() => {
+          try {
+            return new RegExp(needle, flags);
+          } catch {
+            return new RegExp(escapeRegex(needle), flags);
+          }
+        })()
+      : new RegExp(escapeRegex(needle), flags);
+
+  const files: GrepFileHit[] = [];
+  let total = 0;
+  let truncated = false;
+  let visited = 0;
+
+  const scanFile = async (file: string, rel: string): Promise<void> => {
+    try {
+      const s = await stat(file);
+      if (!s.isFile() || s.size <= 0 || s.size > CONTENT_MAX_BYTES) return;
+      const buf = await readFile(file);
+      if (buf.subarray(0, Math.min(512, buf.length)).includes(0)) return; // 二进制
+      const lines = buf.toString("utf8").split(/\r?\n/);
+      const hits: GrepLineHit[] = [];
+      for (let i = 0; i < lines.length; i++) {
+        lineRe.lastIndex = 0;
+        if (!lineRe.test(lines[i])) continue;
+        const raw = lines[i];
+        hits.push({ ln: i + 1, text: raw.length > GREP_LINE_MAX_CHARS ? `${raw.slice(0, GREP_LINE_MAX_CHARS)}…` : raw });
+        if (hits.length >= GREP_MAX_LINES_PER_FILE || total + hits.length >= maxTotal) {
+          truncated = true;
+          break;
+        }
+      }
+      if (hits.length > 0) {
+        files.push({ rel: normalize(rel), hits });
+        total += hits.length;
+        if (files.length >= maxFiles || total >= maxTotal) truncated = true;
+      }
+    } catch {
+      /* 无权限/读失败的文件跳过 */
+    }
+  };
+
+  const walk = async (dir: string): Promise<void> => {
+    if (truncated) return;
+    const level = await opendir(dir).catch(() => undefined);
+    if (level === undefined) return;
+    for await (const dirent of level) {
+      visited += 1;
+      if (visited > maxVisited) {
+        truncated = true;
+        return;
+      }
+      const rel = join(relative(root, dir), dirent.name);
+      if (dirent.isDirectory()) {
+        if (dirent.isSymbolicLink() || SEARCH_SKIP_DIRS.has(dirent.name.toLowerCase())) continue;
+        await walk(join(dir, dirent.name));
+        if (truncated) return;
+      } else if (dirent.isFile() && !dirent.isSymbolicLink()) {
+        await scanFile(join(dir, dirent.name), rel);
+        if (truncated) return;
+      }
+    }
+  };
+
+  await walk(root);
+  files.sort((a, b) => (a.rel < b.rel ? -1 : 1));
+  return { files, total, truncated };
+}
+
 /* ---------- 项目文件索引（「快速打开」用） ---------- */
 
 export interface FileIndexOutcome {

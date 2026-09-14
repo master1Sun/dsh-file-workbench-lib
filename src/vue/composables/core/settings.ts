@@ -43,6 +43,8 @@ export interface Prefs {
   txtWordWrap: boolean;
   /** 记事本（txt 编辑器）「查看 ▸ 状态栏」开关；持久化后下次打开沿用。 */
   txtShowStatus: boolean;
+  /** VS 面板左栏底部 Git 记录栏的展开高度（px，拖拽顶边调整）；0 = 用默认上限。 */
+  vsGitBarH: number;
 }
 
 const defaults: Prefs = {
@@ -63,6 +65,7 @@ const defaults: Prefs = {
   /** 记事本默认不自动换行、显示状态栏（与 Win10 记事本初始状态一致）。 */
   txtWordWrap: false,
   txtShowStatus: true,
+  vsGitBarH: 0,
 };
 
 /** 启动初始值一律用默认；initPersist() 拉取成功后再用后端值覆盖。 */
@@ -102,6 +105,7 @@ function sanitizePrefs(raw: unknown): Partial<Prefs> {
     out.termFontSize = src.termFontSize;
   if (typeof src.txtWordWrap === "boolean") out.txtWordWrap = src.txtWordWrap;
   if (typeof src.txtShowStatus === "boolean") out.txtShowStatus = src.txtShowStatus;
+  if (typeof src.vsGitBarH === "number" && src.vsGitBarH >= 0) out.vsGitBarH = src.vsGitBarH;
   return out;
 }
 

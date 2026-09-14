@@ -65,14 +65,14 @@
  * （跳过 node_modules/.git 等重量级目录，并限 20 个目录以内），写进 `expanded`；此后一律按
  * `expanded` 还原——包括根节点自身，用户折叠过就保持折叠。
  */
-import { computed, nextTick, reactive, ref, watch } from "vue";
+import { computed, inject, nextTick, reactive, ref, watch } from "vue";
 import * as api from "../../../composables/core/useApi";
 import { confirmDialog, promptDialog } from "../../../composables/core/dialog";
 import { copyText } from "../../../composables/ui/clipboard";
 import { openTerminal, toast } from "../../../stores/workbench";
 import { t } from "../../../composables/core/i18n";
 import type { FsEntry, GitFileStatus, MenuItem } from "../../../../shared/types";
-import { vsState, vsReady, persistVSCode, persistVSCodeSoon } from "../../../stores/vscode";
+import { VS_STORE_KEY, defaultVSCodeStore, type VSCodeStore } from "../../../stores/vscode";
 import { gitState, gitStatusOf, refreshGitStatus } from "../../../composables/domain/git";
 import { refreshSvnStatus, svnState } from "../../../composables/domain/svn";
 import { gitMenuFor, svnMenuFor, type RepoMenuActions } from "../../../composables/domain/repoMenu";
@@ -80,9 +80,6 @@ import ContextMenu from "../../common/ContextMenu.vue";
 import QuickCommit from "../git/QuickCommit.vue";
 import GitPanel from "../git/GitPanel.vue";
 import SvnPanel from "../git/SvnPanel.vue";
-
-/** VS Code 面板使用的独立根 key（与工作区 default 互不干扰，使项目目录内 CRUD 受 guardWsRoot 放行）。 */
-const VS_KEY = "vscode";
 
 export interface TreeEntry {
   path: string;
@@ -113,6 +110,20 @@ const emit = defineEmits<{
   (e: "file-removed", path: string): void;
   (e: "file-renamed", from: string, to: string): void;
 }>();
+
+/**
+ * 所属的文件编辑器实例（由 VSCodePane 提供）。
+ *
+ * 面板可同时挂载多份（右侧栏分栏 / 浮窗各一份），每份有自己的项目目录与展开态，
+ * 所以目录树**必须**用本实例的 store，而不是任何模块级单例。
+ */
+const store: VSCodeStore = inject(VS_STORE_KEY) ?? defaultVSCodeStore();
+const vsState = store.state;
+const vsReady = store.ready;
+/** 本实例在宿主侧的独立根 key（`vscode` / `vscode-2` / …）。 */
+const VS_KEY = store.rootKey;
+const persistVSCode = (): void => store.persist();
+const persistVSCodeSoon = (): void => store.persistSoon();
 
 const nodes = reactive<Record<string, TreeEntry>>({});
 const rootPath = ref<string | null>(null);

@@ -142,6 +142,30 @@ function focus(): void {
 }
 
 /**
+ * 跳转到指定行（1 起始）：选中该行、滚动到视口中间并短暂高亮。
+ * 供左栏「搜索」结果点击跳转用；行号越界时夹到文档范围内。
+ */
+function revealLine(ln: number): void {
+  const v = view.value;
+  if (!v) return;
+  const doc = v.state.doc;
+  const line = doc.line(Math.max(1, Math.min(doc.lines, ln)));
+  v.dispatch({
+    selection: { anchor: line.from, head: line.to },
+    effects: EditorView.scrollIntoView(line.from, { y: "center" }),
+  });
+  v.focus();
+  // 短暂高亮：给选中行 DOM 挂类，1.2s 后移除（不引入额外扩展，够用且零依赖）。
+  requestAnimationFrame(() => {
+    const lineDom = v.domAtPos(line.from).node as HTMLElement | null;
+    const el = lineDom instanceof HTMLElement ? (lineDom.closest?.(".cm-line") as HTMLElement | null) : null;
+    if (!el) return;
+    el.classList.add("cm-flash-line");
+    window.setTimeout(() => el.classList.remove("cm-flash-line"), 1200);
+  });
+}
+
+/**
  * 结构化重排整篇文档（仅对能无损解析的类型；否则返回 null 交给缩进兜底）。
  * 目前 JSON 走 `JSON.parse/stringify` 的 2 空格重排——不引入额外格式化器依赖。
  */
@@ -178,7 +202,7 @@ function format(): boolean {
   return true;
 }
 
-defineExpose({ focus, format });
+defineExpose({ focus, format, revealLine });
 
 onMounted(createView);
 onBeforeUnmount(() => {
@@ -228,5 +252,9 @@ watch(
 }
 .vs-code-editor :deep(.cm-editor.cm-focused) {
   outline: none;
+}
+/* revealLine 跳转行的短暂高亮 */
+.vs-code-editor :deep(.cm-flash-line) {
+  background: var(--dsh-accent-weak, rgba(35, 134, 54, 0.3));
 }
 </style>
