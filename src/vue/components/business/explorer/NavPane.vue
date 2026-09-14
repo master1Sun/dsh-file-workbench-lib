@@ -144,6 +144,7 @@ import { favorites, layout, saveLayout, toggleFavorite, isFavorite } from "../..
 import * as api from "../../../composables/core/useApi";
 import Icon from "../../common/Icon.vue";
 import ContextMenu from "../../common/ContextMenu.vue";
+import { myComputerDriveName } from "../../../composables/domain/driveName";
 import type { DriveInfo, MenuItem, MyComputerItem } from "../../../../shared/types";
 
 const { t } = useI18n();
@@ -302,7 +303,8 @@ async function goSessionTab(p: string): Promise<void> {
 function itemLabel(it: MyComputerItem): string {
   switch (it.type) {
     case "drive":
-      return t("driveLabel", { drive: it.path.charAt(0) || "C" });
+      // 有系统卷标 → `卷标 (C:)`；无卷标 → 本地化的「本地磁盘 (C:)」。
+      return myComputerDriveName(it);
     case "home":
       return t("navHome");
     case "desktop":

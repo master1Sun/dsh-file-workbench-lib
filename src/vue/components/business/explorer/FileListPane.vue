@@ -296,7 +296,12 @@ import {
   activeView,
 } from "../../../composables/core/settings";
 import { gitInRepo, gitStatusOf, refreshGitStatus } from "../../../composables/domain/git";
-import { refreshSvnStatus, svnInWc } from "../../../composables/domain/svn";
+import { refreshSvnStatus } from "../../../composables/domain/svn";
+import {
+  gitMenuFor as gitMenuForShared,
+  svnMenuFor as svnMenuForShared,
+  type RepoMenuActions,
+} from "../../../composables/domain/repoMenu";
 import ContextMenu from "../../common/ContextMenu.vue";
 import Icon from "../../common/Icon.vue";
 import QuickCommit from "../git/QuickCommit.vue";
@@ -999,110 +1004,42 @@ function openMenu(e: MouseEvent, items: MenuItem[]): void {
   cmOpen.value = true;
 }
 
-// —— Git 操作（右键菜单） ——
-/** 当前目录在 git 仓库时返回 Git 子菜单，否则为空。 */
-function gitMenuFor(path: string): MenuItem[] {
-  if (!gitInRepo(explorer.listing?.path ?? "")) return [];
-  return [
-    { separator: true },
-    {
-      icon: "git",
-      label: t("gitMenu"),
-      children: [
-        { label: t("gitPanel"), icon: "git", onClick: openGitPanel },
-        { separator: true },
-        { label: t("gitAdd"), icon: "upload", onClick: () => gitAddOne(path) },
-        { label: t("gitCommit"), icon: "check", onClick: () => gitCommitHere() },
-        { label: t("gitDiff"), icon: "code", onClick: () => gitShowDiff(path) },
-        { label: t("gitDiscard"), icon: "undo", onClick: () => gitDiscardOne(path) },
-      ],
-    },
-  ];
-}
-
-/** 打开完整 Git 管理面板（状态/分支/暂存区/命令台）。 */
-function openGitPanel(): void {
-  gitPanelOpen.value = true;
-}
-
-// —— SVN 操作（右键菜单） ——
-/** 当前目录右键菜单里追加 SVN 子菜单（打开管理面板 / 直接提交 / 更新）；非工作副本时返回空。 */
-function svnMenuFor(path: string): MenuItem[] {
-  if (!svnInWc(explorer.listing?.path ?? "")) return [];
-  return [
-    { separator: true },
-    {
-      icon: "svn",
-      label: t("svnMenu"),
-      children: [
-        { label: t("svnPanel"), icon: "svn", onClick: openSvnPanel },
-        { label: t("svnUpdate"), icon: "sync", onClick: () => svnCli(path, ["update"]) },
-      ],
-    },
-  ];
-}
-
-/** 打开 SVN 管理面板（探测工作副本并展示操作）。 */
-function openSvnPanel(): void {
-  svnPanelOpen.value = true;
-}
-
-/** 直接在前端发起 svn 命令（替代唤起第三方 GUI），结果以 toast 反馈。 */
-async function svnCli(path: string, args: string[]): Promise<void> {
-  try {
-    const info = await api.svnInfo(path);
-    if (!info.svnAvailable) {
-      toast("error", t("svnNoCli"));
+// —— Git / SVN 操作（右键菜单） ——
+// 菜单项构建统一走共享模块 composables/domain/repoMenu，保证与 VS Code 面板的项目树完全一致。
+const repoMenuAct: RepoMenuActions = {
+  openGitPanel: () => {
+    gitPanelOpen.value = true;
+  },
+  openSvnPanel: () => {
+    svnPanelOpen.value = true;
+  },
+  openCommit: () => {
+    const dir = explorer.listing?.path ?? "";
+    if (!gitInRepo(dir)) {
+      toast("error", t("gitNotRepo"));
       return;
     }
-    const r = await api.svnRun(path, args);
-    if (r.code === 0) {
-      toast("ok", (r.stdout || t("svnDone")).split("\n")[0].slice(0, 200));
-    } else {
-      toast("error", (r.stderr || t("svnFailed")).split("\n")[0].slice(0, 200));
-    }
-  } catch (err) {
-    toast("error", (err as Error).message);
-  }
-}
-async function gitAddOne(path: string): Promise<void> {
-  try {
-    await api.gitAdd(path);
-    toast("ok", t("gitAdded"));
-  } catch (err) {
-    toast("error", (err as Error).message);
-  }
-  await refreshGitStatus(explorer.listing?.path ?? "");
-}
-function gitCommitHere(): void {
-  const dir = explorer.listing?.path ?? "";
-  if (!gitInRepo(dir)) {
-    toast("error", t("gitNotRepo"));
-    return;
-  }
-  // 独立提交弹窗（不依赖 Git 面板）
-  quickCommitOpen.value = true;
-}
-async function gitShowDiff(path: string): Promise<void> {
-  try {
-    const r = await api.gitDiff(path);
-    gitDiffText.value = r.output ?? "";
+    // 独立提交弹窗（不依赖 Git 面板）
+    quickCommitOpen.value = true;
+  },
+  showGitDiff: (text: string) => {
+    gitDiffText.value = text;
     gitDiffOpen.value = true;
-  } catch (err) {
-    toast("error", (err as Error).message);
-  }
+  },
+  afterMutate: async (dir: string) => {
+    await refreshGitStatus(dir);
+    await refreshListing();
+  },
+};
+
+/** 当前目录在 git 仓库时返回 Git 子菜单，否则为空。 */
+function gitMenuFor(path: string): MenuItem[] {
+  return gitMenuForShared(explorer.listing?.path ?? "", path, repoMenuAct);
 }
-async function gitDiscardOne(path: string): Promise<void> {  const name = path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
-  const ok = await confirmDialog({ title: t("gitDiscardTitle"), message: t("gitDiscardMsg", { name }) });
-  if (!ok) return;
-  try {
-    await api.gitDiscard(path);
-    toast("ok", t("gitDiscarded"));
-  } catch (err) {
-    toast("error", (err as Error).message);
-  }
-  await refreshGitStatus(explorer.listing?.path ?? "");
-  await refreshListing();
+
+/** 当前目录是 SVN 工作副本时返回 SVN 子菜单，否则为空。 */
+function svnMenuFor(path: string): MenuItem[] {
+  return svnMenuForShared(explorer.listing?.path ?? "", path, repoMenuAct);
 }
 
 /** 下载文件：构造 /download 链接并用隐藏 a 触发浏览器下载（不离开当前页面）。 */

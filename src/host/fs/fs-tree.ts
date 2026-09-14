@@ -14,6 +14,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { existsSync } from "node:fs";
 import { opendir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
+import { displayName, winVolumes } from "./fs-drives.js";
 
 /** “我的电脑”顶层入口项（host 侧形状，与 shared/types 一致）。 */
 export interface MyComputerItem {
@@ -31,20 +32,38 @@ export interface MyComputerItem {
     | "recycle";
   name: string;
   path: string;
+  /**
+   * 磁盘卷标原始值（仅 type=drive 且能读到时给出，如 `系统`、`Data`）。
+   *
+   * 与 `name` 分开：name 是 host 拼好的兜底展示名（中文），客户端按本地化规则
+   * 优先用 `label` 拼 `卷标 (X:)`，读不到卷标才回退本地化的「本地磁盘 (X:)」。
+   */
+  label?: string;
 }
 
 /**
  * 枚举“我的电脑”顶层入口：Windows 磁盘盘符 + 快捷访问（主目录/下载/文档/图片/视频）+ 工作区。
  * 枚举仅做存在性探测（不保证可读，读取失败由浏览层兜底）。
+ *
+ * 盘符展示名取**系统真实卷标**（win32 走 Win32_LogicalDisk，带 TTL 缓存，失败降级），
+ * 因此有卷标的盘显示 `系统 (C:)` 而非一律 `本地磁盘 (C:)`。
  */
-export function listMyComputer(workspaceRoot?: string): MyComputerItem[] {
+export async function listMyComputer(workspaceRoot?: string): Promise<MyComputerItem[]> {
   const items: MyComputerItem[] = [];
   if (process.platform === "win32") {
+    const volumes = await winVolumes();
     for (let c = 65; c <= 90; c += 1) {
       const letter = String.fromCharCode(c);
       const root = `${letter}:\\`;
       try {
-        if (existsSync(root)) items.push({ type: "drive", name: `本地磁盘 (${letter}:)`, path: root });
+        if (!existsSync(root)) continue;
+        const label = volumes.get(letter)?.label ?? "";
+        items.push({
+          type: "drive",
+          name: displayName(letter, label),
+          path: root,
+          ...(label ? { label } : {}),
+        });
       } catch {
         /* 权限等异常跳过该盘符 */
       }

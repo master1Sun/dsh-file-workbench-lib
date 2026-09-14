@@ -28,7 +28,7 @@
         >
           <span class="fw-drive-ico"><icon name="hardDrive" :size="iconSize" /></span>
           <span class="fw-drive-body">
-            <span class="fw-drive-name">{{ d.name }}</span>
+            <span class="fw-drive-name">{{ driveName(d) }}</span>
             <span class="fw-drive-bar"><span class="fw-drive-fill" :style="{ width: usedPct(d) }"></span></span>
             <span class="fw-drive-cap">{{ capacityText(d) }}</span>
           </span>
@@ -62,7 +62,7 @@
             <td class="col-name">
               <span class="fw-tp-n">
                 <span class="fw-tp-ico"><icon name="hardDrive" :size="16" /></span>
-                <span class="fw-tp-label">{{ d.name }}</span>
+                <span class="fw-tp-label">{{ driveName(d) }}</span>
               </span>
             </td>
             <td class="col-type">{{ d.removable ? t('driveTypeRemovable') : t('driveTypeFixed') }}</td>
@@ -131,6 +131,7 @@ import {
 } from "../../../composables/core/settings";
 import { fileCmdState, setFileCmdRunner } from "../../../stores/fileCommands";
 import { clipboardHas } from "../../../composables/ui/clipboard";
+import { driveName } from "../../../composables/domain/driveName";
 import { toast } from "../../../stores/workbench";
 import ContextMenu from "../../common/ContextMenu.vue";
 import Icon from "../../common/Icon.vue";
@@ -169,9 +170,12 @@ const drives = computed<DriveInfo[]>(() => {
     if (key === "size") return (b.total ?? -1) - (a.total ?? -1);
     if (key === "free") return (b.free ?? -1) - (a.free ?? -1);
     if (key === "type") {
-      return Number(a.removable) - Number(b.removable) || a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+      return (
+        Number(a.removable) - Number(b.removable) ||
+        driveName(a).localeCompare(driveName(b), undefined, { sensitivity: "base" })
+      );
     }
-    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    return driveName(a).localeCompare(driveName(b), undefined, { sensitivity: "base" });
   });
   return rows;
 });

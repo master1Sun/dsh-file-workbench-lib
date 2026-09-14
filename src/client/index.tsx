@@ -6,20 +6,43 @@
  */
 import { zh, en } from "../shared/locales.js";
 import type { ReactNode } from "react";
-import { RightPaneBridge } from "./RightPaneBridge.js";
+import { RightPaneBridge, VSCodePaneBridge } from "./RightPaneBridge.js";
+import { ComposerBridge } from "./ComposerBridge.js";
 import { setOpenTab } from "./api.js";
 
 /** 前端资源基址（host REST + 静态资源前缀）。 */
 export const PREFIX = "/api/dsh-file-workbench";
 
-/** 此插件的 apply 依赖的客户端服务。 */
-export const inject = ["locale", "sessions", "workspaces", "slots", "sidebarRightTabs", "sidebarRight"];
+/**
+ * 此插件的 apply 依赖的客户端服务。
+ *
+ * `uiSession` / `conversation` 用于「引用文件/目录到会话」：DSH 官方的引用是
+ * Lexical 里的结构化 chip（`source: "reference"`），写入通道是 per-session 的
+ * `SessionInput.insertReference`；插件经 `uiSession.provide` 的 resolve(binding)
+ * 拿到 session 作用域 ctx（`SessionBinding.ctx`），再由
+ * `conversation.input.for(actx)` 解析出该会话的输入面板 facade。
+ */
+export const inject = [
+  "locale",
+  "sessions",
+  "workspaces",
+  "slots",
+  "sidebarRightTabs",
+  "sidebarRight",
+  "uiSession",
+  "conversation",
+];
 
 /** 右侧面板 tab 的 kind（openTab(kind) 用到的名字）。 */
 const KIND = "workbench";
 
 /** 本实现在 tab 系统中的身份，也是主体/标题注册时用的 key（约定用包名）。 */
 const ID = "@sunjuntao/dsh-file-workbench";
+
+/** 「文件编辑器」tab 的 kind（openTab(kind) 用到的名字）。 */
+const KIND_VS = "vscode";
+/** 「文件编辑器」tab 的身份 key（主体/标题注册用，与主工作台区分）。 */
+const ID_VS = "@sunjuntao/dsh-file-workbench.vscode";
 
 /** 翻译字典注册到 DSH locale registry 的命名空间。 */
 const LOCALE_NS = "dsh-file-workbench";
@@ -54,6 +77,22 @@ function WorkbenchGlyph({ size = 16, className }: { size?: number; className?: s
   );
 }
 
+/**
+ * VS Code 编辑器图标（guide 入口胶囊 / tab 标题处绘制）。
+ *
+ * 造型 = 代码编辑器窗口：圆角外框 + 左侧窄活动栏 + 编辑区代码刻度行，
+ * 直线描边、圆角端点，落在 `currentColor` 上（与宿主 CubeGlyph 同一绘制约定）。
+ */
+function VSCodeGlyph({ size = 16, className }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true" className={className}>
+      <rect x="1.7" y="2.6" width="12.6" height="10.8" rx="1.4" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M 5.1 2.6 V 13.4" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M 7 6.2 h 5.6 M 7 8.2 h 5.6 M 7 10.2 h 3.8" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 /** Vue 运行时桥接在 window 上的形状（与 src/vue/main.ts 注册的字段保持一致）。 */
 interface WorkbenchBridge {
   apiBase: string;
@@ -69,6 +108,15 @@ interface WorkbenchBridge {
   openExternalFolder?: (path: string) => void;
   /** 文件查看改道到 DSH 右侧原生查看器。 */
   openInSidebar?: (path: string) => void;
+  /** 宿主官方目录浏览（ctx.uiWorkspace.listDirectory）：列出子目录 + 面包屑。 */
+  listDirectory?: (path?: string) => Promise<unknown>;
+  /** 宿主官方目录创建（ctx.uiWorkspace.createDirectory）。 */
+  createDirectory?: (path: string, name: string) => Promise<string>;
+  /**
+   * 把某文件/目录作为 `@路径` 引用追加到当前会话输入框草稿（由 ComposerBridge 提供）。
+   * @returns 是否成功追加（输入框座位未挂载时为 false）。
+   */
+  appendSessionReference?: (path: string, isDir?: boolean) => boolean;
 }
 
 /** ctx.sessions.list 快照的最小形状（current=当前选中 id；byId=各会话元信息）。 */
@@ -107,6 +155,65 @@ interface ClientCtx {
       subscribe?(cb: () => void): () => void;
     };
   };
+  /**
+   * 会话作用域 source 注册表：`provide` 的 `resolve(binding)` 回调拿到
+   * Controller 持有的 SessionBinding，其 `ctx` 是带 agent tag 的 Cordis 上下文，
+   * 可用于解析该会话的输入面板（见 conversation.input.for）。
+   */
+  uiSession?: {
+    provide(descriptor: {
+      props?: readonly string[];
+      resolve(binding: SessionBindingLike): { props?: Record<string, unknown> };
+    }): () => void;
+  };
+  /** 会话面板服务：`input.for(actx)` 解析 per-session 输入 facade（含 insertReference）。 */
+  conversation?: {
+    input?: {
+      for(actx: unknown): SessionInputLike | undefined;
+    };
+  };
+  /**
+   * 工作区导航 + 目录 UI 能力（`ctx.uiWorkspace`）：官方目录浏览/创建/原生选择。
+   * 「选择文件夹」弹窗优先用它列目录（返回仅子目录 + 面包屑），避免插件自造 /list 受限。
+   */
+  uiWorkspace?: {
+    pickDirectory?(): Promise<string | null>;
+    listDirectory?(path?: string, signal?: AbortSignal): Promise<UiDirectoryListing>;
+    createDirectory?(path: string, name: string): Promise<string>;
+  };
+}
+
+/** uiWorkspace.listDirectory 返回结构（与 dsh-host-directory-picker/types 对齐）。 */
+interface UiDirectoryListing {
+  path: string;
+  home: string;
+  crumbs: { name: string; path: string; hidden: boolean }[];
+  entries: { name: string; path: string; hidden: boolean }[];
+  truncated: boolean;
+}
+
+/** Controller 持有的会话绑定（只声明本插件用到的字段）。 */
+interface SessionBindingLike {
+  /** session 作用域 Cordis 上下文（带 agent tag，`scopeOf` 可解析出 sessionId）。 */
+  ctx: unknown;
+}
+
+/** per-session 输入 facade：只声明官方引用插入入口。 */
+interface SessionInputLike {
+  /**
+   * 把一个结构化引用（chip）替换进编辑器 span。
+   * @returns 是否写入成功（phase / span CAS 未通过时为 false）。
+   */
+  insertReference?(
+    ref: {
+      source: string;
+      ref: string;
+      label: string;
+      appearance?: "session" | "file" | "folder";
+      clipboardText: string;
+    },
+    span: { start: number; end: number; draftRev: number },
+  ): boolean;
 }
 
 export function apply(ctx: ClientCtx): void {
@@ -118,17 +225,22 @@ export function apply(ctx: ClientCtx): void {
 
   /** 按 DSH 活动语言从本插件字典取词（供 tab 标题 / guide 文案使用）。 */
   const tr = (key: keyof typeof zh): string => {
-    const active = ctx.locale?.getLocale?.()?.active ?? "en";
+    // 优先取宿主 locale 服务；它不可得/未就绪时回退到 <html lang>（DSH 通常会同步写入），
+    // 避免默认一路落到 "en" 导致中文环境也显示英文、或反之。
+    const active =
+      ctx.locale?.getLocale?.()?.active ??
+      (typeof document !== "undefined" ? document.documentElement.lang : "") ??
+      "en";
     const dict: Record<string, string> = active.toLowerCase().startsWith("zh") ? zh : en;
     return dict[key] ?? (en as Record<string, string>)[key] ?? String(key);
   };
 
-  // 尽力获取宿主的目录选择能力（workspaces 服务可能未注入，缺省时 Vue 走路径输入框）。
+  // 尽力获取宿主的目录选择能力（优先官方 uiWorkspace，回退旧 workspaces 服务；都缺省时 Vue 走路径输入框）。
   let pickDirectory: (() => Promise<string | null>) | undefined;
   try {
-    pickDirectory = ctx.workspaces?.pickDirectory;
+    pickDirectory = ctx.uiWorkspace?.pickDirectory ?? ctx.workspaces?.pickDirectory;
   } catch {
-    /* workspaces 服务不可用，忽略 */
+    /* 服务不可用，忽略 */
   }
 
   // 读取当前会话（对话）的工作目录；sessions 服务不可得时缺省返回 null。
@@ -213,7 +325,7 @@ export function apply(ctx: ClientCtx): void {
   };
 
   // 预置 Vue 运行时的注入点（apiBase + 目录选择 + 会话目录 + locale 服务），供 Vue useApi / useI18n 读取。
-  (window as unknown as { __DSH_FILE_WORKBENCH__?: WorkbenchBridge }).__DSH_FILE_WORKBENCH__ = {
+  const bridge = ((window as unknown as { __DSH_FILE_WORKBENCH__?: WorkbenchBridge }).__DSH_FILE_WORKBENCH__ = {
     apiBase,
     pickDirectory,
     getSessionDir,
@@ -221,7 +333,42 @@ export function apply(ctx: ClientCtx): void {
     openInSidebar,
     subscribeCurrentSessionId,
     locale: ctx.locale,
+  });
+
+  // 宿主官方目录浏览/创建能力（`ctx.uiWorkspace`）：以**惰性取值器**透传给 Vue「选择文件夹」弹窗。
+  // 惰性有两个好处：① 不把 uiWorkspace 写进 required inject，避免旧版 DSH 缺该服务时整个插件不激活；
+  // ② 服务晚于 apply 注册时仍能取到。缺失时取值器返回 undefined，Vue 侧自动回退插件自建 `/list`。
+  //
+  // 注意：Cordis 的 ctx 是 proxy，读**未声明在 inject 里**的属性会直接抛
+  // `cannot get property "uiWorkspace" without inject`（而不是返回 undefined），
+  // 因此这里必须 try/catch 兜住——否则每次取值都会炸一条错误、且取值器返回结果是抛异常。
+  const uiWorkspaceSafe = (): ClientCtx["uiWorkspace"] => {
+    try {
+      return ctx.uiWorkspace;
+    } catch {
+      return undefined;
+    }
   };
+  Object.defineProperty(bridge, "listDirectory", {
+    configurable: true,
+    enumerable: true,
+    get: () => {
+      const svc = uiWorkspaceSafe();
+      return svc && typeof svc.listDirectory === "function"
+        ? (path?: string): Promise<unknown> => svc.listDirectory!(path)
+        : undefined;
+    },
+  });
+  Object.defineProperty(bridge, "createDirectory", {
+    configurable: true,
+    enumerable: true,
+    get: () => {
+      const svc = uiWorkspaceSafe();
+      return svc && typeof svc.createDirectory === "function"
+        ? (path: string, name: string): Promise<string> => svc.createDirectory!(path, name)
+        : undefined;
+    },
+  });
 
   // ---- 监听当前（选中）会话的切换：变更时通知工作台进入其工作区/仅刷新文件夹 ----
   let lastSessionId: string | null = getSessionId();
@@ -333,8 +480,111 @@ export function apply(ctx: ClientCtx): void {
       },
       "dsh-file-workbench: sidebar tab body",
     );
+
+    // ③ 第二个 tab：「VS Code 编辑器」（kind=vscode，order=101 排在文件工作台下方）。
+    ctx.effect(
+      () =>
+        ctx.sidebarRightTabs?.register({
+          id: ID_VS,
+          kind: KIND_VS,
+          title: () => tr("tabVSCode"),
+          guide: [
+            {
+              order: 101,
+              title: () => tr("tabVSCode"),
+              description: () => tr("tabVSCodeDesc"),
+              icon: VSCodeGlyph,
+            },
+          ],
+        }),
+      "dsh-file-workbench: vscode tab type",
+    );
+
+    // ④ 第二个 tab 的主体（sidebar.right.pane.tab，key = ID_VS）：把文件编辑器主体挂进插槽容器。
+    ctx.effect(
+      () => {
+        const slots = ctx.slots;
+        if (!slots) return;
+        return slots.inject("sidebar.right.pane.tab", () =>
+          slots.register(
+            { name: "sidebar.right.pane.tab", key: ID_VS },
+            VSCodePaneBridge as (props: unknown) => ReactNode,
+          ),
+        );
+      },
+      "dsh-file-workbench: vscode tab body",
+    );
   } catch (e) {
     console.warn("[dsh-file-workbench] 右侧面板注册失败（已降级）：", e);
+  }
+
+  // ---- 注册「会话输入框引用」座位（conversation.input.left）----
+  // 把工作台的「右键 → 添加到会话」接到 composer：ComposerBridge 捕获宿主提供的
+  // `useInput`（草稿 / 修订号 / 已存在 chip）与上方 provide 下发的
+  // `wbInsertSessionReference`（官方 chip 写入），并把 appendSessionReference
+  // 挂到 window 桥接对象上。座位不渲染任何 UI；slots 缺失时静默降级。
+  try {
+    const slots = ctx.slots;
+    if (slots) {
+      slots.inject("conversation.input.left", () =>
+        slots.register(
+          { name: "conversation.input.left", id: `${ID}.reference`, order: 20 },
+          ComposerBridge as (props: unknown) => ReactNode,
+        ),
+      );
+    }
+  } catch (e) {
+    console.warn("[dsh-file-workbench] composer 引用座位注册失败（已降级）：", e);
+  }
+
+  // ---- 注册「官方引用插入」能力：把 chip 写入通道作为 session 标准 prop 下发 ----
+  // DSH 的引用是 Lexical 结构化 chip，唯一写入通道是 per-session 的
+  // `SessionInput.insertReference`（scoped 事件 `slash/input-insert-reference` 的宿主侧接收者）。
+  // 插件侧拿不到 session ctx，但 uiSession.provide 的 resolve(binding) 拿到 Controller 持有的
+  // SessionBinding（其 ctx 带 agent tag），即可解析出该会话的输入 facade。
+  // 把解析结果作为 prop 下发给插槽组件（ComposerBridge 座位），由它组装 chip 载荷与 span。
+  try {
+    const uiSession = ctx.uiSession;
+    const conversation = ctx.conversation;
+    if (uiSession && conversation?.input?.for) {
+      ctx.effect(
+        () =>
+          uiSession.provide({
+            props: ["wbInsertSessionReference"],
+            resolve: (binding) => ({
+              props: {
+                wbInsertSessionReference: (req: {
+                  mention: string;
+                  label: string;
+                  appearance: "file" | "folder";
+                  span: { start: number; end: number; draftRev: number };
+                }): boolean => {
+                  try {
+                    const shell = conversation.input?.for(binding.ctx);
+                    if (!shell?.insertReference) return false;
+                    return shell.insertReference(
+                      {
+                        source: "reference",
+                        ref: req.mention,
+                        label: req.label,
+                        appearance: req.appearance,
+                        clipboardText: req.mention,
+                      },
+                      req.span,
+                    );
+                  } catch (e) {
+                    console.warn("[dsh-file-workbench] insertReference failed:", e);
+                    return false;
+                  }
+                },
+              },
+            }),
+          }),
+        "dsh-file-workbench: reference insert provider",
+      );
+    }
+  } catch (e) {
+    console.warn("[dsh-file-workbench] 引用插入通道注册失败（已降级）：", e);
   }
 
   // ---- 注入 Vue 产物（样式 + 模块脚本）：供右侧面板桥接组件（RightPaneBridge）挂载工作台 ----

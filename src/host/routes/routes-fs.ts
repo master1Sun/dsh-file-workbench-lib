@@ -116,7 +116,7 @@ export const fsResource: RouteMatcher = async (req, res, seg, q, method, host) =
   // --- 我的电脑顶层入口（盘符/Home/下载/工作区） ---
   if (seg[0] === "mycomputer" && seg.length === 1 && method === "GET") {
     const root = getRoot(q.get("key") ?? undefined);
-    const items = listMyComputer(root || undefined);
+    const items = await listMyComputer(root || undefined);
     return (json(res, 200, { ok: true, data: { items } }), true);
   }
 
@@ -269,7 +269,9 @@ export const fsResource: RouteMatcher = async (req, res, seg, q, method, host) =
     const raw = q.get("path")?.trim() ?? "";
     if (!raw) return (json(res, 400, { ok: false, error: "path required" }), true);
     const target = requireAbsolute(raw);
-    const info = await stat(target);
+    const info = await stat(target).catch((error) => {
+      throw new FsError("not-found", `cannot read "${target}": ${error instanceof Error ? error.message : String(error)}`, 404);
+    });
     if (!info.isFile()) return (json(res, 400, { ok: false, error: "not a file" }), true);
     // 编辑场景仅针对文本，限制单次读取体积（8MB），避免大文件 / 二进制拖垮前端。
     const MAX = 8 * 1024 * 1024;

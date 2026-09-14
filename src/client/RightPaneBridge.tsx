@@ -53,3 +53,47 @@ export function RightPaneBridge(): ReactNode {
 
   return <div ref={ref} style={{ height: "100%", width: "100%", minHeight: 0 }} />;
 }
+
+/**
+ * 「VS Code 编辑器」tab 主体（注册于 `sidebar.right.pane.tab`，key = ID_VS）。
+ *
+ * 与 RightPaneBridge 同构，但挂载点改为 `__dshVSCodeMountPane__`（由 Vue 端的
+ * VS Code 编辑器主体消费），其余惰性挂载/卸载逻辑一致。
+ */
+function tryMountVs(el: HTMLElement): { unmount: () => void } | null {
+  const mfn = (window as unknown as { __dshVSCodeMountPane__?: PaneMount }).__dshVSCodeMountPane__;
+  if (typeof mfn === "function") {
+    return mfn(el, { apiBase: `${window.location.origin}${API_PREFIX}` });
+  }
+  return null;
+}
+
+export function VSCodePaneBridge(): ReactNode {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let unmounter: { unmount: () => void } | null = null;
+    let timer = 0;
+    const attempt = (): void => {
+      const u = tryMountVs(el);
+      if (u) {
+        unmounter = u;
+        return;
+      }
+      timer = window.setTimeout(attempt, 60);
+    };
+    attempt();
+    return () => {
+      if (timer) window.clearTimeout(timer);
+      try {
+        unmounter?.unmount();
+      } catch (e) {
+        console.warn("[dsh-file-workbench] vscode pane unmount failed:", e);
+      }
+    };
+  }, []);
+
+  return <div ref={ref} style={{ height: "100%", width: "100%", minHeight: 0 }} />;
+}

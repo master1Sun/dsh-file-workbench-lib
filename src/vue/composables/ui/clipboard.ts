@@ -30,3 +30,17 @@ export function clipboardHas(): boolean {
 export function clipboardOf(): ClipboardEntry {
   return state.value;
 }
+
+/**
+ * 把纯文本写入系统剪贴板（供「复制完整/相对路径」等使用）。
+ * 与上面的内部文件剪贴板无关：这里只写系统剪贴板，不参与粘贴的文件复制/移动。
+ * @returns 是否写入成功（浏览器拒绝权限时为 false）。
+ */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}

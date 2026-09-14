@@ -25,18 +25,9 @@
       <span v-else-if="explorer.view === 'recycle'">{{ t("statusItemsCount", { count: explorer.recycleItems.length }) }}</span>
     </div>
 
-    <!-- 中：后台任务（含历史归档，点击展开完整面板） + 最小化终端，居中显示 -->
+    <!-- 中：后台任务（含历史归档，点击展开完整面板）；最小化终端改由全局 dock 栏承载 -->
     <div class="fw-status-center">
       <BgTaskPanel />
-      <button
-        v-if="wb.termOpen && wb.termMinimized"
-        class="fw-status-seg fw-status-term"
-        :title="t('statusTermRestore')"
-        @click="wb.termMinimized = false"
-      >
-        <icon name="terminal" :size="12" />
-        <span>{{ t("terminal") }}</span>
-      </button>
     </div>
 
     <!-- 右：视图切换（仅文件列表挂载期间可用） -->
@@ -234,7 +225,6 @@ const busyText = computed(() => {
   white-space: nowrap;
 }
 .fw-status-seg:hover { background: var(--dsh-hover, rgba(110, 118, 129, 0.25)); color: var(--dsh-fg, #c9d1d9); }
-.fw-status-term { color: var(--dsh-accent, #238636); font-weight: 600; }
 
 /* 视图切换按钮（原在文件列表内部底栏，随信息一并迁到 footer） */
 .fw-vs-btn {

@@ -16,9 +16,6 @@
 
     <!-- 快捷键帮助面板：全局 ? 键唤起 -->
     <shortcut-help-dialog ref="shortcutRef" />
-
-    <!-- 终端浮窗（ConPTY 交互终端）：v-if 仅在打开时挂载，关闭即卸载并清理后端 shell -->
-    <TerminalDialog v-if="wb.termOpen" :open="true" @close="wb.termOpen = false" />
   </div>
 </template>
 
@@ -29,8 +26,7 @@ import SettingsDialog from "./components/settings/SettingsDialog.vue";
 import ExplorerPane from "./components/business/explorer/ExplorerPane.vue";
 import WinMenuBar from "./components/common/WinMenuBar.vue";
 import ShortcutHelpDialog from "./components/common/ShortcutHelpDialog.vue";
-import TerminalDialog from "./components/business/terminal/TerminalDialog.vue";
-import { ensureRoot, wb } from "./stores/workbench";
+import { ensureRoot } from "./stores/workbench";
 import { goHome, loadHome, loadDrives, takeInitialLocation, goSessionDir as goSessionDirAction } from "./stores/explorer";
 import { useTheme } from "./composables/core/theme";
 import { prefs } from "./composables/core/settings";

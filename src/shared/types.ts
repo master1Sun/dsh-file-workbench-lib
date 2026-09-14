@@ -82,6 +82,11 @@ export interface MyComputerItem {
   name: string;
   /** 绝对路径（磁盘根如 C:\、用户主目录的子目录等）；回收站入口为空字符串。 */
   path: string;
+  /**
+   * 磁盘真实卷标（仅 type=drive 且读到时给出，如 `系统` / `Data`）。
+   * 有值时前端展示 `卷标 (X:)`，否则回退本地化的「本地磁盘 (X:)」。
+   */
+  label?: string;
 }
 
 /** 单个驱动器（「此电脑」的「设备和驱动器」视图用）。 */
@@ -253,12 +258,51 @@ export interface DshLocaleService {
   subscribe(cb: () => void): () => void;
 }
 
+/**
+ * 宿主官方目录浏览（`ctx.uiWorkspace.listDirectory`）返回的单行/面包屑项。
+ * 与 `@deepseek-ai/dsh-host-directory-picker/types` 的 DirectoryEntry 对齐。
+ */
+export interface DirectoryEntry {
+  /** 行内展示的目录名（根面包屑为完整路径）。 */
+  name: string;
+  /** 绝对路径（客户端不应自行拼接路径段）。 */
+  path: string;
+  /** 宿主平台的隐藏约定（POSIX 点前缀）；是否展示由客户端决定。 */
+  hidden: boolean;
+}
+
+/**
+ * 宿主官方目录浏览返回的一层目录 + 祖先链。
+ * 与 `@deepseek-ai/dsh-host-directory-picker/types` 的 DirectoryListing 对齐。
+ */
+export interface DirectoryListing {
+  /** 被列出目录的绝对路径。 */
+  path: string;
+  /** 宿主账户的 home 目录（面包屑 "Home" 根）。 */
+  home: string;
+  /** 从文件系统根到当前目录（含）的祖先链，每项都是可跳转目标。 */
+  crumbs: DirectoryEntry[];
+  /** 直接子目录（按名排序；含指向目录的符号链接）。 */
+  entries: DirectoryEntry[];
+  /** 后端在完整结果上限处截断时为 true。 */
+  truncated: boolean;
+}
+
 /** Vue 前端运行时注入点（由 client 桥接组件在 window 上预置）。 */
 declare global {
   interface Window {
     __DSH_FILE_WORKBENCH__?: {
       apiBase?: string;
       pickDirectory?: () => Promise<string | null>;
+      /**
+       * 宿主官方目录浏览能力（`ctx.uiWorkspace.listDirectory`）：列出某目录一层的**子目录**与面包屑。
+       * 供「选择文件夹」弹窗使用（优先于插件自建 /list 路由）；能力不可用时为 undefined。
+       */
+      listDirectory?: (path?: string) => Promise<DirectoryListing>;
+      /**
+       * 宿主官方目录创建能力（`ctx.uiWorkspace.createDirectory`）：在父目录下新建子目录，返回新目录绝对路径。
+       */
+      createDirectory?: (path: string, name: string) => Promise<string>;
       /** 当前会话（对话）的工作目录，供工作台默认打开；不可得时返回 null。 */
       getSessionDir?: () => string | null;
       /** 读取当前选中的 DSH 会话 id（供子 agent 委派作为父级）；不可用时返回 null。 */
@@ -282,9 +326,22 @@ declare global {
       pendingOpens?: { kind: "file" | "folder"; path: string }[];
       /** 订阅当前选中的会话 id 变化（会话切换时回调最新 id，供 SSE 重连）。返回注销函数。 */
       subscribeCurrentSessionId?: (cb: (id: string | null) => void) => () => void;
+      /**
+       * 把某个文件/目录作为 `@路径` 引用追加到当前会话的输入框草稿（由 client 侧
+       * `conversation.input.left` 插槽桥接组件提供 setDraft 能力）。内部按 DSH 的
+       * `@file` 文法格式化：文件 `@path` / 含空格 `@"path"` / 目录 `@path/`。
+       * @param path - 目标文件或目录的绝对路径。
+       * @param isDir - 是否为目录（目录保留结尾斜杠，便于引用整个文件夹）。
+       * @returns 是否成功追加（输入框未挂载或路径无法表达时为 false）。
+       */
+      appendSessionReference?: (path: string, isDir?: boolean) => boolean;
     };
     /** 右侧面板模式挂载：把工作台主体（App.vue）挂进 DSH 右侧面板容器。 */
     __dshFileWorkbenchMountPane__?: (el: HTMLElement, opts?: { apiBase?: string }) => {
+      unmount: () => void;
+    };
+    /** 右侧面板模式挂载：把 VS Code 编辑器主体（VSCodePane.vue）挂进 DSH 右侧面板容器。 */
+    __dshVSCodeMountPane__?: (el: HTMLElement, opts?: { apiBase?: string }) => {
       unmount: () => void;
     };
   }

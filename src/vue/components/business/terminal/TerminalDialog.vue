@@ -691,6 +691,7 @@ defineExpose({
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
   font-family: Consolas, "Courier New", monospace;
   font-size: calc(12px * var(--dsh-fs-scale, 1));
+  z-index: 9999;
 }
 .fw-term-head {
   display: flex;

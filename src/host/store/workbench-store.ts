@@ -24,6 +24,8 @@ export const PERSIST_KEYS = [
   "termWin",
   "folderViews",
   "taskLogs",
+  // VS Code 编辑器面板状态（项目目录 / 已开标签 / 激活标签 / 展开节点 / 比例）。
+  "vscode",
 ] as const;
 export type PersistKey = (typeof PERSIST_KEYS)[number];
 

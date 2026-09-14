@@ -7,7 +7,7 @@
  * 实现要点：
  *  - 容量统一走 node:fs 的 statfs（跨平台，win32 亦可用），失败时降级为未知（不阻塞枚举）；
  *  - 卷标 / 文件系统类型在 win32 上通过一次 PowerShell（Win32_LogicalDisk）批量取回，
- *    最佳努力 + 超时 + 短时缓存，取不到就用「本地磁盘 (X:)」兜底（不影响容量展示）。
+ *    最佳努力 + 超时 + 短时缓存；取不到卷标就只给盘符，由前端本地化兜底（不影响容量展示）。
  */
 import { statfs } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -104,8 +104,13 @@ function queryWinVolumes(): Promise<Map<string, WinVolume>> {
   });
 }
 
-/** 取卷信息映射（带 TTL 缓存；仅在 win32 上有意义）。 */
-async function winVolumes(): Promise<Map<string, WinVolume>> {
+/**
+ * 取卷信息映射（带 TTL 缓存；仅在 win32 上有意义）。
+ *
+ * 对外暴露供 `listMyComputer` 复用：让「我的电脑」的盘符也显示真实卷标
+ * （如 `系统 (C:)`、`数据 (D:)`），而不是一律「本地磁盘 (X:)」。
+ */
+export async function winVolumes(): Promise<Map<string, WinVolume>> {
   if (process.platform !== "win32") return new Map();
   const now = Date.now();
   if (labelCache && now - labelCache.at < LABEL_CACHE_TTL) return labelCache.map;
@@ -126,10 +131,16 @@ async function capacityOf(root: string): Promise<{ total?: number; free?: number
   }
 }
 
-/** 组装展示名：有卷标用卷标，否则「本地磁盘 (X:)」/「根目录」。 */
-function displayName(letter: string, label: string): string {
-  if (letter) return label ? `${label} (${letter}:)` : `本地磁盘 (${letter}:)`;
-  return label || "根目录";
+/**
+ * 组装展示名：有卷标用卷标，否则只给盘符（如 `C:`）。
+ *
+ * 这里**不再拼中文兜底名**（原来是「本地磁盘 (X:)」）：host 侧写死中文无法国际化，
+ * 统一由前端按 `label` 决定——有卷标显示 `卷标 (X:)`，没有则本地化为「本地磁盘 (X:)」
+ * /「Local Disk (X:)」（见 `composables/domain/driveName`）。
+ */
+export function displayName(letter: string, label: string): string {
+  if (letter) return label ? `${label} (${letter}:)` : `${letter}:`;
+  return label || "/";
 }
 
 /**
