@@ -52,6 +52,9 @@ export const RECYCLE_PLACEHOLDER = "回收站";
 /** 是否为可浏览的真实绝对路径（排除「回收站」「此电脑」等虚拟位置占位，避免无意义报错）。 */
 export function isBrowsablePath(p: string): boolean {
   const s = p.trim();
+  // 远端引用（`ssh://<hostId>/<path>`）：能否浏览由远端连接决定，不是本地路径语义，
+  // 故单独放行——否则 browseTo 会在进入远程子目录时静默 no-op。
+  if (s.startsWith("ssh://")) return true;
   return /^[A-Za-z]:[\\/]/.test(s) || /^[\\/]{1,2}[^\\/]/.test(s) || /^[\\/]$/.test(s);
 }
 

@@ -15,7 +15,9 @@ export const gitState = reactive<{ dirs: Record<string, { inRepo: boolean; branc
 
 /** 拉取并缓存某目录的 git 状态；失败时静默（徽标缺失不阻断浏览）。 */
 export async function refreshGitStatus(dir: string): Promise<void> {
-  if (!dir) return;
+  // 远端（ssh）目录：git 徽标首版不支持，直接跳过——否则 host 侧会把 ssh:// 引用当成
+  // 本地路径去 requireAbsolute（400「不是绝对路径」），每进一个远端目录弹一次错。
+  if (!dir || api.isRemoteRef(dir)) return;
   try {
     const s = await api.gitStatus(dir);
     gitState.dirs[dir] = { inRepo: s.inRepo, branch: s.branch ?? "", entries: s.entries };

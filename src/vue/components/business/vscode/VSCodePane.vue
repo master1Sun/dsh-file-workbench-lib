@@ -13,7 +13,7 @@
         <span class="vs-topbar-txt">{{ t("vsMenuFile") }}</span>
         <span class="vs-caret"></span>
       </button>
-      <span class="vs-proj" :title="vsState.projectDir ?? ''">{{ vsState.projectDir || t("vsNoProject") }}</span>
+      <span class="vs-proj" :title="vsState.projectDir ?? ''">{{ projectLabel }}</span>
       <span class="vs-spacer"></span>
       <!-- 快速打开：按文件名搜索当前项目内的文件（Ctrl+P），结果下拉可键盘上下选择 -->
       <div class="vs-search">
@@ -248,13 +248,14 @@ import ContextMenu from "../../common/ContextMenu.vue";
 import type { EolStyle, MenuItem, TextEncoding } from "../../../../shared/types";
 import { VS_STORE_KEY, defaultVSCodeStore, type OpenBuffer, type VSCodeStore } from "../../../stores/vscode";
 import * as api from "../../../composables/core/useApi";
-import { clearPendingEditorProject, floatTab, openNewEditorTab, takePendingEditorProject } from "../../../composables/core/sidebarRight";
+import { clearPendingEditorProject, floatTab, openNewEditorTab, takePendingEditorFile, takePendingEditorProject } from "../../../composables/core/sidebarRight";
 import { confirmDialog } from "../../../composables/core/dialog";
 import { toast, openNewTerminal } from "../../../stores/workbench";
 import { t } from "../../../composables/core/i18n";
 import { useTheme } from "../../../composables/core/theme";
 import { prefs } from "../../../composables/core/settings";
 import { languageLabelFor } from "./langResolver";
+import { sshParentOf, sshProjectLabelOf } from "../../../stores/ssh";
 
 /**
  * 本面板所属的**文件编辑器实例**。
@@ -267,6 +268,11 @@ const store: VSCodeStore = inject(VS_STORE_KEY) ?? defaultVSCodeStore();
 /** 存储字段的本地别名：模板与既有逻辑沿用改造前的命名，避免大范围改写。 */
 const vsState = store.state;
 const vsReady = store.ready;
+/** 顶栏「项目」可读标签：SSH 远端引用显示「主机名 · 远端路径」（如 `MyServer · /etc/nginx`），
+ * 而非只剩主机名；本地路径原样显示；无项目时回落到 i18n 文案。 */
+const projectLabel = computed<string>(() =>
+  vsState.projectDir ? (api.isRemoteRef(vsState.projectDir) ? sshProjectLabelOf(vsState.projectDir) : vsState.projectDir) : t("vsNoProject"),
+);
 /** 本实例在宿主侧的独立根 key（`vscode` / `vscode-2` / …），读写守卫按它隔离。 */
 const VS_KEY = store.rootKey;
 const initVSCodeState = (): Promise<void> => store.init();
@@ -311,6 +317,9 @@ const pickerVisible = ref(false);
 const projectPickerDir = computed<string | null>(() => {
   const d = vsState.projectDir;
   if (!d) return null;
+  // 远端项目：按引用语义取上一级（远端根之上没有目录 → 从「我的电脑」开始）。
+  // 不能走 win32 切分：`ssh://id/` 会被切出 `ssh:/` 这种既非本地路径也非引用的畸形串。
+  if (api.isRemoteRef(d)) return sshParentOf(d) || null;
   const norm = d.replace(/[\\/]+$/, "");
   const i = Math.max(norm.lastIndexOf("/"), norm.lastIndexOf("\\"));
   if (i <= 0) return null;
@@ -355,6 +364,17 @@ function dirnameOf(p: string): string {
   if (i < 0) return "";
   const dir = i === 0 ? p.slice(0, 1) : p.slice(0, i);
   return /^[A-Za-z]:$/.test(dir) ? `${dir}${p[i]}` : dir;
+}
+
+/**
+ * 取父级引用：远端引用走 POSIX 语义（`ssh://id/a/b` → `ssh://id/a`），本地路径按 `/` 或 `\` 切。
+ *
+ * 远端引用**绝不能**进 win32 切分：`ssh://4563a636/` 会被切成 `ssh:/` 这种既非本地路径、
+ * 也非合法引用的畸形串。远端根之上无法再上溯时原样返回。
+ */
+function parentRefOf(p: string): string {
+  if (api.isRemoteRef(p)) return sshParentOf(p) || p;
+  return dirnameOf(p) || p;
 }
 
 /** 计算某路径是否落在 projectDir 内（用于判定编辑器只读）。 */
@@ -879,8 +899,18 @@ async function applyExternalProject(): Promise<void> {
   store.projectRequest.value = null;
   // 参数通道已送达 → 作废兜底投递，避免切面板重挂载时把用户后来换掉的项目又跳回来。
   clearPendingEditorProject();
-  if (req.dir === vsState.projectDir) return;
+  if (req.dir === vsState.projectDir) {
+    // 项目没变，但请求可能还带了「打开某文件」的意图（同一主机下点另一个远端文件）：
+    // 必须就地消费掉，否则它会滞留到下一次挂载，凭空弹出一个文件 tab。
+    const sameReqFile = takePendingEditorFile();
+    if (sameReqFile) await openFile(sameReqFile);
+    return;
+  }
   await onPickFolder(req.dir);
+  // 随项目一并投递的「打开某文件 tab」（SSH 等把引用当项目根的场景）：项目就绪后再开 tab，
+  // 缓冲区才能从正确的根加载。无则跳过。本条请求消费后即清空，避免切面板重挂载时重复开。
+  const pendingFile = takePendingEditorFile();
+  if (pendingFile) await openFile(pendingFile);
 }
 
 // 外部请求的监听放在 setup 顶层（自动随组件卸载失效）；挂载瞬间就存在的请求由 onMounted 补做。
@@ -923,6 +953,63 @@ function closeAllTabs(): void {
   for (const p of Object.keys(docRevs)) delete docRevs[p];
   vsState.openTabs = [];
   vsState.activeTab = null;
+}
+
+/**
+ * 自愈历史遗留的编辑器状态（旧版本 bug 留下的持久化数据）。
+ *
+ *  1. `projectDir` 指向**文件**（老版本把「收藏里的文件」直接当项目目录打开）→ 改成它所在的目录，
+ *     并把该文件作为标签打开；否则目录树去列一个文件永远失败（「无法访问此文件夹」）。
+ *  2. `openTabs` 里混进的**目录**（老版本把被点的 SSH 目录当文件投递给编辑器）→ 摘掉。
+ *     否则每次恢复都会去 `/read` 一个目录，host 以 400 `not a file` 拒绝，刷新也消不掉。
+ *
+ * 一律以 `detail` 的真实结果为准；探不到（主机离线 / 引用已失效）时**原样保留**，绝不误删用户数据。
+ */
+/**
+ * 已自愈过的编辑器实例槽位：自愈只需在**页面加载后首次挂载**时跑一次 —— 面板切走再切回会
+ * 重新挂载，若每次都探测一轮会把内容加载拖慢一个 RTT（远端项目尤其明显）。
+ */
+const healedSlots = new Set<string>();
+
+async function healRestoredState(): Promise<void> {
+  if (healedSlots.has(VS_KEY)) return;
+  healedSlots.add(VS_KEY);
+  let changed = false;
+  const project = vsState.projectDir;
+  if (project) {
+    const det = await api.detailOrNull(project);
+    if (det && !det.isDir) {
+      const parent = parentRefOf(project);
+      if (parent && parent !== project) {
+        vsState.projectDir = parent;
+        if (!vsState.openTabs.includes(project)) vsState.openTabs.push(project);
+        vsState.activeTab = project;
+        changed = true;
+      }
+    }
+  }
+  const tabs = [...vsState.openTabs];
+  if (tabs.length === 0) {
+    if (changed) persistVSCode();
+    return;
+  }
+  const probed = await Promise.all(tabs.map(async (p) => ((await api.detailOrNull(p))?.isDir ? p : null)));
+  const dirs = new Set(probed.filter((p): p is string => !!p));
+  if (dirs.size === 0) {
+    if (changed) persistVSCode();
+    return;
+  }
+  for (const p of dirs) {
+    delete buffers[p];
+    delete errors[p];
+    delete docRevs[p];
+  }
+  vsState.openTabs = vsState.openTabs.filter((p) => !dirs.has(p));
+  if (vsState.activeTab && dirs.has(vsState.activeTab)) {
+    vsState.activeTab = vsState.openTabs[vsState.openTabs.length - 1] ?? null;
+  }
+  // 立刻落盘：不改的话下次挂载还得再自愈一遍（每次都要多打一轮探测请求）。
+  persistVSCode();
 }
 
 /** 打开一个文件：加入标签并加载内容；opts.line 传入时打开后跳到该行（左栏搜索结果跳转用）。 */
@@ -1017,8 +1104,12 @@ function onEditorView(v: { scrollTop: number; anchor: number }): void {
 
 /** 保存当前激活文件。 */
 async function saveActive(): Promise<void> {
-  if (!vsState.activeTab) return;
-  await savePath(vsState.activeTab);
+  const tab = vsState.activeTab;
+  if (!tab) return;
+  const b = buffers[tab];
+  // 无本地改动时不重复保存/弹提示（对齐 VS Code：Ctrl+S 多次仅首次落盘并提示）。
+  if (!b || !b.dirty) return;
+  await savePath(tab);
 }
 
 interface SaveOptions {
@@ -1206,7 +1297,14 @@ async function resolveConflict(): Promise<void> {
 
 /** 用系统默认程序打开当前（非文本）文件。 */
 function openActiveExternal(): void {
-  if (vsState.activeTab) void api.openExternal(vsState.activeTab);
+  const path = vsState.activeTab;
+  if (!path) return;
+  // 远端文件只能用内置编辑器查看，不能用本机默认程序打开。
+  if (api.isRemoteRef(path)) {
+    toast("error", t("remoteNoExternal"));
+    return;
+  }
+  void api.openExternal(path);
 }
 
 /* ---------- 关闭标签 ---------- */
@@ -1453,6 +1551,8 @@ onMounted(async () => {
   for (const [path, buf] of Object.entries(stashed)) {
     if (vsState.openTabs.includes(path)) buffers[path] = buf;
   }
+  // 自愈旧版本留下的坏状态（projectDir 是文件 / 标签里混入目录），必须在 setRoot 与加载内容之前。
+  await healRestoredState();
   if (vsState.projectDir) {
     try {
       await api.setRoot(vsState.projectDir, VS_KEY);
@@ -1480,6 +1580,7 @@ onMounted(async () => {
   const pendingDir = takePendingEditorProject();
   if (pendingDir) store.requestOpenProject(pendingDir);
   // 挂载前就投递过来的「打开某项目」请求在这里补做（挂载后的请求由 watch 处理）。
+  // 随项目一并投递的「打开某文件 tab」由 applyExternalProject 在项目就绪后消费。
   if (store.projectRequest.value) await applyExternalProject();
 });
 

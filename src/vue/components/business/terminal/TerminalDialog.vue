@@ -608,7 +608,10 @@ function newSessionId(): string {
 function makeTab(): TermTab {
   // 优先用「在终端打开」携带的目标目录，否则回退工作区根。
   const cwd = wb.termRequestCwd || wb.root || wb.explorerPath || "";
+  // 远端目录「在终端打开」：建流后自动敲入 ssh 登录命令（见 terminalStore.startStream）。
+  const initCmd = wb.termRequestCmd;
   wb.termRequestCwd = "";
+  wb.termRequestCmd = "";
   return {
     id: newSessionId(),
     name: nextTermName(),
@@ -617,6 +620,7 @@ function makeTab(): TermTab {
     shell: prefs.termShell,
     output: "",
     connected: false,
+    initCmd: initCmd || undefined,
   };
 }
 

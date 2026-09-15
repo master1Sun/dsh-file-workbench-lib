@@ -6,8 +6,8 @@
  *   2. import.meta.env.VITE_API_BASE（独立 vite dev 联调）
  *   3. 默认 '/api/dsh-file-workbench'
  */
-import { ElMessage } from "element-plus";
 import { computed, reactive } from "vue";
+import { toastError } from "./toast";
 import type {
   ApiResponse,
   BrowseListing,
@@ -153,7 +153,7 @@ async function request<T>(method: string, url: string, body?: unknown, opts?: Re
     } catch (e) {
       // 网络层失败 / 主动中止发生在真正拿到响应之前。
       if (controller.signal.aborted) throw new AbortRequestError();
-      if (!opts?.silent) ElMessage.error(t("errNetwork"));
+      if (!opts?.silent) toastError(t("errNetwork"));
       throw e instanceof Error ? e : new Error(String(e));
     }
     const payload = (await res.json().catch(() => ({ ok: false, error: "bad response" }))) as ApiResponse<T>;
@@ -164,9 +164,9 @@ async function request<T>(method: string, url: string, body?: unknown, opts?: Re
         // 交由调用方分支处理（例如 mtime 冲突 → 确认覆盖）：此处静默，不重复提示。
       } else if (res.status === 403 && /outside (root|workspace)/i.test(err)) {
         // 工作区外操作被禁止的前端提示（服务端以 403 + “outside root/workspace” 标识）。
-        if (!opts?.silent) ElMessage.error(t("workspaceOutside"));
+        if (!opts?.silent) toastError(t("workspaceOutside"));
       } else if (!opts?.silent) {
-        ElMessage.error(mapError(res.status, err));
+        toastError(mapError(res.status, err));
       }
       throw new ApiError(err, res.status, payload.code);
     }
@@ -298,6 +298,14 @@ export function grep(
   );
 }
 
+/**
+ * 是否远端引用（`ssh://<hostId>/<path>`）。远端根下不支持「用本机程序打开」「压缩/解压」
+ * 等依赖本地文件系统的操作，UI 需据此提前拦截，而不是等 host 返回 501。
+ */
+export function isRemoteRef(path: string): boolean {
+  return path.startsWith("ssh://");
+}
+
 /** “我的电脑”顶层入口（盘符/Home/下载/工作区/回收站）。 */
 export function myComputer(key?: string): Promise<{ items: MyComputerItem[] }> {
   return request("GET", `/mycomputer${qs({ key })}`);
@@ -306,6 +314,88 @@ export function myComputer(key?: string): Promise<{ items: MyComputerItem[] }> {
 /** 驱动器列表（「此电脑」的「设备和驱动器」视图：含容量与卷标）。 */
 export function drives(): Promise<{ drives: DriveInfo[] }> {
   return request("GET", "/drives");
+}
+
+/* ── SSH 远端主机管理 ── */
+
+/** 主机配置（host 侧已抹去机密：只有 authType 与 hasSecret 标记）。 */
+export interface SshHostPublic {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  user: string;
+  authType: "password" | "key";
+  hasSecret: boolean;
+  privateKeyPath?: string;
+  createdAt: string;
+}
+
+export interface SshTestResult {
+  ok: boolean;
+  banner?: string;
+  error?: string;
+  stage?: string;
+  fingerprint?: string;
+}
+
+export function sshHosts(): Promise<{ hosts: SshHostPublic[] }> {
+  return request("GET", "/ssh/hosts", undefined, { silent: true });
+}
+
+export function sshAdd(body: {
+  name?: string;
+  host: string;
+  port: number;
+  user: string;
+  auth: { type: "password"; password: string } | { type: "key"; privateKeyPath: string };
+}): Promise<{ host: SshHostPublic }> {
+  return request("POST", "/ssh/add", body);
+}
+
+export function sshUpdate(body: {
+  id: string;
+  name?: string;
+  host?: string;
+  port?: number;
+  user?: string;
+  auth?: { type: "password"; password?: string } | { type: "key"; privateKeyPath?: string };
+}): Promise<{ host: SshHostPublic }> {
+  return request("POST", "/ssh/update", body);
+}
+
+export function sshRemove(id: string): Promise<{ id: string }> {
+  return request("POST", "/ssh/remove", { id });
+}
+
+/**
+ * 测试连接：`{ id }` 走已保存的配置；也可内联 `{ host, port, user, auth }` 试一套
+ * 还没保存的凭据（添加表单的「测试连接」用这条路径）。
+ */
+export function sshTest(body: {
+  id?: string;
+  host?: string;
+  port?: number;
+  user?: string;
+  auth?: { type?: string; password?: string; privateKeyPath?: string };
+}): Promise<SshTestResult> {
+  return request("POST", "/ssh/test", body);
+}
+
+/**
+ * 连接冒烟：复用已缓存连接跑一次 `echo ok`，判断主机此刻是否在线（连接指示灯用）。
+ * 失败不抛（host 侧以 `alive:false` 返回），调用方据此把灯点红。
+ */
+export function sshPing(id: string): Promise<{ alive: boolean; error?: string }> {
+  return request("POST", "/ssh/ping", { id }, { silent: true });
+}
+
+/**
+ * 把远端文件取回本机临时文件，返回可直接交给官方查看器的本地绝对路径。
+ * 宿主侧的文件查看器只认本机路径（远端 `ssh://` 引用它解析不了），故远端一律先落地再打开。
+ */
+export function sshCacheFile(path: string): Promise<{ path: string; name: string; size: number }> {
+  return request("POST", "/ssh/cache", { path });
 }
 
 /* ---------- Windows 系统回收站 ---------- */
@@ -505,9 +595,23 @@ export async function exists(path: string): Promise<boolean> {
   } catch (e) {
     if (e instanceof ApiError && e.status === 404) return false;
     if (!isAbortError(e)) {
-      ElMessage.error(e instanceof ApiError ? mapError(e.status, e.message) : t("errNetwork"));
+      toastError(e instanceof ApiError ? mapError(e.status, e.message) : t("errNetwork"));
     }
     throw e;
+  }
+}
+
+/**
+ * 静默取路径详情：路径不存在 / 连不上 / 未知主机一律返回 `null`，**不弹提示**。
+ *
+ * 用于「先探类型再决定动作」的场景（如编辑器判断一个 SSH 引用是文件还是目录）：
+ * 这类探测失败本身是预期结果，不该打断用户。需要区分「不存在」与「探测失败」时用 `exists()`。
+ */
+export async function detailOrNull(path: string): Promise<FileDetail | null> {
+  try {
+    return await request<FileDetail>("GET", `/detail${qs({ path })}`, undefined, { silent: true });
+  } catch {
+    return null;
   }
 }
 

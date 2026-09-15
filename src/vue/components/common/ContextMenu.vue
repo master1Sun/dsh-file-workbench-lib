@@ -23,7 +23,7 @@
               v-else
               class="fw-cm-item"
               :class="{ disabled: item.disabled, checked: item.checked, hasChild: !!item.children?.length }"
-              @mouseenter="hover(i)"
+              @mouseenter="hover(i, $event)"
               @click="pick(item)"
             >
               <span class="fw-cm-ico"><icon v-if="hasIcon(item.icon ?? '')" :name="item.icon ?? ''" :size="14" /><span v-else>{{ item.icon ?? "" }}</span></span>
@@ -152,26 +152,32 @@ function clamp(): void {
   pos.value = { x: nx, y: ny };
 }
 
-function hover(i: number): void {
+function hover(i: number, e?: MouseEvent): void {
   active.value = i;
   const el = menuEl.value;
   const item = props.items[i];
+  // 直接用 hover 事件的真实元素定位子菜单：避免 querySelectorAll('.fw-cm-item') 同时命中
+  // 根菜单 / 页脚 / 已渲染子菜单三类节点导致索引错位（菜单过长出现滚动条时尤为明显，
+  // 错位会拿到位于 (0,0) 的子菜单项，使 subPos 漂到屏幕左上角）。
+  const target = (e?.currentTarget as HTMLElement | null) ?? el?.querySelectorAll<HTMLElement>(".fw-cm-item")[i] ?? null;
   childLeft.value = !!el && pos.value.x + el.getBoundingClientRect().width + 180 > window.innerWidth;
   if (item?.children?.length) {
     activeSub.value = item;
-    measureSub();
+    measureSub(target);
   } else {
     activeSub.value = null;
   }
 }
 
-/** 根据 hover 项的位置，把根层级的子菜单定位到其右侧（左缘不足时改左侧），并防溢出屏幕。 */
-function measureSub(): void {
-  const root = menuEl.value;
-  if (!root || active.value < 0) return;
-  const itemEl = root.querySelectorAll<HTMLElement>(".fw-cm-item")[active.value];
-  if (!itemEl) return;
-  const r = itemEl.getBoundingClientRect();
+/**
+ * 根据 hover 项的位置，把根层级的子菜单定位到其右侧（左缘不足时改左侧），并防溢出屏幕。
+ * 传入的 `target` 是 hover 事件的真实元素，其 getBoundingClientRect 已是正确视口坐标，
+ * 不受滚动容器 / 页脚 / 子菜单计数影响。
+ */
+function measureSub(target?: HTMLElement | null): void {
+  const el = target ?? null;
+  if (!el) return;
+  const r = el.getBoundingClientRect();
   // 估算宽（min 200 / max 280），渲染后再用真实尺寸校正
   const estW = 220;
   let x = childLeft.value ? r.left - estW : r.right - 2;

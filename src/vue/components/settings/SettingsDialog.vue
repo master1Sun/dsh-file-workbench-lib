@@ -1,5 +1,5 @@
 <template>
-  <el-dialog v-model="open" class="fw-set-dialog" :title="t('settings')" width="420px" :close-on-click-modal="true">
+  <el-dialog v-model="open" class="fw-set-dialog" :title="t('settings')" width="460px" :close-on-click-modal="true">
     <div class="fw-set-body">
       <div class="fw-set-row">
         <span class="k">{{ t('allowOutsideRoot') }}</span>
@@ -94,6 +94,7 @@ import { useI18n } from "../../composables/core/i18n";
 const { t } = useI18n();
 const open = ref(false);
 
+
 /** 预设强调色（多种应用主题常用色）。 */
 const predefColors = ["#1f883d", "#238636", "#0969da", "#8250df", "#b35900", "#cf222e", "#0a3069", "#116329"];
 
@@ -109,7 +110,9 @@ function resetAccent(): void {
 }
 
 defineExpose({
-  open: () => (open.value = true),
+  open: () => {
+    open.value = true;
+  },
 });
 
 function changed(): void {

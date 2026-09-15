@@ -21,15 +21,8 @@ body {
   box-sizing: border-box;
 }
 
-/* 顶部消息提示(Toast)：Teleport 到 body、按视口顶部固定；桌面模式下整体下移 36px 避开顶栏。
-   margin-top 对每条消息独立累加，能保持 Element Plus 自身的堆叠间距。 */
-body:is(
-    [data-dsh-desktop-mode="compatibility"],
-    [data-dsh-desktop-mode="extended"]
-  )
-  .el-message {
-  margin-top: 36px;
-}
+/* 消息提示已自建（右下角浮层，样式在 components/common/ToastHost.vue 内），
+   原先为 ElMessage 顶部弹出做的「桌面模式整体下移 36px」规则随之删除。 */
 
 /* DSH 文件工作台 — 主题色。
  * 优先跟随 DSH 官方皮肤 token（--dsw-alias-*，宿主随 body[data-ds-dark-theme]

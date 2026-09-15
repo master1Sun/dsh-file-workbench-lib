@@ -1065,8 +1065,8 @@ function openTerminalHere(entry: FsEntry): void {
  * 走宿主右侧栏的页 tab 导航通道（`openTab('vscode', { params: { projectDir } })`）：
  * 编辑器已打开时聚焦它并送达参数，未打开时新开一个 —— 本插件不需要自己找面板实例。
  */
-function openInEditor(dirPath: string): void {
-  openProjectInEditor(dirPath);
+function openInEditor(dirPath: string, isDir = true): void {
+  openProjectInEditor(dirPath, { isDir });
 }
 
 // —— 子代理（宿主 0.1.5）：官方 spawn 创建会话并直接在官方子代理会话视图展示 ——
@@ -1332,6 +1332,11 @@ function sortItems(): MenuItem[] {
 }
 
 async function systemOpen(path: string): Promise<void> {
+  // 远端文件：本机程序读不到内容，提前拦截（host 侧同样会返回 501）。
+  if (api.isRemoteRef(path)) {
+    toast("error", t("remoteNoExternal"));
+    return;
+  }
   try {
     await api.openExternal(path);
     toast("ok", t("menuOpened"));
@@ -1567,6 +1572,11 @@ async function emptyBin(): Promise<void> {
 // —— 压缩 / 解压 ——
 async function compressOne(entry: FsEntry): Promise<void> {
   if (!guardOperable(entry.path)) return;
+  // 远端目录：压缩依赖本地归档管线，首版不支持。
+  if (api.isRemoteRef(entry.path)) {
+    toast("error", t("remoteNoArchive"));
+    return;
+  }
   const m = entryMeta(entry);
   const h = startTask(t("taskCompressing"), entry.name, m.fileType, m.fileSize);
   try {
@@ -1583,6 +1593,10 @@ async function extractOne(entry: FsEntry): Promise<void> {
   const destDir = explorer.listing?.path ?? "";
   if (!destDir) return;
   if (!guardOperable(destDir)) return;
+  if (api.isRemoteRef(entry.path) || api.isRemoteRef(destDir)) {
+    toast("error", t("remoteNoArchive"));
+    return;
+  }
   const m = entryMeta(entry);
   const h = startTask(t("taskExtracting"), entry.name, m.fileType, m.fileSize);
   try {
@@ -1633,6 +1647,11 @@ async function multiOp(op: "cut" | "copy" | "delete" | "compress"): Promise<void
       toast("ok", t("deleted"));
       h.done();
     } else if (op === "compress") {
+      // 远端项整批不支持：先拦下，避免逐项请求后拿到一串 501。
+      if (sel.some((p) => api.isRemoteRef(p))) {
+        toast("error", t("remoteNoArchive"));
+        return;
+      }
       for (const p of sel) {
         try {
           const meta = await statMeta(p);

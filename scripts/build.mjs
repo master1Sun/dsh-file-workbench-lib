@@ -83,9 +83,16 @@ const external = [
   "react",
   "react/jsx-runtime",
   "react-dom",
+  // node-pty 是原生模块（conpty.node/conpty.exe 等二进制按模块目录相对路径加载）。
   "node-pty",
+  // ssh2 内部有 __dirname / 自由 require（agent.js 等），打包进 ESM 产物会触发
+  // ERR_AMBIGUOUS_MODULE_SYNTAX → external，运行时由 profile node_modules 解析。
+  "ssh2",
   "@deepseek-ai/cordis",
   "@deepseek-ai/dsh-*",
+  // ssh2 的可选原生加速依赖（ssh2 侧 try/catch 守卫）：缺 .node 二进制时 esbuild 无法
+  // 静态解析，运行时 require 失败也会被 ssh2 捕获并回退纯 JS 加密实现 → external。
+  "cpu-features",
 ];
 
 // host 构建 banner：注入 createRequire shim，兜底 bundle 内偶发的动态 require

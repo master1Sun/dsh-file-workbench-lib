@@ -11,16 +11,18 @@ import { createApp, type App as VueApp } from "vue";
 // 这里只保留全局基础样式与深色主题变量；各组件样式由 resolver 按需引入。
 import "element-plus/theme-chalk/base.css";
 import "element-plus/theme-chalk/dark/css-vars.css";
-// ElMessage 以 JS 函数方式调用（import { ElMessage } from "element-plus"），
-// resolver 只会为「模板 / 自动导入」的组件注入样式，函数式调用需手动补上样式文件，
-// 否则错误/成功提示只有 class 没有外观（历史上就因此丢失过提示样式）。
-import "element-plus/theme-chalk/el-message.css";
+// 注：消息提示已改为自建浮层（ToastHost + composables/core/toast），不再使用 ElMessage，
+// 故原先手动补的 el-message.css 已移除（保留上面两条全局基础变量即可）。
 import AppFileWorkbench from "./App.vue";
 import AppVSCode from "./components/business/vscode/VSCodePane.vue";
 import TerminalHost from "./components/business/terminal/TerminalHost.vue";
+import ToastHost from "./components/common/ToastHost.vue";
 import "./styles.css";
 import { initPersist } from "./composables/core/settings";
 import { cancelAll } from "./composables/core/useApi";
+// 提示队列的共享存储：宿主是否已挂载也要跨实例判断，故从 core/toast 取（别从 stores/workbench 取，
+// 那是给调用点用的 toast() re-export）。
+import { toastStore } from "./composables/core/toast";
 import { openPreview, toast } from "./stores/workbench";
 import { browseTo, refreshListing, syncToSession } from "./stores/explorer";
 import { connectSessionSse } from "./composables/session/sessionSse";
@@ -171,13 +173,76 @@ window.__dshFileWorkbenchMountPane__ = mountFileWorkbenchPane;
 window.__dshVSCodeMountPane__ = mountVSCodePane;
 
 /**
+ * 全局消息提示（右下角浮层）：与终端同理提到全局层级。
+ * 提示既可能由文件工作台发起、也可能由文件编辑器发起（useApi 的错误提示两侧共用），
+ * 若挂在任一面板内，切面板会重建、两个面板同时挂载时还会各弹一份。挂在 body 上即：
+ * 单实例、跨面板存活、队列只此一份。
+ *
+ * 两处容易踩的坑，都在这里显式兜住：
+ *  ① **必须在终端之前挂**：两者都在模块顶层执行，若终端挂载抛错（xterm/ConPTY 环境异常等），
+ *     排在后面的宿主就再也轮不到挂载 —— 症状是「插件面板一切正常，但提示一条都不出」。
+ *     所以提示宿主先挂、且各自 try/catch，互不牵连。
+ *  ② **宿主按 `#dsh-toast-root` 去重，队列却是跨实例共享的**（见 composables/core/toast）：
+ *     页面存活期间若 DSH 重新注入了新 bundle，新实例会用共享存储里的 `app` 判断「已有活宿主
+ *     在渲染共享队列」并直接复用；若元素在而 `app` 为空，说明那是上一份 bundle 留下的死宿主
+ *     （它的队列已无人 push），清掉重建，避免提示整片静默失效。
+ */
+function mountGlobalToastHost(): void {
+  if (typeof document === "undefined" || !document.body) return;
+  const store = toastStore();
+  // 已有活宿主在渲染共享队列 → 复用（多实例也只保留一个宿主，不会重复弹出）。
+  // 元素已脱离文档（被宿主框架清理过）则视为死宿主，下面的重建路径接管。
+  if (store.app && store.el?.isConnected) return;
+  if (store.app) {
+    try {
+      store.app.unmount();
+    } catch {
+      /* 旧应用可能已随 DOM 一起失效，忽略 */
+    }
+    store.app = null;
+    store.el = null;
+  }
+  document.getElementById("dsh-toast-root")?.remove();
+  const host = document.createElement("div");
+  host.id = "dsh-toast-root";
+  // 定位交给组件内的 .fw-toast-host（position: fixed），宿主容器本身不占位、不拦截事件。
+  host.style.position = "fixed";
+  host.style.left = "0";
+  host.style.top = "0";
+  host.style.width = "0";
+  host.style.height = "0";
+  host.style.overflow = "visible";
+  // ⛔ 必须显式给 z-index。`position: fixed` 会让容器自成一个层叠上下文，z-index:auto 即等同 0 层；
+  // 而 DSH 的 `#root` 里存在 `position` + 正 z-index 的层（面板、抽屉、popper 等），它们会**整个盖住**
+  // 这个容器——容器内部的 z-index:10050 只在容器自己的层叠上下文里生效，拦不住外面。
+  // 症状极具迷惑性：`.fw-toast` 在 DOM 里、尺寸/文案/倒计时都对，但 elementFromPoint 命中的是面板元素，
+  // 屏幕上什么都看不到（真机实测：#root 之后的兄弟节点 z-index:auto 时，面板内容盖在提示之上）。
+  // 取一个高于 DSH 应用层（实测其 popper/overlay 用到 2004/2010/2014）的值，留出余量。
+  host.style.zIndex = "2147483000";
+  host.style.pointerEvents = "none";
+  document.body.appendChild(host);
+  try {
+    const app = createApp(ToastHost);
+    app.mount(host);
+    store.app = app;
+    store.el = host;
+  } catch (e) {
+    console.error("[dsh-file-workbench] 提示宿主挂载失败：", e);
+    host.remove();
+  }
+}
+
+/**
  * 全局终端：独立于「文件工作台 / 文件编辑器」任一面板常驻挂载一次。
  * 切换右侧面板 tab 时两个 Vue 应用会被 host 各自的桥接组件 unmount，若终端挂在任一面板内，
  * 切换即会卸载重建（丢失 shell 会话）、且两侧会同时打开。提到全局层级即可彻底规避：
  * 单一终端实例、跨面板存活、不重复打开。
+ *
+ * 注意：这里**只**在 `#dsh-term-root` 缺失时挂载（终端持有常驻 shell 会话，绝不能因重新注入
+ * 而重建），且挂载失败只吞掉自己 —— 不能连累排在其后的其他全局挂载。
  */
 function mountGlobalTerminal(): void {
-  if (typeof document === "undefined") return;
+  if (typeof document === "undefined" || !document.body) return;
   if (document.getElementById("dsh-term-root")) return;
   const host = document.createElement("div");
   host.id = "dsh-term-root";
@@ -189,8 +254,15 @@ function mountGlobalTerminal(): void {
   host.style.overflow = "visible";
   host.style.zIndex = "10000";
   document.body.appendChild(host);
-  createApp(TerminalHost).mount(host);
+  try {
+    createApp(TerminalHost).mount(host);
+  } catch (e) {
+    console.error("[dsh-file-workbench] 全局终端挂载失败：", e);
+  }
 }
+
+// 顺序有意为之：提示宿主先挂（挂载失败也不会连累终端），详见 mountGlobalToastHost 的注释。
+mountGlobalToastHost();
 mountGlobalTerminal();
 
 if (typeof document !== "undefined") {

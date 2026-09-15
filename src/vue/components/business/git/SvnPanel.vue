@@ -201,6 +201,7 @@ import type { CopyKey } from "../../../../shared/locales";
 import { useI18n } from "../../../composables/core/i18n";
 import { toast } from "../../../stores/workbench";
 import * as api from "../../../composables/core/useApi";
+import { countSvnUpdateEntries, svnRevisionFromUpdate } from "../../../composables/domain/svn";
 import Icon from "../../common/Icon.vue";
 import GitDiffView from "./GitDiffView.vue";
 
@@ -279,8 +280,13 @@ async function onOpen(): Promise<void> {
   }
 }
 
-/** 运行 svn 子命令并更新输出区；返回结果。 */
-async function run(args: string[]): Promise<api.SvnRunResult | null> {
+/**
+ * 运行 svn 子命令并更新输出区；返回结果。
+ *
+ * `quiet` 只压掉**成功** toast（失败照常提示）—— 供「更新」这类自备摘要文案的调用方使用，
+ * 否则 toast 只会显示 `Updating '.':` 这种没有信息量的首行。
+ */
+async function run(args: string[], quiet = false): Promise<api.SvnRunResult | null> {
   if (running.value) return null;
   running.value = true;
   sec.value = "output";
@@ -289,7 +295,7 @@ async function run(args: string[]): Promise<api.SvnRunResult | null> {
     const text = [r.stdout, r.stderr].filter(Boolean).join("\n").trim();
     lastOut.value = `$ svn ${args.join(" ")}\n\n${text || t("svnNoOutput")}`;
     if (r.code !== 0) toast("error", (r.stderr || t("svnFailed")).split("\n")[0].slice(0, 200));
-    else if (r.stdout) toast("ok", r.stdout.split("\n")[0].slice(0, 200));
+    else if (!quiet && r.stdout) toast("ok", r.stdout.split("\n")[0].slice(0, 200));
     return r;
   } catch (err) {
     toast("error", (err as Error).message);
@@ -297,6 +303,12 @@ async function run(args: string[]): Promise<api.SvnRunResult | null> {
   } finally {
     running.value = false;
   }
+}
+
+/** 在命令输出顶部插入一行摘要；其下保留命令的完整回显（stdout + stderr）。 */
+function prependOutput(line: string): void {
+  if (!line) return;
+  lastOut.value = `${line}\n\n${lastOut.value}`;
 }
 
 /** 解析 `svn status` 输出为 [{code,path,statusText}]。 */
@@ -350,9 +362,32 @@ async function refreshAll(): Promise<void> {
   }
 }
 
+/**
+ * 更新工作副本（svn update）。
+ *
+ * 完成后在「命令输出」顶部打印摘要，其下是 svn 的**完整回显**（每个被更新条目的行 + 版本提示）：
+ *  - 有变更 → 「更新完成：r{起始} → r{当前}，{n} 个条目变更」；
+ *  - 无变更 → 「已是最新版本 r{当前}，没有需要更新的内容」（否则只有一句 `At revision N.`，
+ *    容易被误读成命令没执行）。
+ * 版本号优先取 `svn info` 的 Revision（重读一次）；`svn info` 读不到时（旧 host 未重启 /
+ * 标签语言不识别）回退到解析 update 输出里的版本提示行，避免摘要出现 `r?`。
+ * 条目数由输出行统计。
+ */
 async function doUpdate(): Promise<void> {
-  const r = await run(["update"]);
-  if (r && r.code === 0) await loadStatus();
+  const before = info.value?.revision ?? null;
+  const r = await run(["update"], true);
+  if (!r || r.code !== 0) return; // 失败已由 run() 提示
+  const n = countSvnUpdateEntries(r.stdout);
+  const fromOut = svnRevisionFromUpdate(r.stdout); // 兜底：info 读不到时用输出里的版本
+  await refreshAll(); // 刷新版本 pill 与本地修改列表
+  const rev = info.value?.revision ?? fromOut;
+  const header = n
+    ? before
+      ? t("svnUpdateSummaryFrom", { from: before, to: rev ?? before, n })
+      : t("svnUpdateSummary", { n, to: rev ?? "?" })
+    : t("svnAlreadyLatest", { rev: rev ?? before ?? "?" });
+  prependOutput(header);
+  toast("ok", header);
 }
 async function doCleanup(): Promise<void> {
   const r = await run(["cleanup"]);

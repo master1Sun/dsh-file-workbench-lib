@@ -10,7 +10,9 @@
  */
 import type { SidebarRightBridge, SidebarRightOpenOptions } from "../../../shared/types";
 import { toast } from "../../stores/workbench";
+import { sshHostIdOf, sshRootRef } from "../../stores/ssh";
 import { t } from "./i18n";
+import * as api from "./useApi";
 
 /** 「文件工作台」tab 的 kind（与 src/client/index.tsx 的 KIND 一致）。 */
 export const FILE_WORKBENCH_KIND = "workbench";
@@ -96,6 +98,26 @@ export function clearPendingEditorProject(): void {
 }
 
 /**
+ * 兜底投递：待下一个挂载的文件编辑器额外打开的文件 tab（与 `pendingEditorProject` 配套）。
+ *
+ * 仅用于 SSH 等「把引用当项目根打开」的场景：项目落在远端根，被点的那个文件/子项另行作为
+ * tab 打开，省去在树里再点一次。本地路径通常不依赖它（文件经项目树点开）。
+ */
+let pendingEditorFile: string | null = null;
+
+/** 取走并清空兜底投递（无则返回 null）。 */
+export function takePendingEditorFile(): string | null {
+  const p = pendingEditorFile;
+  pendingEditorFile = null;
+  return p;
+}
+
+/** 作废兜底投递（参数通道已送达时调用）。 */
+export function clearPendingEditorFile(): void {
+  pendingEditorFile = null;
+}
+
+/**
  * 在**文件编辑器**里打开一个项目目录 —— **每次都新开一个编辑器窗口**。
  *
  * 走 client 侧的 kind 池分配（`newEditorTab`）：新实例占一个空 kind，因此是**独立的一份**
@@ -103,10 +125,21 @@ export function clearPendingEditorProject(): void {
  *
  * 目录经导航参数 `params.projectDir` 送达新实例（面板的 `useTabInfo().tab.navigation` 读取）；
  * 另留一份模块级兜底投递，兼容宿主不下发 tab 信息钩子的情况。
+ *
+ * SSH 远端引用特殊处理：**目录**直接作为项目根（与本地语义一致，项目名显示为「主机 · 远端路径」）；
+ * **文件**则以「远端根」作为项目（项目树按目录正常浏览），被点的那个文件另行开成 tab。
+ * 二者不能混：把目录当文件投递，编辑器会去 `/read` 一个目录，host 以 400 `not a file` 拒绝。
+ *
+ * @param opts.isDir - 调用点已知类型时传入，省掉一次探测；未知（如收藏条目）时留空，按需静默探测。
  */
-export function openProjectInEditor(dir: string): void {
+export function openProjectInEditor(dir: string, opts: { isDir?: boolean } = {}): void {
   const d = dir?.trim();
   if (!d) return;
+  // SSH 远端引用：先定「是目录还是文件」再决定项目根（远端主机上的 stat 是异步的）。
+  if (d.startsWith("ssh://")) {
+    void openSshRefInEditor(d, opts.isDir);
+    return;
+  }
   pendingEditorProject = d;
   // 池满时新建会**顶替掉最旧的一个**，其未保存改动随之消失 —— 按约定不静默丢数据，先提示。
   const wasFull = editorTabFull();
@@ -117,4 +150,24 @@ export function openProjectInEditor(dir: string): void {
     return;
   }
   if (wasFull) toast("info", t("vsReplacedOldest"));
+}
+
+/**
+ * SSH 引用在文件编辑器里打开：目录 → 该项目根就是它自己；文件 → 项目落远端根 + 文件开成 tab。
+ *
+ * 类型判定优先级：远端根（必为目录）> 调用点给的 `isDir` > 静默探一次 `/detail`。
+ * 探测不到（已删除 / 主机连不上 / 引用了已删除的主机）按**文件**处理 —— 项目仍能落在远端根上，
+ * 编辑器会自行给出该 tab 的错误态，比静默什么都不做更可解释。
+ */
+async function openSshRefInEditor(d: string, isDir?: boolean): Promise<void> {
+  const root = sshRootRef(sshHostIdOf(d));
+  let dir = isDir;
+  if (dir === undefined && d !== root) dir = (await api.detailOrNull(d))?.isDir ?? false;
+  const isDirResolved = d === root || dir === true;
+  pendingEditorProject = isDirResolved ? d : root;
+  pendingEditorFile = isDirResolved ? null : d;
+  const projectDir = pendingEditorProject;
+  if (!openNewEditorTab({ projectDir })) {
+    openPanelTab(FILE_EDITOR_KIND, { params: { projectDir } });
+  }
 }

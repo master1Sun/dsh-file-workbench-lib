@@ -12,7 +12,7 @@
       <!-- 当前路径 + 上级 / 新建文件夹 -->
       <div class="fsp-bar">
         <div class="fsp-path" :title="currentPath || undefined">{{ currentPath || t("vsComputer") }}</div>
-        <button class="fsp-btn sm" :disabled="loading || crumbs.length < 2" @click="goUp">{{ t("vsUp") }}</button>
+        <button class="fsp-btn sm" :disabled="loading || !canGoUp" @click="goUp">{{ t("vsUp") }}</button>
         <button class="fsp-btn sm" :disabled="loading || !currentPath" @click="toggleNewFolder">
           {{ t("vsNewFolderBtn") }}
         </button>
@@ -66,6 +66,22 @@
               <span class="fsp-side-name">{{ labelOf(it) }}</span>
             </div>
             <div v-if="quickItems.length === 0" class="fsp-side-empty">{{ t("vsEmptyDir") }}</div>
+          </div>
+          <!-- SSH 远程：已添加的主机各占一行（带连接状态灯），点击进入该主机的远端根 -->
+          <div v-if="sshHosts.length > 0" class="fsp-group">
+            <div class="fsp-group-title">{{ t("sshNavGroup") }}</div>
+            <div
+              v-for="h in sshHosts"
+              :key="h.id"
+              class="fsp-side-row"
+              :class="{ active: sshRootRef(h.id) === currentPath }"
+              :title="`${h.user}@${h.host}:${h.port || 22}`"
+              @click="goto(sshRootRef(h.id))"
+            >
+              <span class="fsp-dot" :class="`dot-${sshStateOf(h.id)}`" :title="sshTipOf(h)"></span>
+              <span class="fsp-ico ico-globe"></span>
+              <span class="fsp-side-name">{{ h.name || `${h.user}@${h.host}` }}</span>
+            </div>
           </div>
         </div>
 
@@ -178,6 +194,7 @@ import type { DirectoryEntry, DirectoryListing, MyComputerItem } from "../../../
 import * as api from "../../../composables/core/useApi";
 import { t } from "../../../composables/core/i18n";
 import { driveName, myComputerDriveName } from "../../../composables/domain/driveName";
+import { sshHosts, sshCrumbsOf, sshParentOf, sshRootRef, sshStateOf, sshErrorOf, sshJoinRef, refreshSshHosts } from "../../../stores/ssh";
 
 /** VS Code 面板使用的独立根 key（用于让 /mycomputer 带上当前项目作为「工作区」快捷项）。 */
 const VS_KEY = "vscode";
@@ -281,9 +298,23 @@ const canConfirmFile = computed<boolean>(() => {
 
 /** 左栏分组：「我的电脑」= 磁盘盘符；「快捷方式」= 快速访问与工作区（回收站为虚拟项，排除）。 */
 const drives = computed<MyComputerItem[]>(() => sideItems.value.filter((i) => i.type === "drive"));
+/**
+ * 左栏「快捷方式」：排除回收站，以及图片 / 音乐 / 视频 / 图库 —— 这四个是消费级
+ * 媒体目录，选项目文件夹时用不上，留着只会挤占侧栏高度。
+ */
+const QUICK_EXCLUDED = new Set(["pictures", "music", "videos", "gallery"]);
 const quickItems = computed<MyComputerItem[]>(() =>
-  sideItems.value.filter((i) => i.type !== "drive" && i.type !== "recycle" && !!i.path),
+  sideItems.value.filter((i) => i.type !== "drive" && i.type !== "recycle" && !QUICK_EXCLUDED.has(i.type) && !!i.path),
 );
+
+/** 远端主机的连接状态提示（状态灯悬停文案）。 */
+function sshTipOf(h: api.SshHostPublic): string {
+  const s = sshStateOf(h.id);
+  const base = s === "online" ? t("sshStatusOnline") : s === "offline" ? t("sshStatusOffline") : "";
+  const err = s === "offline" ? sshErrorOf(h.id) : "";
+  if (base && err) return `${base}：${err}`;
+  return base || `${h.user}@${h.host}:${h.port || 22}`;
+}
 
 /** 左栏快捷项的展示文案（复用工作台导航既有的本地化键）。 */
 function labelOf(it: MyComputerItem): string {
@@ -343,17 +374,26 @@ function bridge(): Window["__DSH_FILE_WORKBENCH__"] {
   return window.__DSH_FILE_WORKBENCH__;
 }
 
-/** 判断手填的路径是否为绝对路径（win32 盘符 / UNC / POSIX 根）。 */
+/** 判断手填的路径是否为绝对路径（win32 盘符 / UNC / POSIX 根 / ssh 远端引用）。 */
 function isAbsolutePath(p: string): boolean {
-  return /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("/") || p.startsWith("\\\\");
+  return /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("/") || p.startsWith("\\\\") || api.isRemoteRef(p);
 }
 
 /** 用与目录一致的分隔符拼接「目录 + 名字」（宿主会自行归一，这里只为展示与原生观感一致）。 */
 function joinDir(dir: string | null, name: string): string {
   if (!dir) return name;
+  // 远端引用走 POSIX：`ssh://<hostId>/<remote>` 里的 `/` 是远端路径分隔符，
+  // 不能按 win32 语义拼成 `C:\ssh:\…`（一拼就 ENOENT）。
+  if (api.isRemoteRef(dir)) return sshJoinRef(dir, name);
   const sep = dir.includes("\\") ? "\\" : "/";
   return `${dir.replace(/[\\/]+$/, "")}${sep}${name}`;
 }
+
+/** 当前是否在远端（ssh）目录下——远端一律走插件自身的 /list，不用宿主官方浏览能力。 */
+const isRemote = computed<boolean>(() => !!currentPath.value && api.isRemoteRef(currentPath.value));
+
+/** 远端也能「上一级」：远端根之上回「我的电脑」，故只要已进目录就可点上。 */
+const canGoUp = computed<boolean>(() => (isRemote.value ? true : crumbs.value.length >= 2));
 
 /** 由绝对路径推导祖先链（仅 /list 回退时用；官方 listDirectory 自带 crumbs）。 */
 function synthCrumbs(p: string): DirectoryEntry[] {
@@ -413,12 +453,41 @@ async function fileListing(path?: string): Promise<PickerListing> {
   return { path, home: "", crumbs: synthCrumbs(path), entries };
 }
 
+/**
+ * 远端数据源：`/list`（host 侧按引用分流到 SftpFsProvider）。
+ * 面包屑用 `sshCrumbsOf` 自行推导 —— /list 返回的 crumbs 以「展示根」为起点，
+ * 而远端引用不是本机路径，`isWithin` 判不出包含关系，起点即当前目录（只有一段），
+ * 用它就没有「上一级」可点了。
+ */
+async function remoteListing(path: string): Promise<PickerListing> {
+  const r = await api.listDir(path, VS_KEY);
+  const rows = (r.entries ?? [])
+    .filter((e) => (isFileMode.value ? true : e.isDir) && !e.hidden)
+    .sort((a, b) =>
+      isFileMode.value && a.isDir !== b.isDir
+        ? Number(b.isDir) - Number(a.isDir)
+        : a.name.localeCompare(b.name, "zh"),
+    )
+    .map((e) => ({ name: e.name, path: e.path, hidden: !!e.hidden, isDir: !!e.isDir }));
+  const crumbs = (sshCrumbsOf(path) ?? [{ name: path, path }]).map((c) => ({
+    name: c.name,
+    path: c.path,
+    hidden: false,
+  }));
+  return { path, home: "", crumbs, entries: rows };
+}
+
 /** 加载某目录一层（缺省用宿主 home / 「我的电脑」）。 */
 async function load(path?: string): Promise<void> {
   loading.value = true;
   error.value = undefined;
   selectedPath.value = null;
   try {
+    // 远端引用：宿主官方 listDirectory 只认本机文件系统，交给插件自己的 /list。
+    if (path && api.isRemoteRef(path)) {
+      listing.value = await remoteListing(path);
+      return;
+    }
     if (isFileMode.value) {
       listing.value = await fileListing(path);
       return;
@@ -473,8 +542,15 @@ function jump(path: string): void {
   void load(path === "" ? undefined : path);
 }
 
-/** 上级 = 面包屑倒数第二项。 */
+/** 上级 = 面包屑倒数第二项；远端按引用语义取父目录（根之上回「我的电脑」）。 */
 function goUp(): void {
+  const cur = currentPath.value;
+  if (!cur) return;
+  if (api.isRemoteRef(cur)) {
+    const parent = sshParentOf(cur);
+    void load(parent || undefined);
+    return;
+  }
   const c = crumbs.value;
   if (c.length < 2) return;
   const parent = c[c.length - 2];
@@ -496,7 +572,8 @@ async function createFolder(): Promise<void> {
   createErr.value = undefined;
   try {
     const br = bridge();
-    if (br?.createDirectory) await br.createDirectory(dir, name);
+    if (api.isRemoteRef(dir)) await api.mkdir(sshJoinRef(dir, name), VS_KEY);
+    else if (br?.createDirectory) await br.createDirectory(dir, name);
     else await api.mkdir(`${dir.replace(/[\\/]+$/, "")}/${name}`);
     newFolderOpen.value = false;
     newFolderName.value = "";
@@ -535,8 +612,9 @@ function confirmManual(): void {
   visible.value = false;
 }
 
-/** 拉取左栏入口项（/mycomputer，带 VS 根以便把当前项目列为「工作区」快捷项）。 */
+/** 拉取左栏入口项（/mycomputer，带 VS 根以便把当前项目列为「工作区」快捷项）+ SSH 主机列表。 */
 async function loadSide(): Promise<void> {
+  void refreshSshHosts();
   try {
     const r = await api.myComputer(VS_KEY);
     sideItems.value = r.items ?? [];
@@ -661,6 +739,36 @@ function onClosed(): void {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* SSH 主机行：连接状态灯（绿=已连接 / 红=断开 / 琥珀脉冲=探测中 / 灰=未探测） */
+.fsp-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  margin-right: 5px;
+}
+.dot-online {
+  background: #3fb950;
+}
+.dot-offline {
+  background: #f85149;
+}
+.dot-checking {
+  background: #d29922;
+  animation: fsp-dot-pulse 1.2s ease-in-out infinite;
+}
+.dot-unknown {
+  background: #6e7681;
+}
+@keyframes fsp-dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
 .fsp-side-empty {
   padding: 4px 10px;
   font-size: 11px;
@@ -750,6 +858,12 @@ function onClosed(): void {
   -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='black' d='M4 1.5h5L12.5 5v9.5h-8.5z'/><path fill='black' d='M4.5 7.5h7v1h-7zM4.5 10h7v1h-7z'/></svg>");
   mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='black' d='M4 1.5h5L12.5 5v9.5h-8.5z'/><path fill='black' d='M4.5 7.5h7v1h-7zM4.5 10h7v1h-7z'/></svg>");
   color: #8b949e;
+}
+/* 远端主机（地球轮廓） */
+.ico-globe {
+  -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='black' d='M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 1.4v12.2a5.6 5.6 0 0 1 0-12.2zM6.6 2.1 5.4 5.2H2.9a5.6 5.6 0 0 1 3.7-3.1zM2.6 6.6h3.1l-1.2 3.1H2.7a5.6 5.6 0 0 1-.1-3.1zM2.9 11h2.5l1.2 3.1A5.6 5.6 0 0 1 2.9 11zm3.7 0h2.8l-1.4 3.3-1.4-3.3z'/></svg>");
+  mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='black' d='M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 1.4v12.2a5.6 5.6 0 0 1 0-12.2zM6.6 2.1 5.4 5.2H2.9a5.6 5.6 0 0 1 3.7-3.1zM2.6 6.6h3.1l-1.2 3.1H2.7a5.6 5.6 0 0 1-.1-3.1zM2.9 11h2.5l1.2 3.1A5.6 5.6 0 0 1 2.9 11zm3.7 0h2.8l-1.4 3.3-1.4-3.3z'/></svg>");
+  color: #2f81f7;
 }
 .ico-folder {
   -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='black' d='M1.5 3.5h5l1.5 1.5h6.5v8h-13z'/></svg>");

@@ -436,6 +436,32 @@ export const gitResource: RouteMatcher = async (req, res, seg, q, method, host) 
   if (seg[0] !== "git") return false;
   const op = seg[1];
 
+  /*
+   * 远端（ssh）引用短路：首版不支持在远端目录上跑 git，但前端刷新徽标时会把当前
+   * 目录（可能是 `ssh://<id>/<path>`）直接带过来。若落到下面的 requireAbsolute，
+   * 会被报成 400「不是绝对路径」——语义完全不对，且每次进入远端目录都弹一次错。
+   * 这里统一：只读接口按「非仓库」回空结果（徽标 / Git 栏 / 面板都不显示），写操作明确 501。
+   */
+  const rawPath = (q.get("path") ?? "").trim();
+  if (rawPath.startsWith("ssh://")) {
+    if (method === "GET") {
+      if (op === "status") {
+        return (json(res, 200, { ok: true, data: { inRepo: false, branch: "", entries: {} } }), true);
+      }
+      if (op === "panel") {
+        return (
+          json(res, 200, { ok: true, data: { inRepo: false, repo: "", branch: "", unstaged: [], staged: [], untracked: [] } }),
+          true
+        );
+      }
+      if (op === "log") return (json(res, 200, { ok: true, data: [] }), true);
+      if (op === "diff") return (json(res, 200, { ok: true, data: { ok: false, repo: "", output: "" } }), true);
+      if (op === "gh-releases") return (json(res, 200, { ok: true, data: { list: [], skipped: "remote" } }), true);
+      return (json(res, 200, { ok: true, data: { inRepo: false } }), true);
+    }
+    return (json(res, 501, { ok: false, error: "git is not supported on remote (ssh) paths" }), true);
+  }
+
   // —— 目录 git 状态（徽标） ——
   if (op === "status" && method === "GET" && seg.length === 2) {
     const dir = requireAbsolute(q.get("path")?.trim() ?? "");

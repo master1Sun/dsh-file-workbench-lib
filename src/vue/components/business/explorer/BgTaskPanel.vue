@@ -282,7 +282,9 @@ const archiveDates = computed(() =>
 );
 const archiveRecords = computed<TaskLogRecord[]>(() => {
   const d = archiveSel.value;
-  return d && archives.value[d] ? archives.value[d] : [];
+  const list = d && archives.value[d] ? archives.value[d] : [];
+  // 展示层兜底倒序（最新在前）：磁盘上的旧归档可能由修复前的版本写成正序，界面不应受其影响。
+  return [...list].sort((a, b) => (b.doneAt ?? b.startedAt) - (a.doneAt ?? a.startedAt));
 });
 
 function openArchive(): void {

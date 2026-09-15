@@ -2,10 +2,11 @@
  * 工作台全局状态（模块级单例，便于多个组件共享）。
  */
 import { reactive, ref } from "vue";
-import { ElMessage } from "element-plus";
 import * as api from "../composables/core/useApi";
 import { t as translate } from "../composables/core/i18n";
+import { toast } from "../composables/core/toast";
 import { prefs } from "../composables/core/settings";
+import { ensureSshHosts, sshLoginCommandOf } from "./ssh";
 
 export interface SearchState {
   q: string;
@@ -30,8 +31,9 @@ export interface WorkbenchState {
   termMinimized: boolean;
   /** 打开终端时请求的工作目录（空串 → 用工作区根）；TerminalDialog 挂载时消费。 */
   termRequestCwd: string;
+  /** 打开终端时请求的**启动命令**（远端目录 → `ssh` 登录命令）；TerminalDialog 挂载时消费。 */
+  termRequestCmd: string;
 }
-
 export const wb = reactive<WorkbenchState>({
   key: "default",
   root: "",
@@ -40,6 +42,7 @@ export const wb = reactive<WorkbenchState>({
   termOpen: false,
   termMinimized: false,
   termRequestCwd: "",
+  termRequestCmd: "",
 });
 
 /** 顶部搜索框内容（共享响应式，输入即刻驱动列表区切换到结果面板）。 */
@@ -52,16 +55,36 @@ export function setSearchTerm(v: string): void {
 export const searchCase = ref(false);
 export const searchRegex = ref(false);
 
-export function toast(kind: "error" | "ok" | "info", message: string): void {
-  const opts = { message, duration: 3000 };
-  if (kind === "error") ElMessage.error(opts);
-  else if (kind === "info") ElMessage.info(opts);
-  else ElMessage.success(opts);
+/**
+ * 提示入口：实现已迁到 composables/core/toast（右下角浮层 + 倒计时 + 手动关闭）。
+ * 这里保留同名再导出，既给本模块内部用，也让既有的 `import { toast } from ".../stores/workbench"`
+ * 调用点无需改动。
+ */
+export { toast };
+
+/**
+ * 终端启动请求：本地目录 → 作为起始 cwd；远端（ssh）目录 → 不改 cwd，改在本机终端里
+ * 自动敲一条 ssh 登录命令（登录并 cd 到该远端目录）。
+ *
+ * 远端没有能挂到 xterm 的 shell 通道（SFTP 只解决文件读写），所以「在终端打开」落到
+ * 远端目录时直接登录：口令 / 密钥交互、known_hosts、后续会话全交给本机 ssh 客户端。
+ */
+async function termRequestFor(path: string): Promise<{ cwd: string; cmd: string }> {
+  if (!api.isRemoteRef(path)) return { cwd: path, cmd: "" };
+  // 主机列表可能尚未加载（列表由导航树 / 设置面板挂载时拉取，文件编辑器里两者都可能没挂载）：
+  // 先兜底拉一次，否则拼不出 user@host，就只能退化为提示。
+  await ensureSshHosts();
+  const cmd = sshLoginCommandOf(path, prefs.termShell);
+  if (cmd) return { cwd: "", cmd };
+  toast("info", translate("remoteNoTerminal"));
+  return { cwd: "", cmd: "" };
 }
 
 /** 打开终端浮窗：path 非空时让首屏终端落在该目录（「在终端打开」场景）；最小化态自动还原。 */
-export function openTerminal(path = ""): void {
-  wb.termRequestCwd = path;
+export async function openTerminal(path = ""): Promise<void> {
+  const req = await termRequestFor(path);
+  wb.termRequestCwd = req.cwd;
+  wb.termRequestCmd = req.cmd;
   wb.termOpen = true;
   wb.termMinimized = false;
 }
@@ -77,8 +100,10 @@ export const termNewSeq = ref(0);
  *
  * 仅在「文件编辑器」的「文件」菜单下使用 —— 让新建的终端直接落在当前编辑器项目目录下。
  */
-export function openNewTerminal(path = ""): void {
-  wb.termRequestCwd = path;
+export async function openNewTerminal(path = ""): Promise<void> {
+  const req = await termRequestFor(path);
+  wb.termRequestCwd = req.cwd;
+  wb.termRequestCmd = req.cmd;
   if (!wb.termOpen) {
     wb.termOpen = true;
     wb.termMinimized = false;
@@ -169,10 +194,15 @@ export async function removeEntry(path: string): Promise<void> {
  */
 export async function openPreview(path: string): Promise<void> {
   const bridge = window.__DSH_FILE_WORKBENCH__;
-  if (bridge?.openInSidebar) {
-    bridge.openInSidebar(path);
+  if (!bridge?.openInSidebar) return;
+  // 远端文件：官方查看器按本机路径解析（ssh:// 引用它读不了）→ 先取回字节落到临时文件，
+  // 再打开这份副本。副本是只读用途的快照，改动不会回传远端。
+  if (api.isRemoteRef(path)) {
+    const cached = await api.sshCacheFile(path);
+    bridge.openInSidebar(cached.path);
     return;
   }
+  bridge.openInSidebar(path);
 }
 
 /** 搜索请求自增序号：仅最新一次请求的结果生效，迟到的旧结果直接丢弃（防慢搜索竞态）。 */

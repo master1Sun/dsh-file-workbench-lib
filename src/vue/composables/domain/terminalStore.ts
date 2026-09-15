@@ -26,6 +26,11 @@ export interface TermTab {
   connected: boolean;
   /** 当前流连接的取消控制器（stopStream 时中止）。 */
   streamAbort?: AbortController;
+  /**
+   * 终端建立后自动执行一次的命令（远端目录「在终端打开」→ `ssh` 登录命令）。
+   * 只在首次建流时发送一次，重连不重复。
+   */
+  initCmd?: string;
 }
 
 /** 当前全部终端标签；跨面板开合存活。 */
@@ -111,6 +116,16 @@ export function startStream(tab: TermTab, key?: string): void {
       tab.connected = false;
     }
   };
+  // 远端目录「在终端打开」：shell 就绪后自动敲入 ssh 登录命令（只发一次——
+  // 后续重连是同一会话的续传，不该再登录一次，否则远端会多出一个 ssh 连接）。
+  const initCmd = tab.initCmd;
+  if (initCmd) {
+    tab.initCmd = undefined;
+    window.setTimeout(() => {
+      if (tab.connected && !ctrl.signal.aborted) void sendTerminalInput(tab.session, `${initCmd}\r`);
+    }, 800);
+  }
+
   void connect();
 }
 

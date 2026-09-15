@@ -54,6 +54,37 @@ import { t } from "../../../composables/core/i18n";
 import ContextMenu from "../../common/ContextMenu.vue";
 import Icon from "../../common/Icon.vue";
 
+export interface TabInfo {
+  path: string;
+  dirty: boolean;
+  /** 外部改动冲突（磁盘已变 + 本地有未保存改动），用醒目的圆点区分。 */
+  conflict?: boolean;
+  /** 可选图标（伪标签用，如「变更详情」的 fileOut）。 */
+  icon?: string;
+}
+
+/**
+ * ⚠️ `defineProps` / `defineEmits` 必须写在**任何脚本逻辑之前**。
+ * `<script setup>` 的类型版 `defineProps<T>()` 会被编译成 `const props = __props`
+ * （渲染函数参数别名，**不是** setup 形参），因此在其声明之前引用 `props` 会命中
+ * TDZ：`ReferenceError: Cannot access 'props' before initialization`。
+ * 本文件的 `watch` 会在 setup 阶段同步求值 getter，曾经因此在打开文件编辑器时直接抛错。
+ */
+const props = defineProps<{
+  tabs: TabInfo[];
+  active: string | null;
+}>();
+
+const emit = defineEmits<{
+  (e: "select", path: string): void;
+  (e: "close", path: string): void;
+  (e: "save", path: string): void;
+  (e: "closeSave", path: string): void;
+  (e: "closeOthers", path: string): void;
+  (e: "closeRight", path: string): void;
+  (e: "closeAll"): void;
+}>();
+
 /** 标签条元素（滚轮横向滚动用）。 */
 const tabsEl = ref<HTMLElement | null>(null);
 
@@ -108,30 +139,6 @@ function onWheel(e: WheelEvent): void {
   e.preventDefault();
   el.scrollLeft += Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
 }
-
-export interface TabInfo {
-  path: string;
-  dirty: boolean;
-  /** 外部改动冲突（磁盘已变 + 本地有未保存改动），用醒目的圆点区分。 */
-  conflict?: boolean;
-  /** 可选图标（伪标签用，如「变更详情」的 fileOut）。 */
-  icon?: string;
-}
-
-const props = defineProps<{
-  tabs: TabInfo[];
-  active: string | null;
-}>();
-
-const emit = defineEmits<{
-  (e: "select", path: string): void;
-  (e: "close", path: string): void;
-  (e: "save", path: string): void;
-  (e: "closeSave", path: string): void;
-  (e: "closeOthers", path: string): void;
-  (e: "closeRight", path: string): void;
-  (e: "closeAll"): void;
-}>();
 
 function basename(p: string): string {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? p;

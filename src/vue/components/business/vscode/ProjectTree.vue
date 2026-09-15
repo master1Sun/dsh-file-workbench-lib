@@ -80,6 +80,7 @@ import ContextMenu from "../../common/ContextMenu.vue";
 import QuickCommit from "../git/QuickCommit.vue";
 import GitPanel from "../git/GitPanel.vue";
 import SvnPanel from "../git/SvnPanel.vue";
+import { sshProjectLabelOf } from "../../../stores/ssh";
 
 export interface TreeEntry {
   path: string;
@@ -355,7 +356,11 @@ async function rebuild(): Promise<void> {
     /* 注册失败不影响浏览；写操作将在守卫处被拦截并提示 */
   }
   if (gen !== rebuildGen) return;
-  const name = props.root.split(/[\\/]/).filter(Boolean).pop() ?? props.root;
+  // 远端根：`ssh://<id>/` 按 win32 切分会掉出 hostId（乃至 `ssh:`），显示成主机标签更可读；
+  // 深层引用（如 `ssh://<id>/etc/nginx`）用 sshProjectLabelOf 保留远端路径，避免只剩主机名。
+  const name = api.isRemoteRef(props.root)
+    ? sshProjectLabelOf(props.root)
+    : (props.root.split(/[\\/]/).filter(Boolean).pop() ?? props.root);
   // 根节点归属自身：其右键菜单的仓库探测走 gitInRepo(root)（已随根目录展开刷新）。
   const r = makeNode(props.root, name, true, 0, props.root);
   nodes[props.root] = r;

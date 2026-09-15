@@ -84,12 +84,37 @@ function todayKey(): string {
   return dayKey(Date.now());
 }
 
-/** 把一组记录追加进当日归档（最新在前）并落盘。 */
+/** 取记录的排序时间戳（优先结束时间）。 */
+function recTime(r: TaskLogRecord): number {
+  return r.doneAt ?? r.startedAt;
+}
+
+/** 日份归档内统一按时间倒序（最新在前）；返回是否真的发生了重排。 */
+function sortArchiveDesc(records: TaskLogRecord[]): boolean {
+  let ordered = true;
+  for (let i = 1; i < records.length; i++) {
+    if (recTime(records[i - 1]) < recTime(records[i])) {
+      ordered = false;
+      break;
+    }
+  }
+  if (ordered) return false;
+  records.sort((a, b) => recTime(b) - recTime(a));
+  return true;
+}
+
+/**
+ * 把一组记录并入当日归档（结果恒为「最新在前」）并落盘。
+ * ⛔ 不能用 `for (const r of records) arr.unshift(r)`：入参 `state.history` 本身已是最新在前，
+ * 逐条 unshift 会把整组**翻成最旧在前**（点「清空 / 清空全部」时就会把当天归档写反，
+ * 表现为归档里时间从早到晚）。
+ */
 function archiveToday(records: TaskLogRecord[]): void {
   if (!records.length) return;
   const k = todayKey();
   const arr = state.archives[k] ?? (state.archives[k] = []);
-  for (const r of records) arr.unshift(r);
+  arr.push(...records);
+  sortArchiveDesc(arr);
   void api.saveTaskArchives(state.archives);
 }
 
@@ -115,13 +140,14 @@ export async function initTaskLogs(): Promise<void> {
         moved = true;
       }
     }
-    // 每个日份内最新在前，保持倒序浏览体验。
+    // 每个日份内最新在前，保持倒序浏览体验；顺带纠正被写反的历史归档（自愈后落盘）。
+    let reordered = false;
     for (const k of Object.keys(archives)) {
-      archives[k].sort((a, b) => (b.doneAt ?? b.startedAt) - (a.doneAt ?? a.startedAt));
+      if (sortArchiveDesc(archives[k])) reordered = true;
     }
     state.history = keep;
     state.archives = archives;
-    if (moved) {
+    if (moved || reordered) {
       persistHistory();
       void api.saveTaskArchives(archives);
     }

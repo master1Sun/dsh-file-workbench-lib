@@ -104,6 +104,55 @@ check("asset 404 for missing file", missingRes.status === 404);
 const existsRes = await fetch(u("/.no-such"));
 check("unknown route 404", existsRes.status === 404);
 
+// ---- SSH 远端主机路由（不依赖真实 SSH 服务：只验配置存取、机密抹除与错误路径） ----
+// 注意：主机配置落在 ~/.dsh/fileworkbench/ssh-hosts.json，故用后必须删除，避免污染本机配置。
+const hosts0 = await call("/ssh/hosts");
+const baseCount = hosts0.ok ? hosts0.data.hosts.length : 0;
+check("ssh hosts list", hosts0.ok && Array.isArray(hosts0.data.hosts));
+
+const added = await call("/ssh/add", "", "POST", {
+  name: "smoke-probe",
+  host: "127.0.0.1",
+  // 端口 1（tcpmux）在本机必然无监听 → 连接立即 ECONNREFUSED，测试无需等待超时。
+  port: 1,
+  user: "smoke",
+  auth: { type: "password", password: "top-secret" },
+});
+const addedHost = added.ok ? added.data.host : null;
+check(
+  "ssh add returns host",
+  !!addedHost && addedHost.host === "127.0.0.1" && addedHost.user === "smoke",
+);
+check(
+  "ssh add masks secret",
+  !!addedHost && addedHost.hasSecret === true && addedHost.password === undefined,
+);
+
+const hosts1 = await call("/ssh/hosts");
+check(
+  "ssh host persisted",
+  hosts1.ok && hosts1.data.hosts.length === baseCount + 1 &&
+    hosts1.data.hosts.every((h) => h.password === undefined),
+);
+
+// 未配置主机 id 的 ssh 引用必须返回明确错误，且不能落到本地文件系统语义上。
+const ghost = await call("/list", `?path=${encodeURIComponent("ssh://no-such-host/")}`);
+check("ssh ref to unknown host errors", !ghost.ok || Array.isArray(ghost.data?.entries) === false);
+
+if (addedHost?.id) {
+  const tested = await call("/ssh/test", "", "POST", { id: addedHost.id });
+  check(
+    "ssh test reports failure for unreachable host",
+    tested.ok && tested.data?.ok === false && typeof tested.data?.error === "string",
+  );
+  const removed = await call("/ssh/remove", "", "POST", { id: addedHost.id });
+  const hosts2 = await call("/ssh/hosts");
+  check(
+    "ssh remove cleans up",
+    removed.ok && hosts2.ok && hosts2.data.hosts.length === baseCount,
+  );
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 server.close();
 await rm(base, { recursive: true, force: true });

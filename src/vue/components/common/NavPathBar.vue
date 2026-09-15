@@ -26,7 +26,7 @@
       />
       <template v-else>
         <template v-for="(c, i) in crumbs" :key="i">
-          <span v-if="i > 0" class="fw-crumb-sep">\</span>
+          <span v-if="i > 0" class="fw-crumb-sep">{{ isRemote ? '/' : '\\' }}</span>
           <button
             class="fw-crumb"
             :class="{ last: i === crumbs.length - 1 }"
@@ -44,6 +44,7 @@
 import { computed, nextTick, ref } from "vue";
 import { useI18n } from "../../composables/core/i18n";
 import { browseTo, currentListingPath, explorer } from "../../stores/explorer";
+import { sshCrumbsOf } from "../../stores/ssh";
 import { toast, wb } from "../../stores/workbench";
 import Icon from "./Icon.vue";
 
@@ -61,10 +62,15 @@ const specialName = computed(() => {
 /** 虚拟位置的展示图标（Win11 地址栏同样带图标）。 */
 const specialIcon = computed(() => (explorer.view === "computer" ? "monitor" : "trash"));
 
-/** 把当前绝对路径拆成面包屑段（兼容 Windows 盘符 C:\ 与 Unix /）。 */
+/** 当前是远端引用（ssh://…）时，层级分隔符用 `/`，与远端 POSIX 路径保持一致。 */
+const isRemote = computed(() => currentPath.value.startsWith("ssh://"));
+
+/** 把当前路径拆成面包屑段：远端引用按 ssh 引用语义切，本地兼容 Windows 盘符 C:\ 与 Unix /。 */
 const crumbs = computed(() => {
   const p = currentPath.value;
   if (!p) return [];
+  const remote = sshCrumbsOf(p);
+  if (remote) return remote;
   const parts = p.replace(/\\/g, "/").split("/").filter((s) => s.length > 0);
   const out: { name: string; path: string }[] = [];
   let acc = "";

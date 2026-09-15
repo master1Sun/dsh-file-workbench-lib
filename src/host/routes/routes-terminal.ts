@@ -212,6 +212,9 @@ export const terminalResource: RouteMatcher = async (req, res, seg, _q, method, 
     const session = _q.get("session")?.trim() || "default";
     const shell: TermShell = _q.get("shell") === "powershell" ? "powershell" : "cmd";
     let cwd = _q.get("cwd")?.trim() || sessionCwd.get(session) || getRoot(_q.get("key") ?? undefined) || homedir();
+    // 远端（ssh）目录首版没有交互式 shell：不能拿 ssh:// 引用去 requireAbsolute（会报
+    // 「不是绝对路径」），安静回落到本机主目录，标签标题由随后的 cwd 事件如实回传。
+    if (cwd.startsWith("ssh://")) cwd = homedir();
     cwd = requireAbsolute(cwd);
     if (isProtectedPath(cwd)) {
       throw new FsError("forbidden", "terminal rejected: working directory is a protected read-only area", 403);

@@ -8,7 +8,8 @@
  * 本地实现 `LocalFsProvider` **原样委托**现有 fs 模块（fs-tree / fs-read / fs-search /
  * fs-drives / fs-zip / recycle / text-codec），因此本地行为 bit-for-bit 不变。
  *
- * 远端（ssh）实现 `SftpFsProvider` 在另一文件落地（当前未接线，见 getFs 的占位分支）。
+ * 远端（ssh）实现 `SftpFsProvider` 见 fs-provider-ssh.ts：传输层复用 vendored
+ * dsh-ssh（MIT）的 ssh2 客户端碎片（连接池 / known_hosts / SFTP 禁用降级）。
  *
  * 许可声明：SFTP 传输层将轻量复用 dsh-ssh（MIT, Copyright 2026 dsh-ssh）的 ssh2 客户端
  * 碎片，改编代码保留其 MIT 归属声明。
@@ -41,6 +42,15 @@ import { compressTo, extractTo } from "./fs-zip.js";
 import { trashPath } from "./recycle.js";
 import { decodeText, encodeText, type DecodedText, type EolStyle, type TextEncoding } from "./text-codec.js";
 import { spawnOpen } from "../routes/routes-util.js";
+import { sftpFsProvider } from "./fs-provider-ssh.js";
+
+/** 路由层实际依赖的 stat 表面（本地返回 node Stats，远端返回同形状 shim）。 */
+export interface StatLike {
+  isFile(): boolean;
+  isDirectory(): boolean;
+  size: number;
+  mtimeMs: number;
+}
 
 /** 面包屑节点（与 routes-fs 使用的形状一致）。 */
 export interface Crumb {
@@ -78,6 +88,17 @@ export function parseRef(raw: string): FileRef {
     const path = rest.slice(slash) || "/";
     return { conn: "ssh", hostId, path: path === "/" ? "/" : path };
   }
+  /*
+   * 兜底：被 win32 路径语义「压扁」过的远端引用（`ssh://<id>/<remote>` → `C:\ssh:\<id>\<remote>`）。
+   * 个别前端分支仍会拿本地分隔符拼远端路径（如侧栏新建），这类字符串既不是合法本地路径
+   * 也不是合法引用，落在哪一侧都是 ENOENT；这里还原成引用串，语义与用户意图一致。
+   */
+  const squashed = /^[A-Za-z]:[\\/]*ssh:[\\/]*([^\\/]+)([\\/].*)?$/.exec(raw);
+  if (squashed) {
+    const hostId = squashed[1] || undefined;
+    const rest = (squashed[2] ?? "").replace(/\\/g, "/");
+    return { conn: "ssh", hostId, path: rest || "/" };
+  }
   return { conn: "local", path: raw };
 }
 
@@ -105,7 +126,7 @@ export interface FsProvider {
   // —— 字节读写 / stat / 存在性 / 外部打开 ——
   readFileBytes(target: string): Promise<Buffer>;
   writeFileBytes(target: string, data: Uint8Array): Promise<void>;
-  stat(target: string): Promise<Stats>;
+  stat(target: string): Promise<StatLike>;
   exists(target: string): boolean;
   openExternal(target: string, isDir: boolean): Promise<void>;
 
@@ -188,14 +209,14 @@ export const localFsProvider: FsProvider = {
   uniquePath: (dir, name) => uniquePath(dir, name),
 };
 
-/** 取对应连接的文件系统提供方。ssh 暂未接线——返回 501 占位，待 SftpFsProvider 落地。 */
+/**
+ * 取对应连接的文件系统提供方。
+ * - local：localFsProvider（与改造前逐字节一致）；
+ * - ssh：sftpFsProvider（vendored dsh-ssh 传输层 + FsProvider 语义映射）。
+ */
 export function getFs(ref: FileRef): FsProvider {
   if (ref.conn === "local") return localFsProvider;
-  throw new FsError(
-    "not-implemented",
-    `SSH filesystem provider is not wired yet (hostId=${ref.hostId ?? ""})`,
-    501,
-  );
+  return sftpFsProvider;
 }
 
 /** 重新导出编码辅助（连接无关，路由层照常使用）。 */

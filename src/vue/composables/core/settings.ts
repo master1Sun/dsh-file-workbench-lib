@@ -124,7 +124,7 @@ export async function initPersist(): Promise<void> {
       if (typeof g.home === "boolean") layout.navGroups.home = g.home;
       if (typeof g.myComputer === "boolean") layout.navGroups.myComputer = g.myComputer;
       if (typeof g.favorites === "boolean") layout.navGroups.favorites = g.favorites;
-      if (typeof g.session === "boolean") layout.navGroups.session = g.session;
+      if (typeof g.ssh === "boolean") layout.navGroups.ssh = g.ssh;
     }
     if (typeof l.explorerSplit === "number" && l.explorerSplit > 0.05 && l.explorerSplit < 0.95)
       layout.explorerSplit = l.explorerSplit;
@@ -152,13 +152,14 @@ export function savePrefs(): void {
 
 // ---- 布局：导航分组展开态 + 资源管理器分隔比例 ----
 
-/** 主导航各分组（此电脑/收藏/会话文件）的展开态。 */
+/** 主导航各分组的展开态。 */
 export interface NavGroups {
   /** 主文件夹：展开后显示其子项（图库）。 */
   home: boolean;
   myComputer: boolean;
   favorites: boolean;
-  session: boolean;
+  /** SSH 远端主机分组（列出已配置主机，点击进入远端根）。 */
+  ssh: boolean;
 }
 
 export interface Layout {
@@ -168,7 +169,7 @@ export interface Layout {
   explorerSplit: number;
 }
 const layoutDefaults: Layout = {
-  navGroups: { home: true, myComputer: true, favorites: true, session: true },
+  navGroups: { home: true, myComputer: true, favorites: true, ssh: true },
   explorerSplit: 0.3,
 };
 export const layout = reactive<Layout>({ ...layoutDefaults });

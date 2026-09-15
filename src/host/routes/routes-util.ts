@@ -159,8 +159,7 @@ export async function spawnOpen(target: string, isDir: boolean): Promise<void> {
 }
 
 /** 流式输出一个本地文件的字节内容（带 Content-Type 与会话无关的浏览器缓存）。 */
-export function streamFile(res: ServerResponse, safe: string, inline: boolean): Promise<void> {
-  return new Promise<void>((resolvePromise) => {
+export function streamFile(res: ServerResponse, safe: string, inline: boolean): Promise<void> {  return new Promise<void>((resolvePromise) => {
     const name = basename(safe);
     const ext = safe.slice(safe.lastIndexOf(".")).toLowerCase();
     const headers: Record<string, string> = {
@@ -183,6 +182,25 @@ export function streamFile(res: ServerResponse, safe: string, inline: boolean): 
     rs.on("end", () => resolvePromise());
     rs.pipe(res);
   });
+}
+
+/**
+ * 一次性输出一段字节（远端 ssh 文件下载/图片内联用）：响应头语义与 streamFile 对齐，
+ * 但数据来自内存（远端已整读），不走本地文件流。
+ */
+export function sendBytes(res: ServerResponse, data: Uint8Array, name: string, inline: boolean): void {
+  const ext = name.slice(name.lastIndexOf(".")).toLowerCase();
+  const headers: Record<string, string> = {
+    "content-type": inline ? (MIME[ext] ?? "application/octet-stream") : "application/octet-stream",
+    "content-length": String(data.byteLength),
+  };
+  if (!inline) {
+    const asciiName = name.replace(/[^\x20-\x7e]/g, "_");
+    headers["content-disposition"] = `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+  }
+  if (inline) headers["cache-control"] = "private, max-age=300";
+  res.writeHead(200, headers);
+  res.end(Buffer.from(data));
 }
 
 /** 供属性/打开等接口校验目标为存在的文件（不存在则抛 404）。 */

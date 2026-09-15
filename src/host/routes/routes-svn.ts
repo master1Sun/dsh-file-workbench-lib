@@ -100,6 +100,29 @@ async function svnRun(args: string[], cwd: string): Promise<{ code: number; stdo
   }
 }
 
+/**
+ * `svn info` 标签 → 字段名。
+ *
+ * 标签随 svn 界面语言变化，**不能只按英文匹配**（否则中文环境下 revision 永远读不到，
+ * 版本 pill 显示「—」、更新摘要出现 `r?`）。这里按「首个冒号前的整段标签」精确查表，
+ * 未命中的行直接忽略——精确匹配可避免 `版本库根` / `最后修改的版本` 误撞 `版本`。
+ *
+ * 各语言取值以**真实 `svn info` 输出**为准（svn 1.8.17 + zh_CN 实测）：
+ *   URL: file:///…            → url
+ *   正确的相对 URL: ^/        → relativeUrl
+ *   版本: 2                   → revision
+ * 新增语言时补进此表即可（勿凭翻译记忆，实测一条中文 WC 的 `svn info` 最省事）。
+ */
+const SVN_INFO_LABELS: Record<string, "url" | "relativeUrl" | "revision"> = {
+  url: "url",
+  "relative url": "relativeUrl",
+  "正确的相对 url": "relativeUrl",
+  "相对 url": "relativeUrl",
+  revision: "revision",
+  "版本": "revision",
+  "修订版": "revision",
+};
+
 /** 向上查找 .svn 目录（SVN 工作副本仅在根目录含 .svn）。非工作副本返回 null。 */
 export function findSvnRoot(start: string): string | null {
   let cur = start;
@@ -126,6 +149,21 @@ export const svnResource: RouteMatcher = async (req, res, seg, q, method, host) 
   if (seg[0] !== "svn") return false;
   const op = seg[1];
 
+  // 远端（ssh）引用短路：与 git 同理，避免 requireAbsolute 把远端引用报成「不是绝对路径」。
+  const rawPath = (q.get("path") ?? "").trim();
+  if (rawPath.startsWith("ssh://")) {
+    if (method === "GET" && op === "info") {
+      return (
+        json(res, 200, {
+          ok: true,
+          data: { inRepo: false, root: null, svnAvailable: false, url: null, revision: null, relativeUrl: null },
+        }),
+        true
+      );
+    }
+    return (json(res, 501, { ok: false, error: "svn is not supported on remote (ssh) paths" }), true);
+  }
+
   // —— 探测工作副本 + 环境（GET /svn/info） ——
   if (op === "info" && method === "GET" && seg.length === 2) {
     const dir = requireAbsolute(q.get("path")?.trim() ?? "");
@@ -141,14 +179,15 @@ export const svnResource: RouteMatcher = async (req, res, seg, q, method, host) 
     } = { inRepo: !!root, root, svnAvailable: available, url: null, revision: null, relativeUrl: null };
     if (root && available) {
       try {
-        // 兼容 svn 1.8（无 --show-item）：读完整 info 输出后解析标签行
+        // 兼容 svn 1.8（无 --show-item）：读完整 info 输出后解析标签行。
+        // svn 1.8 中文标签为 `版本:` / `正确的相对 URL:`，与英文不同名，故走 SVN_INFO_LABELS 查表。
         const text = await svn(["info"], root, "无法读取仓库信息");
         for (const line of text.split(/\r?\n/)) {
-          const m = line.match(/^(URL|Relative URL|Revision):\s*(.*)$/);
+          const m = line.match(/^([^:]+):\s*(.*)$/);
           if (!m) continue;
-          if (m[1] === "URL") data.url = m[2].trim() || null;
-          else if (m[1] === "Relative URL") data.relativeUrl = m[2].trim() || null;
-          else data.revision = m[2].trim() || null;
+          const field = SVN_INFO_LABELS[m[1].trim().toLowerCase()];
+          if (!field || data[field]) continue;
+          data[field] = m[2].trim() || null;
         }
       } catch {
         /* 信息读取失败不影响判定 */

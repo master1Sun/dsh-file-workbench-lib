@@ -42,6 +42,7 @@
             <el-dropdown-item command="newFolder" class="fw-panelitem">{{ t('menuNewFolder') }}</el-dropdown-item>
             <el-dropdown-item command="newFile" class="fw-panelitem">{{ t('menuNewFile') }}</el-dropdown-item>
             <el-dropdown-item command="upload" class="fw-panelitem">{{ t('menuUpload') }}</el-dropdown-item>
+            <el-dropdown-item divided command="newSshHost" class="fw-panelitem">{{ t('sshNewHost') }}</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
@@ -87,6 +88,7 @@ import { useI18n } from "../../../composables/core/i18n";
 import { prefs, activeView } from "../../../composables/core/settings";
 import { fileCmdState as st, runFileCmd } from "../../../stores/fileCommands";
 import { explorer } from "../../../stores/explorer";
+import { openSshAddDialog } from "../../../stores/ssh";
 
 const { t } = useI18n();
 const ro = computed(() => st.isRecycle || !st.canOperate);
@@ -109,6 +111,10 @@ const views = computed<[string, string][]>(() => [
   ["tiles", t("viewTiles")],
 ]);
 function cmd(name: string, arg?: string): void {
+  if (name === "newSshHost") {
+    openSshAddDialog();
+    return;
+  }
   runFileCmd(name, arg);
 }
 /** 「查看▾」命令分发：显示扩展名走 toggleExt，其余为视图档位。 */

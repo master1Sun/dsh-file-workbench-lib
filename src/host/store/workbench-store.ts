@@ -26,6 +26,8 @@ export const PERSIST_KEYS = [
   "taskLogs",
   // VS Code 编辑器面板状态（项目目录 / 已开标签 / 激活标签 / 展开节点 / 比例）。
   "vscode",
+  // SSH 远端主机连接配置（含认证机密——本机配置文件，不外发）。
+  "ssh-hosts",
 ] as const;
 export type PersistKey = (typeof PERSIST_KEYS)[number];
 
