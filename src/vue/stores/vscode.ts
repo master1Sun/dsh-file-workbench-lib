@@ -23,6 +23,15 @@
  * 新槽永远看到空列表 —— 因此列表存在持久化载荷的**顶层**（`recents` 字段），
  * 全部槽读写同一份；旧版存在槽状态里的记录在加载时合并进来（读旧写新迁移）。
  *
+ * ⛔ 三条铁律（都踩过坑，改动前务必读）：
+ *  1. **迁移兜底只能按「字段存不存在」触发，不能按「列表空不空」触发**。用户点「清空全部」
+ *     写下的 `recents: []` 与旧载荷没有 `recents` 字段看起来一样「空」，按空判会把各槽
+ *     残留的旧记录合并回来 —— 表现为「清空完一刷新又全回来了」。见 `normalizePersist`。
+ *  2. **加载不得写历史**。`init()` 里绝不能把 `state.projectDir` 记进 recents，否则清空后
+ *     一刷新当前项目又被塞回列表（见 `init()`）。
+ *  3. 槽载荷里的 `recentProjects` 只是渲染镜像，落盘时一律对齐成全局列表
+ *     （见 `persistNow`），不让任何槽把陈旧副本写回文件。
+ *
  * 两种开法：
  *  - 「新建编辑器窗口」按钮（`openTab(kind, { params: { fresh: true } })`）：明确要求**空白**，
  *    经 `markFresh()` 标记后 `init()` 既不恢复持久化状态、也不继承任何项目目录；
@@ -71,8 +80,11 @@ export interface VSCodeState {
   /** 项目根目录（独立选择，与工作区 root 解耦）。 */
   projectDir: string | null;
   /**
-   * 本槽视角的「最近项目」快照（渲染用；权威数据在持久化载荷顶层 `recents`，
-   * 由所有实例共享 —— 见文件头「最近项目是全局共享的」一节）。
+   * 本槽视角的「最近项目」渲染镜像（**不是**本槽的私有数据）。
+   *
+   * 权威数据在持久化载荷顶层 `recents`，由所有实例共享；本字段只由 `publishRecents()`
+   * 统一改写（增删清空一律经它广播到每个槽），因此不要在任何别处直接赋值 ——
+   * 见文件头「最近项目是全局共享的」一节。
    */
   recentProjects: string[];
   /** 已打开的文件绝对路径列表（标签顺序）。 */
@@ -169,7 +181,9 @@ function parseState(raw: Record<string, unknown>): VSCodeState {
       RECENT_MAX,
     );
   }
-  if (s.projectDir) s.recentProjects = [s.projectDir, ...s.recentProjects.filter((p) => p !== s.projectDir)].slice(0, RECENT_MAX);
+  // ⛔ 这里**不得**把 `s.projectDir` 插进 recentProjects：本函数在每次加载时都会跑，
+  // 一插就等于「每次打开都往历史里加一条当前项目」——用户清空后一刷新它又出现。
+  // 当前项目进入历史只发生在真正切换项目时（`VSCodePane.openProject` → `rememberProject`）。
   if (Array.isArray(raw.openTabs)) s.openTabs = raw.openTabs.filter((x): x is string => typeof x === "string");
   if (typeof raw.activeTab === "string") s.activeTab = raw.activeTab;
   if (Array.isArray(raw.expanded)) s.expanded = raw.expanded.filter((x): x is string => typeof x === "string");
@@ -204,15 +218,25 @@ function normalizePersist(raw: unknown): VSCodePersistFile {
     for (const [k, v] of Object.entries(r.slots as Record<string, unknown>)) {
       if (v && typeof v === "object") slots[k] = parseState(v as Record<string, unknown>);
     }
-    let recents = normalizeRecents(r.recents);
-    if (!recents.length) {
-      // 旧 v2 载荷：recents 存在各槽状态里 → 按槽号顺序合并成全局列表。
+    // 仅当**顶层连 `recents` 字段都没有**时，才算「共享化之前的旧 v2 载荷」，
+    // 此时把各槽状态里的 recentProjects 合并成全局列表（一次性迁移）。
+    //
+    // ⛔ 判据必须是「字段不存在」，不能是 `!recents.length`：用户点「清空全部」写下的正是
+    // `recents: []`，与旧载荷在「空」这一点上完全一样 —— 按空判会让刷新后把各槽残留的旧
+    // 记录重新合并回来，清空等于无效（线上已复现：7 个槽的并集把 10 条记录全复活了）。
+    let recents: string[];
+    if (r.recents === undefined) {
       const merged: string[] = [];
       for (const k of Object.keys(slots).sort((a, b) => Number(a) - Number(b))) {
         for (const p of slots[k]?.recentProjects ?? []) if (!merged.includes(p)) merged.push(p);
       }
       recents = merged.slice(0, RECENT_MAX);
+    } else {
+      recents = normalizeRecents(r.recents);
     }
+    // 槽内的 recentProjects 一律对齐成权威列表：它已不是槽的私有字段，留着旧副本就是给
+    // 下一次迁移埋复活源。文件在首次落盘时随之自愈。
+    for (const s of Object.values(slots)) s.recentProjects = [...recents];
     return { version: 2, recents, slots };
   }
   // 旧版：{ projectDir, openTabs, ... } 平铺 → 槽 1（迁移，历史用户无感）。
@@ -245,6 +269,18 @@ function loadPersistFile(): Promise<void> {
 const stores = new Map<number, VSCodeStore>();
 /** DSH tab id（或匿名键）→ 槽号。 */
 const slotOfTab = new Map<string, number>();
+
+/**
+ * 用权威列表刷新全局「最近项目」，并**广播到每个活着的槽**。
+ *
+ * 多编辑器窗口（分栏 / 浮窗）各持一份 `state.recentProjects` 供菜单渲染：只改本槽的话，
+ * 另一个窗口的菜单仍显示旧列表（表现为「这边清空了，那边还在」）。故增删清空一律走这里，
+ * 落盘再以 `sharedRecents` 为准（见 `persistNow`）——「内存一致」与「磁盘一致」一次搞定。
+ */
+function publishRecents(list: string[]): void {
+  sharedRecents = [...list];
+  for (const s of stores.values()) s.state.recentProjects = [...sharedRecents];
+}
 
 /**
  * 取（必要时分配）一个实例槽号。
@@ -434,7 +470,16 @@ function createVSCodeStore(slot: number): VSCodeStore {
   }
 
   function persistNow(): void {
-    persistFile.slots[String(slot)] = { ...state, views: { ...state.views, ...viewStaging } };
+    // 「最近项目」的权威副本是顶层 `recents`；槽载荷里的 `recentProjects` 只是渲染镜像，
+    // 落盘时一律对齐成全局列表 —— 本槽那份可能已被别的窗口改过而陈旧，若是把陈旧副本写回
+    // 文件，下次加载就有机会被迁移逻辑合并复活（「清空完刷新又出现」的根源）。顺手把其它
+    // 槽的副本也对齐，文件即自愈。
+    for (const s of Object.values(persistFile.slots)) s.recentProjects = [...sharedRecents];
+    persistFile.slots[String(slot)] = {
+      ...state,
+      recentProjects: [...sharedRecents],
+      views: { ...state.views, ...viewStaging },
+    };
     persistFile.recents = [...sharedRecents];
     pruneSlots();
     void api.savePersist("vscode", persistFile);
@@ -451,20 +496,17 @@ function createVSCodeStore(slot: number): VSCodeStore {
   function rememberProject(dir: string): void {
     const key = dir.trim();
     if (!key) return;
-    sharedRecents = [key, ...sharedRecents.filter((p) => p !== key)].slice(0, RECENT_MAX);
-    state.recentProjects = [...sharedRecents];
+    publishRecents([key, ...sharedRecents.filter((p) => p !== key)].slice(0, RECENT_MAX));
     persistSoon();
   }
 
   function forgetProject(dir: string): void {
-    sharedRecents = sharedRecents.filter((p) => p !== dir);
-    state.recentProjects = [...sharedRecents];
+    publishRecents(sharedRecents.filter((p) => p !== dir));
     persistNow();
   }
 
   function clearRecentProjects(): void {
-    sharedRecents = [];
-    state.recentProjects = [];
+    publishRecents([]);
     persistNow();
   }
 
@@ -505,18 +547,17 @@ function createVSCodeStore(slot: number): VSCodeStore {
             } else if (!state.projectDir) {
               // 非新建（如主编辑器）：新槽继承已有槽的项目目录，避免「第二个编辑器是空白」。
               // `!state.projectDir` 兜底：极端时序下外部请求已先设置目录时不覆盖。
+              // 注意：**不**在这里 rememberProject —— 继承是「恢复视图」，不是「打开项目」，
+              // 记进历史会让清空后的首开又冒出一条（记历史只发生在 openProject）。
               const inherited = inheritedProjectDir();
-              if (inherited) {
-                state.projectDir = inherited;
-                rememberProject(inherited);
-              }
+              if (inherited) state.projectDir = inherited;
             }
           }
-          // 「最近项目」全局共享：以共享列表为主，合并本槽历史记录（旧版本数据迁移）。
-          const merged = [...new Set([...sharedRecents, ...state.recentProjects])].slice(0, RECENT_MAX);
-          sharedRecents = [...merged];
-          state.recentProjects = [...merged];
-          if (state.projectDir) rememberProject(state.projectDir);
+          // 「最近项目」全局共享：顶层 `recents` 是唯一权威（`normalizePersist` 已把各槽镜像
+          // 对齐到它），这里再并一次本槽镜像只是防御性兜底。
+          // ⛔ 末尾原先还有 `if (state.projectDir) rememberProject(state.projectDir)`：加载即写历史，
+          // 用户「清空全部」后一刷新当前项目就被塞回列表，看起来就是清空失败 —— 已移除。
+          publishRecents([...new Set([...sharedRecents, ...state.recentProjects])].slice(0, RECENT_MAX));
         })();
       }
       return initPromise;
