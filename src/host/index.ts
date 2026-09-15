@@ -8,9 +8,11 @@
  */
 import type { Context } from "@deepseek-ai/cordis";
 import { makeFileWorkbenchRoutes } from "./routes/routes.js";
+import { makePushUpgrade } from "./routes/ws-push.js";
 import { autoUpdate } from "./updater.js";
 
 export { makeFileWorkbenchRoutes } from "./routes/routes.js";
+export { makePushUpgrade } from "./routes/ws-push.js";
 export { PREFIX } from "./routes/routes.js";
 
 export const name = "dsh-file-workbench";
@@ -35,5 +37,9 @@ export function apply(ctx: Context): void {
         for (const dispose of disposers) dispose();
       };
     }, "dsh-file-workbench: routes");
+    httpCtx.effect(() => {
+      // 工作台推送通道（WebSocket）：文件落盘改动 + SSH 主机连通性，升级路由必须精确路径注册。
+      return httpCtx.webServer.registerUpgrade(makePushUpgrade());
+    }, "dsh-file-workbench: push");
   });
 }

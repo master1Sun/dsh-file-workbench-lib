@@ -140,7 +140,7 @@
 import { computed, onMounted, ref } from "vue";
 import { explorer, browseTo, enterRecycle, openThisPc, refreshListing } from "../../../stores/explorer";
 import { openTerminal } from "../../../stores/workbench";
-import { sshHosts, sshRootRef, sshParentOf, sshStateOf, sshErrorOf, refreshSshHosts, refreshSshStatus, pingSshHost, startSshStatusPoller, openSshEditDialog } from "../../../stores/ssh";
+import { sshHosts, sshRootRef, sshParentOf, sshStateOf, sshErrorOf, refreshSshHosts, refreshSshStatus, pingSshHost, startSshStatusWatch, openSshEditDialog } from "../../../stores/ssh";
 import { useI18n } from "../../../composables/core/i18n";
 import { openProjectInEditor } from "../../../composables/core/sidebarRight";
 import { openPreview, toast } from "../../../stores/workbench";
@@ -163,11 +163,11 @@ function toggle(which: "myComputer" | "favorites" | "ssh"): void {
 
 /* ── SSH 远端主机入口 ── */
 
-/** 挂载时拉一次并探测连接状态；之后由轮询保持指示灯新鲜（设置里增删会调 refreshSshHosts 同步）。 */
+/** 挂载时拉一次并探测连接状态；之后由推送通道保持指示灯新鲜（设置里增删会调 refreshSshHosts 同步）。 */
 onMounted(async () => {
   await refreshSshHosts();
+  startSshStatusWatch();
   await refreshSshStatus();
-  startSshStatusPoller();
 });
 
 /** 当前位置是否落在该主机的远端树下（用于导航树高亮）。 */

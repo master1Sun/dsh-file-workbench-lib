@@ -102,10 +102,9 @@
       <button class="fw-term-search-btn fw-term-search-close" :title="t('termSearchClose')" @click="closeSearch">✕</button>
     </div>
 
-    <!-- xterm.js 终端输出区：常驻 shell 的实时流渲染（ANSI 着色 / 真实提示符 / 行交互） -->
-    <div ref="outEl" class="fw-term-out" @click="focusTerm">
-      <div v-if="activeTab" ref="termMountEl" class="fw-term-xterm"></div>
-    </div>
+    <!-- xterm.js 终端输出区：**每个终端标签一个常驻实例**（各占一个子容器，由脚本创建），
+         切标签只做显隐切换 + fit，不再销毁重建 → 切来切去不会「刷新」、不重放输出。 -->
+    <div ref="outEl" class="fw-term-out" @click="focusTerm"></div>
     <div class="fw-term-footer">
       <el-button size="small" @click="clear">{{ t('terminalClear') }}</el-button>
       <el-button size="small" :title="t('termFontSmaller')" :disabled="termFontSize <= FONT_MIN" @click="setTermFontSize(termFontSize - 1)">A−</el-button>
@@ -170,7 +169,6 @@ const TERMINAL_LIMIT = 9;
 const tabs = termTabs;
 const activeId = termActiveId;
 const outEl = ref<HTMLElement | null>(null);
-const termMountEl = ref<HTMLElement | null>(null);
 /** 标签栏横向滚动：是否可向左/右滚动（溢出时启用 ◀/▶）。 */
 const tabsEl = ref<HTMLElement | null>(null);
 const canScrollLeft = ref(false);
@@ -195,12 +193,8 @@ const minimized = computed<boolean>({
 });
 // 状态栏点「还原」时（wb.termMinimized true→false）重挂 xterm 并聚焦。
 watch(minimized, (m) => {
-  if (!m) {
-    void nextTick(() => {
-      mountTerm();
-      focusTerm();
-    });
-  }
+  // 还原时激活（含 fit + 聚焦）；最小化只是 v-show 隐藏，实例与会话都保持存活。
+  if (!m) void nextTick(activateTab);
 });
 /** 是否已发生真实交互（拖动/缩放/恢复）；在此之前不写回持久化，避免覆盖已存位置。 */
 let interacted = false;
@@ -354,12 +348,25 @@ const activeShellLabel = computed(() => (activeTab.value?.shell === "powershell"
 /** 新建终端默认 shell 标签（按钮显示）：切换后仅影响后续新建的终端。 */
 const defaultShellLabel = computed(() => (prefs.termShell === "powershell" ? "PS" : "cmd"));
 
-/* ---- xterm.js 实例：单实例挂激活标签，切标签时重建并重放输出缓冲 ---- */
+/* ---- xterm.js 实例：**每个终端标签一个**常驻实例，切标签只做显隐 + fit ---- */
 
-let term: Terminal | null = null;
-let fitAddon: FitAddon | null = null;
-let searchAddon: SearchAddon | null = null;
+/** 一个终端标签对应的常驻 xterm 及其独占容器。 */
+interface TermInstance {
+  term: Terminal;
+  fit: FitAddon;
+  search: SearchAddon;
+  /** 该实例独占的子容器（挂在 outEl 下，非激活时 display:none）。 */
+  host: HTMLDivElement;
+}
+
+/** tabId → 实例。组件存活期间常驻；仅关闭标签 / 关闭终端窗口时销毁。 */
+const instances = new Map<string, TermInstance>();
 let resizeObs: ResizeObserver | null = null;
+
+/** 当前激活标签的实例（无则 null）。 */
+function activeInst(): TermInstance | null {
+  return instances.get(activeId.value) ?? null;
+}
 
 /* ---- 终端增强：搜索 / 复制粘贴快捷键 / 字号 ---- */
 const searchOpen = ref(false);
@@ -388,13 +395,14 @@ function searchOptions(): ISearchOptions {
 
 /** 执行一次查找：next=true 下一个，false 上一个；空关键字时仅清装饰。 */
 function runSearch(next: boolean): void {
+  const addon = activeInst()?.search ?? null;
   const q = searchTerm.value.trim();
   if (!q) {
-    searchAddon?.clearDecorations();
+    addon?.clearDecorations();
     return;
   }
-  if (next) searchAddon?.findNext(q, searchOptions());
-  else searchAddon?.findPrevious(q, searchOptions());
+  if (next) addon?.findNext(q, searchOptions());
+  else addon?.findPrevious(q, searchOptions());
 }
 
 /** Ctrl+F 唤起搜索条（聚焦并全选已有关键字）。 */
@@ -412,8 +420,8 @@ function openSearch(): void {
 function closeSearch(): void {
   searchOpen.value = false;
   searchTerm.value = "";
-  searchAddon?.clearDecorations();
-  term?.focus();
+  activeInst()?.search.clearDecorations();
+  focusTerm();
 }
 
 // 关键字 / 大小写切换后增量搜索（搜索条打开时）。
@@ -427,7 +435,8 @@ function setTermFontSize(n: number): void {
   if (v === prefs.termFontSize) return;
   prefs.termFontSize = v;
   savePrefs();
-  if (term) term.options.fontSize = v;
+  // 所有实例同步字号（含当前隐藏的标签，切回时即已是新字号）。
+  for (const it of instances.values()) it.term.options.fontSize = v;
   void nextTick(fitTerm);
 }
 
@@ -435,7 +444,7 @@ function setTermFontSize(n: number): void {
 async function pasteClipboard(): Promise<void> {
   try {
     const text = await navigator.clipboard.readText();
-    if (text) term?.paste(text);
+    if (text) activeInst()?.term.paste(text);
   } catch {
     /* 剪贴板权限受限时忽略 */
   }
@@ -443,7 +452,9 @@ async function pasteClipboard(): Promise<void> {
 
 /** 终端键位拦截：Ctrl+C 有选区时复制（否则放行 SIGINT）、Ctrl+V 粘贴、Ctrl+F 搜索、Ctrl±/Ctrl+0 字号。 */
 function termKeyHandler(e: KeyboardEvent): boolean {
-  if (e.type !== "keydown" || !term) return true;
+  // 键盘事件只可能来自聚焦中的实例（即激活标签），故取激活实例即可。
+  const live = activeInst()?.term ?? null;
+  if (e.type !== "keydown" || !live) return true;
   const ctrl = e.ctrlKey || e.metaKey;
   const key = e.key.toLowerCase();
   if (ctrl && key === "f") {
@@ -452,11 +463,11 @@ function termKeyHandler(e: KeyboardEvent): boolean {
     return false;
   }
   if (ctrl && key === "c") {
-    const sel = term.getSelection();
+    const sel = live.getSelection();
     if (sel) {
       e.preventDefault();
       void navigator.clipboard.writeText(sel).catch(() => {});
-      term.clearSelection();
+      live.clearSelection();
       return false;
     }
     return true; // 无选区：放行（终端收到 Ctrl+C → SIGINT）
@@ -479,9 +490,9 @@ function termKeyHandler(e: KeyboardEvent): boolean {
   return true;
 }
 
-/** 从宿主主题变量构造 xterm 配色（挂载时读取一次，跟随 --dsh-* 变量）。 */
-function xtermTheme(): Record<string, string> {
-  const el = termMountEl.value;
+/** 从宿主主题变量构造 xterm 配色（建实例时读取一次，跟随 --dsh-* 变量）。 */
+function xtermTheme(probe?: HTMLElement | null): Record<string, string> {
+  const el = probe ?? outEl.value;
   const cs = el ? getComputedStyle(el) : getComputedStyle(document.documentElement);
   const v = (name: string, fallback: string): string => (cs.getPropertyValue(name) || fallback).trim();
   return {
@@ -509,76 +520,99 @@ function xtermTheme(): Record<string, string> {
   };
 }
 
-function disposeTerm(): void {
-  const prev = activeTab.value;
-  if (prev) {
-    // 切标签/卸载前把合并窗口里未发出的按键补发（zsh 之外的 shell 不会本地回显，丢了就是真丢）。
-    flushTerminalInput(prev.session);
-    setOutputSink(prev.id, null);
-  }
-  term?.dispose();
-  term = null;
-  fitAddon = null;
-  searchAddon = null;
-  const mount = termMountEl.value;
-  if (mount) mount.innerHTML = "";
+/** 销毁某个标签的实例（关闭标签 / 关闭终端窗口时调用）。 */
+function disposeInstance(id: string): void {
+  const inst = instances.get(id);
+  if (!inst) return;
+  // 销毁前把合并窗口里未发出的按键补发（shell 不会本地回显，丢了就是真丢）。
+  const tab = tabs.value.find((t) => t.id === id);
+  if (tab) flushTerminalInput(tab.session);
+  setOutputSink(id, null);
+  inst.term.dispose();
+  inst.host.remove();
+  instances.delete(id);
 }
 
-/** 为当前激活标签创建 xterm：重放累积输出、接线输入（onData → stdin）、注册实时输出回调。 */
-function mountTerm(): void {
-  disposeTerm();
-  const tab = activeTab.value;
-  const mount = termMountEl.value;
-  if (!tab || !mount) return;
-  const inst = new Terminal({
+/** 销毁全部实例（组件卸载时调用）。 */
+function disposeAll(): void {
+  for (const id of [...instances.keys()]) disposeInstance(id);
+}
+
+/**
+ * 取得（必要时创建）某标签的常驻 xterm 实例。
+ *
+ * ⛔ 不要退回「单实例挂激活标签」：那样每次切标签都必须 dispose + 新建 + 重放 `tab.output`，
+ * 整屏重建的观感就是「切来切去一直在刷新」，终端越多、切得越勤越明显。
+ */
+function ensureInstance(tab: TermTab): TermInstance | null {
+  const exist = instances.get(tab.id);
+  if (exist) return exist;
+  const parent = outEl.value;
+  if (!parent) return null;
+  const host = document.createElement("div");
+  host.className = "fw-term-xterm";
+  host.style.display = "none";
+  parent.appendChild(host);
+
+  const term = new Terminal({
     cursorBlink: true,
     fontSize: termFontSize.value,
     fontFamily: 'Consolas, "Courier New", "Cascadia Mono", monospace',
     scrollback: 10000,
-    theme: xtermTheme(),
+    theme: xtermTheme(host),
     allowTransparency: false,
     // 搜索高亮（@xterm/addon-search 的 decorations）依赖 xterm 的 registerDecoration 提案 API
     allowProposedApi: true,
   });
   const fit = new FitAddon();
-  inst.loadAddon(fit);
-  inst.loadAddon(new WebLinksAddon());
+  term.loadAddon(fit);
+  term.loadAddon(new WebLinksAddon());
   const search = new SearchAddon();
-  inst.loadAddon(search);
-  searchAddon = search;
-  inst.attachCustomKeyEventHandler(termKeyHandler);
-  inst.open(mount);
-  // 重放此前累积的输出（含 ANSI），再聚焦输入。
-  inst.write(tab.output);
-  inst.onData((data) => {
+  term.loadAddon(search);
+  term.attachCustomKeyEventHandler(termKeyHandler);
+  term.open(host);
+  // 仅在**首建**时重放此前累积的输出（含 ANSI）；此后本实例常驻，新输出直接写入，不再重放。
+  term.write(tab.output);
+  term.onData((data) => {
     // 经输入队列合并后批量发送（每字符一次 POST 会刷屏，且并发可能错序）。
     queueTerminalInput(tab.session, data);
   });
-  term = inst;
-  fitAddon = fit;
-  setOutputSink(tab.id, (chunk) => {
-    // 仅当该标签仍为激活态时写入当前实例（切走后的残留 sink 忽略）。
-    if (activeTab.value?.id === tab.id) term?.write(chunk);
-  });
+  // 输出回调按标签 id 绑定到本实例：每个标签各有自己的实例，无需再判断激活态。
+  setOutputSink(tab.id, (chunk) => term.write(chunk));
+  const entry: TermInstance = { term, fit, search, host };
+  instances.set(tab.id, entry);
+  return entry;
+}
+
+/** 切到当前激活标签：显隐各实例容器、fit 并聚焦（不销毁、不重放，无刷新）。 */
+function activateTab(): void {
+  const tab = activeTab.value;
+  if (!tab || !outEl.value) return;
+  const inst = ensureInstance(tab);
+  for (const [id, it] of instances) it.host.style.display = id === tab.id ? "" : "none";
+  if (!inst) return;
   void requestAnimationFrame(() => {
     try {
-      fitAddon?.fit();
+      inst.fit.fit();
     } catch {
       /* 容器尺寸为 0（面板未布局）时忽略 */
     }
+    inst.term.focus();
   });
 }
 
+/** 重新计算激活实例的列宽行高。 */
 function fitTerm(): void {
   try {
-    fitAddon?.fit();
+    activeInst()?.fit.fit();
   } catch {
     /* ignore */
   }
 }
 
+/** 聚焦激活实例的输入。 */
 function focusTerm(): void {
-  term?.focus();
+  activeInst()?.term.focus();
 }
 
 /** 切换新终端默认 shell（cmd ↔ powershell）：只影响此后新建的终端，不改动已存在终端。 */
@@ -631,7 +665,7 @@ function addTab(): void {
   tabs.value.push(tab);
   activeId.value = tab.id;
   startStream(tab, wb.key);
-  void nextTick(mountTerm);
+  void nextTick(activateTab);
 }
 
 // 终端窗口打开（停靠面板首次挂载）时，默认创建一个终端，避免空状态。
@@ -639,7 +673,7 @@ onMounted(() => {
   // 探测宿主权限态供权限徽标显示（幂等，跨面板开合只请求一次）。
   void loadTermElevation();
   if (!tabs.value.length) addTab();
-  else void nextTick(mountTerm);
+  else void nextTick(activateTab);
 });
 
 /**
@@ -650,17 +684,20 @@ watch(termNewSeq, () => {
   if (tabs.value.length < TERMINAL_LIMIT) addTab();
 });
 
-/** 关闭指定终端（断开流并终止其后端常驻进程）。 */
+/** 关闭指定终端（销毁其实例 + 断开流 + 终止其后端常驻进程）。 */
 function closeTab(id: string): void {
   const wasActive = activeId.value === id;
+  // 先销毁实例（此时标签还在，才能把合并窗口里未发出的按键补发出去）。
+  disposeInstance(id);
   closeTermTab(id);
-  if (wasActive) void nextTick(mountTerm);
+  if (wasActive) void nextTick(activateTab);
 }
 
+/** 切换激活终端：只切显隐 + fit，实例常驻——不再销毁重建，因此切换不会「刷新」。 */
 function switchTab(id: string): void {
   if (activeId.value === id) return;
   activeId.value = id;
-  void nextTick(mountTerm);
+  void nextTick(activateTab);
 }
 
 /**
@@ -671,9 +708,9 @@ function switchTab(id: string): void {
 function clear(): void {
   const tab = activeTab.value;
   if (!tab) return;
-  // 清掉重放源，使清屏效果在切标签重建实例后依然保持；当前实例的回滚缓冲不受影响。
+  // 清掉重放源：实例若在关闭终端窗口后重建，重放的是空历史（不会把已清内容带回来）。
   tab.output = "";
-  term?.clear();
+  activeInst()?.term.clear();
 }
 
 // 布局变化（面板/浮窗尺寸）时重算 xterm 列宽行高。
@@ -689,7 +726,7 @@ onUnmounted(() => {
   resizeObs = null;
   // 面板整体关闭：先丢弃待发输入（下面会立刻 kill 掉所有会话，发出去只会 404）。
   dropTerminalInput();
-  disposeTerm();
+  disposeAll();
   // 面板整体关闭（组件卸载）时终止所有后端常驻进程，避免 node-pty 残留到任务管理器。
   void closeAllTerminals();
 });
@@ -709,10 +746,7 @@ defineExpose({
       tab.cwd = wb.root || wb.explorerPath || "";
       void restartShell(tab, wb.key);
     }
-    void nextTick(() => {
-      mountTerm();
-      focusTerm();
-    });
+    void nextTick(activateTab);
   },
   clear,
 });

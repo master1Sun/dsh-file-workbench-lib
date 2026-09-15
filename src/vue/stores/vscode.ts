@@ -32,6 +32,7 @@
  * 面板内容不落盘（内容在磁盘上，重开时重新读取），只持久化路径、激活态与浏览位置。
  */
 import { reactive, ref, type InjectionKey, type Ref } from "vue";
+import type { EditorState } from "@codemirror/state";
 import * as api from "../composables/core/useApi";
 import type { EolStyle, TextEncoding } from "../../shared/types";
 
@@ -272,6 +273,60 @@ export function getVSCodeStore(slot: number): VSCodeStore {
   return s;
 }
 
+/* ---------- CodeMirror 文档状态缓存（跨挂载常驻） ---------- */
+
+/**
+ * 每个槽（编辑器实例）的 CodeMirror 文档状态缓存：键 = 文件绝对路径，值 = 该文件当前的
+ * `EditorState`（含文档、选区、撤销历史）。
+ *
+ * 背景：DSH 右侧栏切换 tab 会把整个 `VSCodePane` 的 Vue 应用卸载再重建（React 桥卸载），
+ * 若缓存放在组件实例里会随卸载丢失 —— 于是切回编辑器时整个视图重新展开、撤销栈清空。
+ * 这里放在「按槽常驻」的模块级 registry 里，使状态在卸载/重建间存活；同时按槽隔离，
+ * 多编辑器窗口（vscode / vscode-2 …）即使打开同一文件也各自独立、不会共用同一份 EditorState。
+ */
+const editorStateCaches = new Map<number, Map<string, EditorState>>();
+
+/** 取某槽的文档状态缓存（按槽隔离，多窗口互不污染）。 */
+export function getEditorStateCache(slot: number): Map<string, EditorState> {
+  let m = editorStateCaches.get(slot);
+  if (!m) {
+    m = new Map<string, EditorState>();
+    editorStateCaches.set(slot, m);
+  }
+  return m;
+}
+
+/** 丢弃某槽内某文件的缓存状态（关闭标签 / 重命名前调用，避免复用陈旧状态）。 */
+export function clearEditorState(slot: number, path: string): void {
+  editorStateCaches.get(slot)?.delete(path);
+}
+
+/** 丢弃某槽的全部缓存状态（关闭全部标签时调用）。 */
+export function clearEditorStates(slot: number): void {
+  editorStateCaches.delete(slot);
+}
+
+/**
+ * 每个槽「当前挂载的 CodeEditor 实例」的更新分发器（`(update) => void`）。
+ *
+ * EditorState 被缓存并跨「卸载→重建」复用，其 `updateListener` 也随之复用；若 listener 闭包
+ * 直接捕获某个组件实例的 props/emit，重建后编辑事件会打到**已销毁的旧实例** —— 父组件收不到
+ * `change`，保存时会把旧内容写回磁盘（数据丢失）。因此 listener 只按 slot 查这张表，
+ * 取**当前实例**的分发器；CodeEditor 挂载时登记、卸载时注销。
+ */
+const editorUpdateSinks = new Map<number, (update: unknown) => void>();
+
+/** 登记/注销某槽当前实例的更新分发器（卸载时传 null 注销）。 */
+export function setEditorUpdateSink(slot: number, sink: ((update: unknown) => void) | null): void {
+  if (sink) editorUpdateSinks.set(slot, sink);
+  else editorUpdateSinks.delete(slot);
+}
+
+/** 取某槽当前实例的更新分发器（无则 undefined）。 */
+export function getEditorUpdateSink(slot: number): ((update: unknown) => void) | undefined {
+  return editorUpdateSinks.get(slot);
+}
+
 /** Vue provide/inject 键：面板根提供，子组件（目录树）注入。 */
 export const VS_STORE_KEY: InjectionKey<VSCodeStore> = Symbol("dsh-file-workbench/vscode-store");
 
@@ -318,7 +373,7 @@ export interface VSCodeStore {
   fileViewOf(path: string | null): FileViewState;
   /** 记录某文件的查看器位置（节流落盘）。 */
   rememberFileView(path: string, view: FileViewState): void;
-  /** 面板卸载前暂存未保存的缓冲区（只留 dirty 项）。 */
+  /** 面板卸载前暂存全部缓冲区（含干净文件），使重新挂载免读盘、不丢视图位置。 */
   stashOpenBuffers(buffers: Record<string, OpenBuffer>): void;
   /** 取出并清空暂存的未保存缓冲区。 */
   takeStashedBuffers(): Record<string, OpenBuffer>;
@@ -349,10 +404,11 @@ function createVSCodeStore(slot: number): VSCodeStore {
 
   /**
    * 「面板在 DSH 里随 tab 激活/失活挂载卸载」的补偿：buffer 内容按设计不落盘（以磁盘为准），
-   * 而模块不随面板卸载重置 —— 卸载时把 **dirty** 缓冲区留在本实例的暂存里，
-   * 重新挂载时恢复，既不持久化内容也不会静默丢改动。
+   * 而模块不随面板卸载重置 —— 卸载时把**全部**缓冲区（含干净文件）留在本实例的暂存里，
+   * 重新挂载时整体恢复，于是「切走再切回」不再重新读盘、也不丢光标 / 滚动（视图位置走 fileView）。
+   * 仅内存常驻、不落盘；项目切换 / 关闭标签会先清空 buffers，故暂存不会残留已关闭文件。
    */
-  let dirtyStash: Record<string, OpenBuffer> = {};
+  let bufferStash: Record<string, OpenBuffer> = {};
 
   /** 槽号最小的、已落过盘的其它槽 —— 新槽没有项目时继承它的项目目录。 */
   function inheritedProjectDir(): string | null {
@@ -482,14 +538,14 @@ function createVSCodeStore(slot: number): VSCodeStore {
       persistSoon();
     },
     stashOpenBuffers(buffers) {
-      dirtyStash = {};
+      bufferStash = {};
       for (const [path, buf] of Object.entries(buffers)) {
-        if (buf.dirty) dirtyStash[path] = { ...buf };
+        bufferStash[path] = { ...buf };
       }
     },
     takeStashedBuffers() {
-      const out = dirtyStash;
-      dirtyStash = {};
+      const out = bufferStash;
+      bufferStash = {};
       return out;
     },
     requestOpenProject(dir) {

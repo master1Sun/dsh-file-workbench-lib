@@ -21,7 +21,7 @@ import {
   readBody,
   type RouteMatcher,
 } from "./routes-util.js";
-import type { TermStreamEvent } from "../../shared/types.js";
+import type { MuxTermStreamEvent, TermStreamEvent } from "../../shared/types.js";
 
 /** 支持的终端 shell：cmd（默认）或 powershell。 */
 export type TermShell = "cmd" | "powershell";
@@ -46,6 +46,8 @@ interface PtyFactory {
 
 /** 常驻 shell 会话（/exec-stream 流式模型）。 */
 interface ShellSession {
+  /** 会话 id（= sessions 的键）：多路复用帧用它区分来源。 */
+  id: string;
   pty: PtyProcess;
   shell: TermShell;
   cwd: string;
@@ -56,6 +58,22 @@ interface ShellSession {
 }
 
 const sessions = new Map<string, ShellSession>();
+
+/**
+ * 多路复用 SSE 转发器：**所有终端会话共用这一组连接**（前端只开一条）。
+ *
+ * 必须复用连接的原因：宿主是 `node:http`（HTTP/1.1），浏览器对同一源只允许约 6 条并发连接。
+ * 若每个终端会话各占一条 SSE，开几个终端就把配额占满，后续的 `/exec-stream`、`/exec-input`
+ * 被浏览器永久排队——表现为「后开的终端一直空白且无法输入」。
+ */
+const muxSinks = new Set<import("node:http").ServerResponse>();
+/** 多路复用心跳计时器（有客户端时存在）。 */
+let muxHeartbeat: NodeJS.Timeout | null = null;
+
+/** 构造一个 SSE 数据帧（`data: <json>\n\n`）。 */
+function sseFrame(ev: unknown): string {
+  return `data: ${JSON.stringify(ev)}\n\n`;
+}
 
 /**
  * 惰性加载 node-pty（原生模块）：不可用（未安装/加载失败）返回 null。
@@ -84,12 +102,23 @@ function shellCommand(shell: TermShell): { file: string; args: string[] } {
   return { file: "bash", args: ["-i"] };
 }
 
-/** 向会话的所有 SSE 转发器广播一个事件帧。 */
+/**
+ * 向会话的所有订阅者广播一个事件帧：既发给该会话的专用 SSE（兼容旧端点），
+ * 也发给多路复用流（帧上补 `session`，供前端把输出分发到对应终端标签）。
+ */
 function broadcast(s: ShellSession, ev: TermStreamEvent): void {
-  const frame = `data: ${JSON.stringify(ev)}\n\n`;
+  const frame = sseFrame(ev);
   for (const res of s.sinks) {
     try {
       res.write(frame);
+    } catch {
+      /* 转发器已损坏，由 req close 清理 */
+    }
+  }
+  const muxFrame = sseFrame({ ...ev, session: s.id });
+  for (const res of muxSinks) {
+    try {
+      res.write(muxFrame);
     } catch {
       /* 转发器已损坏，由 req close 清理 */
     }
@@ -148,7 +177,7 @@ async function spawnShellSession(session: string, shell: TermShell, cwd: string)
     cwd,
     env: process.env,
   });
-  const s: ShellSession = { pty: child, shell, cwd, sinks: new Set(), heartbeat: null, closed: false };
+  const s: ShellSession = { id: session, pty: child, shell, cwd, sinks: new Set(), heartbeat: null, closed: false };
   sessions.set(session, s);
   child.onData((data) => broadcast(s, { type: "output", text: data }));
   child.onExit((ev) => {
@@ -211,35 +240,12 @@ export const terminalResource: RouteMatcher = async (req, res, seg, _q, method, 
   if (seg[0] === "exec-stream" && seg.length === 1 && method === "GET") {
     const session = _q.get("session")?.trim() || "default";
     const shell: TermShell = _q.get("shell") === "powershell" ? "powershell" : "cmd";
-    let cwd = _q.get("cwd")?.trim() || sessionCwd.get(session) || getRoot(_q.get("key") ?? undefined) || homedir();
-    // 远端（ssh）目录首版没有交互式 shell：不能拿 ssh:// 引用去 requireAbsolute（会报
-    // 「不是绝对路径」），安静回落到本机主目录，标签标题由随后的 cwd 事件如实回传。
-    if (cwd.startsWith("ssh://")) cwd = homedir();
-    cwd = requireAbsolute(cwd);
-    if (isProtectedPath(cwd)) {
-      throw new FsError("forbidden", "terminal rejected: working directory is a protected read-only area", 403);
-    }
+    const cwd = resolveSessionCwd(session, _q.get("cwd") ?? undefined, _q.get("key") ?? undefined);
+    const s = await ensureSession(session, shell, cwd);
 
-    let s = sessions.get(session);
-    // 已存在但 shell 或 cwd 变化：先终止旧会话再重新派生。
-    if (s && (s.shell !== shell || normalizePath(s.cwd) !== normalizePath(cwd))) {
-      killSessionTree(s);
-      endSession(session, s);
-      s = undefined;
-    }
-    if (!s) {
-      s = await spawnShellSession(session, shell, cwd);
-      sessionCwd.set(session, cwd);
-    }
-
-    res.writeHead(200, {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-cache, no-transform",
-      connection: "keep-alive",
-      "x-accel-buffering": "no",
-    });
+    res.writeHead(200, sseHeaders());
     // 先发一次当前 cwd（前端同步标签标题），再挂接转发器接收后续输出。
-    res.write(`data: ${JSON.stringify({ type: "cwd", cwd: s.cwd } as TermStreamEvent)}\n\n`);
+    res.write(sseFrame({ type: "cwd", cwd: s.cwd } as TermStreamEvent));
     s.sinks.add(res);
     if (!s.heartbeat) {
       s.heartbeat = setInterval(() => {
@@ -255,6 +261,55 @@ export const terminalResource: RouteMatcher = async (req, res, seg, _q, method, 
     // 客户端断开：摘掉转发器；shell 保持常驻（跨连接存活，供重连/标签切换）。
     req.on("close", () => {
       s?.sinks.delete(res);
+    });
+    return true;
+  }
+
+  // --- 派生会话：POST /exec-open { session, shell, cwd, key } —— 只保证会话存在，不挂 SSE ---
+  // 多路复用模式下前端只开一条 /exec-mux-stream，会话本身必须由这里显式建立，
+  // 否则「尚无该会话」时复用流上永远不会有它的输出。幂等：同 shell 同 cwd 直接复用既有会话。
+  if (seg[0] === "exec-open" && seg.length === 1 && method === "POST") {
+    const body = (await readBody(req)) as {
+      session?: string;
+      shell?: string;
+      cwd?: string;
+      key?: string;
+    } | null;
+    const session = body?.session?.trim() || "default";
+    const shell: TermShell = body?.shell === "powershell" ? "powershell" : "cmd";
+    const cwd = resolveSessionCwd(session, body?.cwd, body?.key);
+    const s = await ensureSession(session, shell, cwd);
+    return (json(res, 200, { ok: true, data: { cwd: s.cwd } }), true);
+  }
+
+  // --- 多路复用流：GET /exec-mux-stream?key= —— **一条连接覆盖全部会话**（帧上带 session） ---
+  if (seg[0] === "exec-mux-stream" && seg.length === 1 && method === "GET") {
+    res.writeHead(200, sseHeaders());
+    // 快照：把已存在会话的 cwd 先补发一遍，前端据此同步已打开标签的标题。
+    for (const s of sessions.values()) {
+      if (!s.closed) {
+        res.write(sseFrame({ type: "cwd", session: s.id, cwd: s.cwd } as MuxTermStreamEvent));
+      }
+    }
+    muxSinks.add(res);
+    if (!muxHeartbeat) {
+      muxHeartbeat = setInterval(() => {
+        for (const r of muxSinks) {
+          try {
+            r.write(": ping\n\n");
+          } catch {
+            /* ignore */
+          }
+        }
+      }, 15000);
+    }
+    // 客户端断开：摘掉转发器；shell 会话保持常驻（重连后经 /exec-open 复用即可）。
+    req.on("close", () => {
+      muxSinks.delete(res);
+      if (!muxSinks.size && muxHeartbeat) {
+        clearInterval(muxHeartbeat);
+        muxHeartbeat = null;
+      }
     });
     return true;
   }
@@ -316,4 +371,45 @@ export const terminalResource: RouteMatcher = async (req, res, seg, _q, method, 
 function normalizePath(p: string): string {
   const n = p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
   return n;
+}
+
+/** 终端 SSE 响应头（专用流与多路复用流共用）。 */
+function sseHeaders(): Record<string, string> {
+  return {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    "x-accel-buffering": "no",
+  };
+}
+
+/**
+ * 解析会话工作目录：显式 cwd > 会话记忆 > 工作区根 > 家目录。
+ *
+ * 远端（ssh）目录首版没有交互式 shell：不能拿 `ssh://` 引用去 `requireAbsolute`（会报
+ * 「不是绝对路径」），安静回落到本机主目录，标签标题由随后的 cwd 事件如实回传。
+ */
+function resolveSessionCwd(session: string, rawCwd: string | undefined, key: string | undefined): string {
+  let cwd = rawCwd?.trim() || sessionCwd.get(session) || getRoot(key) || homedir();
+  if (cwd.startsWith("ssh://")) cwd = homedir();
+  cwd = requireAbsolute(cwd);
+  if (isProtectedPath(cwd)) {
+    throw new FsError("forbidden", "terminal rejected: working directory is a protected read-only area", 403);
+  }
+  return cwd;
+}
+
+/** 取得（必要时派生）常驻 shell 会话；shell 或 cwd 变化时先终止旧会话再重建。 */
+async function ensureSession(session: string, shell: TermShell, cwd: string): Promise<ShellSession> {
+  let s = sessions.get(session);
+  if (s && (s.shell !== shell || normalizePath(s.cwd) !== normalizePath(cwd))) {
+    killSessionTree(s);
+    endSession(session, s);
+    s = undefined;
+  }
+  if (!s) {
+    s = await spawnShellSession(session, shell, cwd);
+    sessionCwd.set(session, cwd);
+  }
+  return s;
 }

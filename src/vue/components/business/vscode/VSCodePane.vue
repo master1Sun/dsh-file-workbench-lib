@@ -133,8 +133,8 @@
           <CodeEditor
             v-else
             ref="editorRef"
-            :key="vsState.activeTab"
             :path="vsState.activeTab"
+            :slot="store.slot"
             :initial-content="activeContent"
             :initial-view="initialView"
             :doc-rev="activeDocRev"
@@ -246,12 +246,21 @@ import Icon from "../../common/Icon.vue";
 import ConfirmDialog from "../../common/ConfirmDialog.vue";
 import ContextMenu from "../../common/ContextMenu.vue";
 import type { EolStyle, MenuItem, TextEncoding } from "../../../../shared/types";
-import { VS_STORE_KEY, defaultVSCodeStore, type OpenBuffer, type VSCodeStore } from "../../../stores/vscode";
+import {
+  VS_STORE_KEY,
+  clearEditorState,
+  clearEditorStates,
+  defaultVSCodeStore,
+  getEditorStateCache,
+  type OpenBuffer,
+  type VSCodeStore,
+} from "../../../stores/vscode";
 import * as api from "../../../composables/core/useApi";
 import { clearPendingEditorProject, floatTab, openNewEditorTab, takePendingEditorFile, takePendingEditorProject } from "../../../composables/core/sidebarRight";
 import { confirmDialog } from "../../../composables/core/dialog";
 import { toast, openNewTerminal } from "../../../stores/workbench";
 import { t } from "../../../composables/core/i18n";
+import { clearWatchPaths, onMtimeChange, setWatchPaths } from "../../../composables/core/push";
 import { useTheme } from "../../../composables/core/theme";
 import { prefs } from "../../../composables/core/settings";
 import { languageLabelFor } from "./langResolver";
@@ -284,8 +293,12 @@ const rememberFileView = (path: string, view: { scrollTop?: number; anchor?: num
 const stashOpenBuffers = (buffers: Record<string, OpenBuffer>): void => store.stashOpenBuffers(buffers);
 const takeStashedBuffers = (): Record<string, OpenBuffer> => store.takeStashedBuffers();
 
-/** 外部改动检测轮询间隔：足以发现外部保存，又不至于把 host 打满。 */
-const POLL_MS = 2500;
+/**
+ * 外部改动检测的来源标识：本面板把已打开标签的路径集合登记到推送通道（WebSocket），
+ * 由 host 侧 stat 到变化时推送过来 —— 取代了原先每 2.5s 一次的 `/mtimes` 轮询。
+ * 多编辑器面板共用一条连接，路径在 host 侧去重后只 stat 一次。
+ */
+const WATCH_KEY = `vscode:${store.slot}`;
 
 const rootRef = ref<HTMLElement | null>(null);
 const theme = useTheme(rootRef);
@@ -350,8 +363,8 @@ function onSearchOpen(rel: string, ln: number): void {
 }
 /** 光标位置（状态栏）。 */
 const cursor = reactive({ line: 1, col: 1 });
-/** 外部改动检测的定时器句柄。 */
-let pollTimer: number | null = null;
+/** 外部改动推送的退订函数（面板卸载时调用）。 */
+let offMtime: (() => void) | null = null;
 
 /** 文件名（提示文案用）。 */
 function basename(p: string): string {
@@ -946,11 +959,12 @@ async function onPickFolder(dir: string): Promise<void> {
   persistVSCode();
 }
 
-/** 关闭右侧所有已打开文件（清空标签 + 内容/错误缓存）。 */
+/** 关闭右侧所有已打开文件（清空标签 + 内容/错误缓存 + 编辑器文档缓存）。 */
 function closeAllTabs(): void {
   for (const p of Object.keys(buffers)) delete buffers[p];
   for (const p of Object.keys(errors)) delete errors[p];
   for (const p of Object.keys(docRevs)) delete docRevs[p];
+  clearEditorStates(store.slot);
   vsState.openTabs = [];
   vsState.activeTab = null;
 }
@@ -1248,38 +1262,45 @@ async function onSaveAsConfirm(target: string): Promise<void> {
   }
 }
 
-/* ---------- 外部改动检测（批量 mtime 轮询） ---------- */
+/* ---------- 外部改动检测（host 侧 WebSocket 推送） ---------- */
 
 /**
- * 轮询所有已打开标签的落盘时间。
+ * 处理某标签对应的文件在磁盘上被改动（由 host 推送，非轮询）。
  *  - 缓冲区**干净** → 磁盘变了就是外部改过，直接静默重载（本地没有可丢的内容）；
  *  - 缓冲区**有未保存改动** → 只打冲突标记，等用户决定覆盖还是放弃，**绝不自动重载**。
- * 一次请求批量查询全部标签，页面不可见时跳过，避免后台空转。
  */
-async function pollExternal(): Promise<void> {
-  if (typeof document !== "undefined" && document.hidden) return;
-  const paths = vsState.openTabs.slice();
-  if (paths.length === 0) return;
-  let items: Record<string, { mtimeMs: number; size: number } | null>;
-  try {
-    ({ items } = await api.mtimes(paths));
-  } catch {
-    // 轮询失败（host 未就绪 / 网络抖动）静默略过，下一轮再试。
+async function applyExternalChange(
+  path: string,
+  item: { mtimeMs: number; size: number } | null,
+): Promise<void> {
+  const b = buffers[path];
+  if (!b || b.binary) return;
+  if (!item) return; // 文件已删除：不自动关标签，交由用户处理
+  if (Math.abs(item.mtimeMs - b.mtime) < 1) return;
+  if (b.dirty) {
+    if (!b.conflict) b.conflict = true;
     return;
   }
-  for (const path of paths) {
-    const b = buffers[path];
-    if (!b || b.binary) continue;
-    const cur = items[path];
-    if (!cur) continue; // 文件已删除：不自动关标签，交由用户处理
-    if (Math.abs(cur.mtimeMs - b.mtime) < 1) continue;
-    if (b.dirty) {
-      if (!b.conflict) b.conflict = true;
-      continue;
-    }
-    await loadContent(path, { force: true });
-    toast("info", t("vsReloadedExternal", { name: basename(path) }));
-  }
+  await loadContent(path, { force: true });
+  toast("info", t("vsReloadedExternal", { name: basename(path) }));
+}
+
+/**
+ * 登记/更新本面板关注的路径集合，并订阅推送。
+ *
+ * 只关心**本面板已打开的标签**：其他面板的变更由各自的订阅处理（推送通道会分发给所有监听者，
+ * 这里按 openTabs 过滤即可）。
+ */
+function initExternalWatch(): void {
+  offMtime = onMtimeChange((path, item) => {
+    if (!vsState.openTabs.includes(path)) return;
+    void applyExternalChange(path, item);
+  });
+  watch(
+    () => vsState.openTabs.slice(),
+    (paths) => setWatchPaths(WATCH_KEY, paths),
+    { immediate: true },
+  );
 }
 
 /** 冲突处理：把磁盘版本读进来覆盖本地缓冲（等价于放弃本地改动）。 */
@@ -1323,6 +1344,8 @@ async function closeTab(path: string): Promise<void> {
   delete buffers[path];
   delete errors[path];
   delete docRevs[path];
+  // 同时丢弃该文件的编辑器文档缓存：重开时按磁盘内容重建，避免复用陈旧状态。
+  clearEditorState(store.slot, path);
   vsState.openTabs = vsState.openTabs.filter((p) => p !== path);
   if (vsState.activeTab === path) {
     vsState.activeTab = vsState.openTabs[vsState.openTabs.length - 1] ?? null;
@@ -1361,6 +1384,7 @@ async function closeMany(paths: string[]): Promise<void> {
       delete buffers[p];
       delete errors[p];
       delete docRevs[p];
+      clearEditorState(store.slot, p);
       vsState.openTabs = vsState.openTabs.filter((q) => q !== p);
     }
     if (vsState.activeTab && !vsState.openTabs.includes(vsState.activeTab)) {
@@ -1412,6 +1436,13 @@ function onFileRenamed(from: string, to: string): void {
   if (b) {
     buffers[to] = b;
     delete buffers[from];
+  }
+  // 文档缓存跟着改名迁移到新路径，避免「激活文件被改名」时编辑器整体重建。
+  const edCache = getEditorStateCache(store.slot);
+  const edState = edCache.get(from);
+  if (edState) {
+    edCache.delete(from);
+    edCache.set(to, edState);
   }
   if (docRevs[from] !== undefined) {
     docRevs[to] = docRevs[from];
@@ -1572,8 +1603,8 @@ onMounted(async () => {
   // 关页面前把节流中的位置变更落盘（persistVSCodeSoon 只保证 400ms 内合并）+ 未保存拦截。
   window.addEventListener("beforeunload", onBeforeUnload);
   window.addEventListener("beforeunload", persistVSCode);
-  pollTimer = window.setInterval(() => void pollExternal(), POLL_MS);
-  void pollExternal();
+  // 外部改动改为 push：登记本面板的标签路径集合，由 host 侧 stat 到变化时推过来。
+  initExternalWatch();
   // 后台预取一次项目文件索引：让首次 Ctrl+P / 聚焦搜索框立刻有结果。
   void ensureFileIndex();
   // 兜底：宿主未下发 tab 信息钩子（拿不到导航参数）时，取用工作台投递的待打开目录。
@@ -1592,10 +1623,10 @@ onBeforeUnmount(() => {
   window.removeEventListener("beforeunload", persistVSCode);
   document.removeEventListener("mousemove", onMove);
   document.removeEventListener("mouseup", onUp);
-  if (pollTimer !== null) {
-    window.clearInterval(pollTimer);
-    pollTimer = null;
-  }
+  // 撤销外部改动订阅（并释放本面板登记的那批路径）。
+  offMtime?.();
+  offMtime = null;
+  clearWatchPaths(WATCH_KEY);
   // 面板卸载（切 tab / 关面板）时：先暂存未保存内容，再兜底落盘当前位置。
   stashOpenBuffers({ ...buffers });
   persistVSCode();

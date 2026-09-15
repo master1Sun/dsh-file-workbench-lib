@@ -121,6 +121,16 @@ export type TermStreamEvent =
   | { type: "output"; text: string }
   | { type: "exit"; code: number; error?: string };
 
+/**
+ * 多路复用终端流的 SSE 帧：在 `TermStreamEvent` 之上多带一个 `session`，
+ * 用于在同一条连接里区分是哪个终端会话的输出。
+ *
+ * 之所以要多路复用：宿主是 `node:http`（HTTP/1.1），浏览器对同一源只允许约 6 条并发连接，
+ * 若每个终端各占一条 SSE 长连接，开几个终端就会把配额耗尽——后续 `/exec-stream` 与
+ * `/exec-input` 被永久排队，表现为「后开的终端一直空白、且无法输入」。
+ */
+export type MuxTermStreamEvent = TermStreamEvent & { session: string };
+
 /** 系统回收站中的单个条目。 */
 export interface RecycleEntry {
   /** 原始文件名。 */

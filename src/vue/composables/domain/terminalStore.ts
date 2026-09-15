@@ -9,7 +9,15 @@
  * （output），供 xterm 重放与跨面板存活；不再维护结构化行。
  */
 import { ref, type Ref } from "vue";
-import { killExec, sendTerminalInput, streamTerminal, termEnv } from "../core/useApi";
+import {
+  killExec,
+  openTerminalSession,
+  sendTerminalInput,
+  streamTerminal,
+  streamTerminalMux,
+  termEnv,
+} from "../core/useApi";
+import type { MuxTermStreamEvent } from "../../../shared/types";
 
 export interface TermTab {
   id: string;
@@ -45,6 +53,47 @@ export const termActiveId: Ref<string> = ref("");
  * 放在模块级单例供终端浮窗与最小化 dock 共用，避免各自重复请求。
  */
 export const termElevated: Ref<boolean | null> = ref(null);
+
+/**
+ * 折叠态悬浮按钮的位置（视口坐标 px）：`null` = 默认贴右缘垂直居中。
+ *
+ * 用户拖动后写入具体坐标，此后整个「折叠按钮 + 悬停展开的会话列表」以 left/top 定位。
+ * 放在模块级单例里（而非组件内），保证面板开合 / 应用重挂载后位置不丢。
+ */
+export const termDockPos: Ref<{ x: number; y: number } | null> = ref(null);
+
+/**
+ * 迷你窗预览：每个终端标签最近输出的纯文本末段（已剥离 ANSI），供最小化后的小窗展示。
+ *
+ * 与 `output`（含 ANSI、上限 4MB）分开维护 —— 这里只保留小窗需要的末段纯文本，且走独立
+ * 响应式结构，确保输出流式到达时小窗预览能实时刷新（`output` 的写入不经过响应式代理，
+ * 直接绑定不会触发重渲染）。
+ */
+export const termPreviews: Ref<Record<string, string>> = ref({});
+/** 小窗预览文本上限（字符）：保留末段即可，避免无界增长。 */
+const MAX_PREVIEW = 1500;
+/** 匹配 ANSI 转义序列（CSI … 终止于字母 / @ / ~）。 */
+const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+/** 把一段输出追加进对应标签的小窗预览（剥离 ANSI、超长截断头部）。 */
+function pushPreview(id: string, text: string): void {
+  const clean = text.replace(ANSI_RE, "");
+  if (!clean) return;
+  const cur = termPreviews.value[id] ?? "";
+  let next = cur + clean;
+  if (next.length > MAX_PREVIEW) next = next.slice(next.length - MAX_PREVIEW);
+  termPreviews.value = { ...termPreviews.value, [id]: next };
+}
+/** 取某标签的小窗预览（末段纯文本）。 */
+export function termPreviewOf(id: string): string {
+  return termPreviews.value[id] ?? "";
+}
+/** 移除某标签的小窗预览（关闭终端时调用）。 */
+function clearPreview(id: string): void {
+  if (termPreviews.value[id] === undefined) return;
+  const next = { ...termPreviews.value };
+  delete next[id];
+  termPreviews.value = next;
+}
 
 /**
  * 探测一次 host 权限态（幂等：已探测成功则直接返回）。
@@ -85,48 +134,159 @@ export function setOutputSink(tabId: string, fn: OutputSink | null): void {
   else outputSinks.delete(tabId);
 }
 
-/** 建立终端标签的 SSE 输出流；意外断开（shell 退出/网络抖动）后自动重连，后端会续派新 shell。 */
-export function startStream(tab: TermTab, key?: string): void {
-  if (tab.connected) return;
-  tab.connected = true;
+/* ---------- 输出流：所有终端共用一条多路复用 SSE ---------- */
+
+/**
+ * 复用流的取消控制器（null = 未连接）。
+ *
+ * ⛔ 不要退回「每个终端一条 /exec-stream」：宿主是 `node:http`（HTTP/1.1），浏览器对同一源
+ * 只允许约 6 条并发连接。每终端一条 SSE 会在开几个终端后把配额占满，之后 `/exec-stream`
+ * 与 `/exec-input` 被浏览器**永久排队**——表现为「后开的终端一直空白、且无法输入」。
+ */
+let muxAbort: AbortController | null = null;
+/** 复用流使用的 host 工作区 key（首个终端建立时确定）。 */
+let muxKey = "";
+/** `/exec-open` 是否可用；老 host 无该端点（404）时回退到「每终端一条」的旧模型。 */
+let muxSupported: boolean | null = null;
+
+/** 按 `session` 把复用流的帧分发到对应终端标签。 */
+function onMuxEvent(ev: MuxTermStreamEvent): void {
+  const tab = termTabs.value.find((t) => t.session === ev.session);
+  if (!tab) return;
+  if (ev.type === "output") {
+    tab.output = capOutput(tab.output + ev.text);
+    outputSinks.get(tab.id)?.(ev.text);
+    pushPreview(tab.id, ev.text);
+  } else if (ev.type === "cwd") {
+    tab.cwd = ev.cwd;
+  } else if (ev.type === "exit") {
+    // shell 退出（用户敲了 exit / 进程崩溃）：按既有行为重新派生，保持标签可用。
+    tab.connected = false;
+    window.setTimeout(() => void reopenShell(tab), 300);
+  }
+}
+
+/** shell 退出后重新派生（与旧模型 500ms 重连即派生新 shell 的行为一致）。 */
+async function reopenShell(tab: TermTab): Promise<void> {
+  // 标签可能已被关闭、或已由 restartShell/startStream 重新连上：两种都不该再介入。
+  if (!termTabs.value.includes(tab) || tab.connected) return;
+  tab.output = "";
+  termPreviews.value = { ...termPreviews.value, [tab.id]: "" };
+  try {
+    const r = await openTerminalSession({
+      session: tab.session,
+      shell: tab.shell,
+      cwd: tab.cwd || undefined,
+      key: muxKey,
+    });
+    if (r?.cwd) tab.cwd = r.cwd;
+    tab.connected = true;
+  } catch {
+    tab.connected = false;
+  }
+}
+
+/** 确保复用流已连接（幂等）：整页只此一条终端长连接；断开后 500ms 重连（后端会话常驻，重连续传）。 */
+function ensureMux(): void {
+  if (muxAbort) return;
+  const ctrl = new AbortController();
+  muxAbort = ctrl;
+  const run = async (): Promise<void> => {
+    if (ctrl.signal.aborted) return;
+    try {
+      await streamTerminalMux(onMuxEvent, { key: muxKey }, ctrl.signal);
+    } catch {
+      /* 网络层失败：走下方统一重连（主动 abort 时不重连） */
+    }
+    if (ctrl.signal.aborted) {
+      if (muxAbort === ctrl) muxAbort = null;
+      return;
+    }
+    // 后端会话常驻：重连即续传新输出。
+    window.setTimeout(() => void run(), 500);
+  };
+  void run();
+}
+
+/** 关闭复用流（已无在连终端时调用，避免空占一条连接）。 */
+function stopMux(): void {
+  muxAbort?.abort();
+  muxAbort = null;
+}
+
+/** 若已无在连终端，则收起复用流。 */
+function maybeStopMux(): void {
+  if (termTabs.value.some((t) => t.connected)) return;
+  stopMux();
+}
+
+/**
+ * 远端目录「在终端打开」：shell 就绪后自动敲入 ssh 登录命令。
+ * 只发一次——后续重连是同一会话的续传，不该再登录一次，否则远端会多出一个 ssh 连接。
+ */
+function sendInitCmd(tab: TermTab): void {
+  const initCmd = tab.initCmd;
+  if (!initCmd) return;
+  tab.initCmd = undefined;
+  window.setTimeout(() => {
+    if (tab.connected) void sendTerminalInput(tab.session, `${initCmd}\r`);
+  }, 800);
+}
+
+/** 旧模型回退：每个终端各占一条 /exec-stream（仅在老 host 缺少 /exec-open 时使用）。 */
+function legacyStream(tab: TermTab, key?: string): void {
   const ctrl = new AbortController();
   tab.streamAbort = ctrl;
   const connect = async (): Promise<void> => {
     if (!tab.connected || ctrl.signal.aborted) return;
     try {
       await streamTerminal(
-        (ev) => {
-          if (ev.type === "output") {
-            tab.output = capOutput(tab.output + ev.text);
-            outputSinks.get(tab.id)?.(ev.text);
-          } else if (ev.type === "cwd") {
-            tab.cwd = ev.cwd;
-          }
-        },
+        (ev) => onMuxEvent({ ...ev, session: tab.session }),
         { session: tab.session, cwd: tab.cwd || undefined, key, shell: tab.shell },
         ctrl.signal,
       );
     } catch {
-      /* 网络层失败：走下方统一重连（主动 abort 时不重连） */
+      /* 网络层失败：走下方统一重连 */
     }
     if (tab.connected && !ctrl.signal.aborted) {
-      // 后端会话常驻：重连即续传新输出 / 派生新 shell。
       window.setTimeout(() => void connect(), 500);
     } else {
       tab.connected = false;
     }
   };
-  // 远端目录「在终端打开」：shell 就绪后自动敲入 ssh 登录命令（只发一次——
-  // 后续重连是同一会话的续传，不该再登录一次，否则远端会多出一个 ssh 连接）。
-  const initCmd = tab.initCmd;
-  if (initCmd) {
-    tab.initCmd = undefined;
-    window.setTimeout(() => {
-      if (tab.connected && !ctrl.signal.aborted) void sendTerminalInput(tab.session, `${initCmd}\r`);
-    }, 800);
-  }
-
+  sendInitCmd(tab);
   void connect();
+}
+
+/**
+ * 建立终端标签的输出流：优先「共用一条复用流 + `/exec-open` 显式建会话」，
+ * 老 host（无 `/exec-open`）自动回退到「每终端一条 `/exec-stream`」。
+ */
+export function startStream(tab: TermTab, key?: string): void {
+  if (tab.connected) return;
+  tab.connected = true;
+  if (key) muxKey = key;
+  if (muxSupported === false) {
+    legacyStream(tab, key);
+    return;
+  }
+  void openTerminalSession({
+    session: tab.session,
+    shell: tab.shell,
+    cwd: tab.cwd || undefined,
+    key,
+  })
+    .then((r) => {
+      muxSupported = true;
+      if (r?.cwd) tab.cwd = r.cwd;
+      sendInitCmd(tab);
+      ensureMux();
+    })
+    .catch((e: unknown) => {
+      // 404 = 老 host 没有该端点：永久回退到旧模型；其余错误只影响本次（下次仍试复用流）。
+      if ((e as { status?: number } | null)?.status === 404) muxSupported = false;
+      legacyStream(tab, key);
+    });
 }
 
 /* ---------- 输入合并：xterm 每敲一个字符触发一次 onData，逐字符 POST 会刷屏 ---------- */
@@ -245,6 +405,7 @@ export function stopStream(tab: TermTab): void {
 export async function restartShell(tab: TermTab, key?: string): Promise<void> {
   stopStream(tab);
   tab.output = "";
+  termPreviews.value = { ...termPreviews.value, [tab.id]: "" };
   await killExec(tab.session).catch(() => {});
   startStream(tab, key);
 }
@@ -257,6 +418,8 @@ export function closeTermTab(id: string): void {
   stopStream(tab);
   void killExec(tab.session).catch(() => {});
   termTabs.value.splice(idx, 1);
+  clearPreview(id);
+  maybeStopMux();
   if (termActiveId.value === id) {
     const next = termTabs.value[idx] ?? termTabs.value[idx - 1] ?? termTabs.value[0];
     termActiveId.value = next ? next.id : "";
@@ -268,6 +431,9 @@ export async function closeAllTerminals(): Promise<void> {
   const tabs = termTabs.value.slice();
   termTabs.value = [];
   termActiveId.value = "";
+  termPreviews.value = {};
+  // 已无终端：收起复用流，不留空连接。
+  stopMux();
   await Promise.all(
     tabs.map((t) => {
       stopStream(t);

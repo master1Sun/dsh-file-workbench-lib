@@ -463,7 +463,9 @@ export const fsResource: RouteMatcher = async (req, res, seg, q, method, host) =
     );
   }
 
-  // --- 批量 mtime 查询（编辑器「外部改动检测」轮询：一次请求覆盖全部已打开标签） ---
+  // --- 批量 mtime 查询（**旧版轮询接口**，仅为版本错配兜底保留） ---
+  // 「外部改动检测」已改为 WebSocket 推送（见 ws-push.ts 的 /push）：新前端不再调用
+  // 这个接口。保留它是为了「宿主已更新、浏览器里还是旧前端」的窗口期不出错，勿据此再新增轮询。
   if (seg[0] === "mtimes" && seg.length === 1 && method === "POST") {
     const body = (await readBody(req)) as { paths?: unknown } | null;
     const list = Array.isArray(body?.paths) ? body.paths.filter((p): p is string => typeof p === "string") : [];

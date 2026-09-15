@@ -228,7 +228,10 @@ export function saveFile(path: string, content: string, opts: SaveTextOptions = 
   });
 }
 
-/** 批量查询文件落盘时间（编辑器外部改动检测轮询；silent 以免网络抖动时反复弹错）。 */
+/**
+ * 批量查询文件落盘时间（**旧版轮询接口**，已不再调用）。
+ * 「外部改动检测」改为推送通道，见 `composables/core/push.ts`；此处仅作兼容保留。
+ */
 export function mtimes(
   paths: string[],
 ): Promise<{ items: Record<string, { mtimeMs: number; size: number } | null> }> {
@@ -383,8 +386,9 @@ export function sshTest(body: {
 }
 
 /**
- * 连接冒烟：复用已缓存连接跑一次 `echo ok`，判断主机此刻是否在线（连接指示灯用）。
- * 失败不抛（host 侧以 `alive:false` 返回），调用方据此把灯点红。
+ * 连接冒烟：复用已缓存连接跑一次 `echo ok`，判断主机此刻是否在线（**旧版接口**，已不再调用）。
+ * 连接指示灯与「添加后立刻验证」都改走推送通道的显式检查（`push.ts` 的 `checkSshNow`）；
+ * 此处仅作兼容保留。
  */
 export function sshPing(id: string): Promise<{ alive: boolean; error?: string }> {
   return request("POST", "/ssh/ping", { id }, { silent: true });
@@ -455,11 +459,40 @@ export function streamTerminal(
   opts: { session: string; shell: "cmd" | "powershell"; cwd?: string; key?: string },
   signal?: AbortSignal,
 ): Promise<void> {
+  const params = new URLSearchParams({ session: opts.session, shell: opts.shell });
+  if (opts.cwd) params.set("cwd", opts.cwd);
+  if (opts.key) params.set("key", opts.key);
+  return openEventStream(`/exec-stream?${params.toString()}`, onEvent, signal);
+}
+
+/**
+ * 终端：打开**一条覆盖全部会话**的多路复用流（无论开几个终端都只占一条连接）。
+ *
+ * 帧里多带 `session` 字段，由调用方按会话分发。之所以必须复用：宿主是 `node:http`（HTTP/1.1），
+ * 浏览器对同一源只允许约 6 条并发连接——每个终端各占一条 SSE 时，开几个终端就会把配额耗尽，
+ * 新会话的 `/exec-stream` 与 `/exec-input` 会被浏览器**永久排队**（一直空白、且无法输入）。
+ */
+export function streamTerminalMux(
+  onEvent: (ev: import("../../../shared/types").MuxTermStreamEvent) => void,
+  opts: { key?: string },
+  signal?: AbortSignal,
+): Promise<void> {
+  const params = new URLSearchParams();
+  if (opts.key) params.set("key", opts.key);
+  const s = params.toString();
+  return openEventStream(`/exec-mux-stream${s ? `?${s}` : ""}`, onEvent, signal);
+}
+
+/**
+ * 打开一条 SSE 连接并把每个数据帧交给 `onEvent`；连接出错 / 服务端关闭 / 被 abort 时结束。
+ *
+ * 关键：SSE 是长连接，Promise 必须挂到 `onerror` 才 resolve。
+ * 若同步返回，调用方的 await 会立刻结束 → 误判「已断开」→ 每 500ms 新建一条连接，
+ * 旧连接从不关闭，很快占满浏览器每域名 6 条连接上限，后续 /exec-input 被永久排队（表现为终端无法输入）。
+ */
+function openEventStream<T>(url: string, onEvent: (ev: T) => void, signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve) => {
-    const params = new URLSearchParams({ session: opts.session, shell: opts.shell });
-    if (opts.cwd) params.set("cwd", opts.cwd);
-    if (opts.key) params.set("key", opts.key);
-    const es = new EventSource(`${apiBase}/exec-stream?${params.toString()}`);
+    const es = new EventSource(`${apiBase}${url}`);
     let settled = false;
     /** 关闭并结束 Promise：连接出错、服务端关闭、或外部 abort。 */
     const finish = (): void => {
@@ -474,21 +507,32 @@ export function streamTerminal(
     };
     es.onmessage = (msg) => {
       try {
-        const ev = JSON.parse(msg.data) as import("../../../shared/types").TermStreamEvent;
-        onEvent(ev);
+        onEvent(JSON.parse(msg.data) as T);
       } catch {
         /* 心跳帧（": ping"）或非 JSON：忽略 */
       }
     };
-    // 关键：SSE 是长连接，Promise 必须挂到这里才 resolve。
-    // 若同步返回，调用方的 await 会立刻结束→误判「已断开」→每 500ms 新建一条连接，
-    // 旧连接从不关闭，很快占满浏览器每域名 6 条连接上限，后续 /exec-input 被永久排队（表现为终端无法输入）。
     es.onerror = finish;
     if (signal) {
       if (signal.aborted) finish();
       else signal.addEventListener("abort", finish, { once: true });
     }
   });
+}
+
+/**
+ * 终端：派生（或复用）后端常驻 shell 会话，返回该会话当前工作目录。
+ *
+ * 多路复用流只负责接收输出，会话本身必须由这里显式建立——否则「没有任何会话」时
+ * 复用流上永远不会有该会话的输出。幂等：同 session 同 shell 同 cwd 时直接复用既有会话。
+ */
+export function openTerminalSession(body: {
+  session: string;
+  shell: "cmd" | "powershell";
+  cwd?: string;
+  key?: string;
+}): Promise<{ cwd: string }> {
+  return request<{ cwd: string }>("POST", "/exec-open", body);
 }
 
 /**

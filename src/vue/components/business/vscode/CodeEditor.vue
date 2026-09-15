@@ -8,27 +8,35 @@
  * CodeMirror 6 封装：语法高亮 + 行号 + 折叠 + 查找/替换（basicSetup 自带 searchKeymap，
  * 提供 Ctrl+F / Ctrl+H）+ 主题跟随（深色用 oneDark，浅色用默认浅色主题）。
  *
- * 受控方式：父组件按文件切换时传入新的 path/initialContent，本组件整体重建 EditorView；
- * 用户编辑时通过 @change 把最新文档回传父组件（用于维护标签 dirty 与内存内容）。
+ * 受控方式：父组件按文件切换时传入新的 path/initialContent；本组件**不销毁重建** EditorView，
+ * 而是按 path 在 docCache 中取出/构建对应 EditorState 并 `setState` 就地替换——
+ * 因此切换文件标签不再「重新展开」，且每文件的滚动 / 光标 / 撤销栈各自保留。
  *
  * 位置持久化：`initialView` 传入该文件上次的滚动位置与光标偏移，建视图时还原；
  * 滚动 / 光标变化通过 @view 回传父组件（父组件按路径暂存并节流落盘）。
  */
 import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
-import { EditorView } from "@codemirror/view";
+import { EditorView, type ViewUpdate } from "@codemirror/view";
 import { EditorState, Compartment } from "@codemirror/state";
 import { basicSetup } from "codemirror";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { indentSelection } from "@codemirror/commands";
 import { languageExtensionFor } from "./langResolver";
+import {
+  getEditorStateCache,
+  getEditorUpdateSink,
+  setEditorUpdateSink,
+} from "../../../stores/vscode";
 
 const props = defineProps<{
-  /** 当前文件路径（切换即重建编辑器）。 */
+  /** 当前文件路径（切换即就地替换文档状态，不重建视图）。 */
   path: string;
-  /** 初始文档内容。 */
+  /** 所属编辑器实例槽号（与 VSCodeStore 同槽），用于在跨挂载常驻的缓存里按槽隔离状态。 */
+  slot: number;
+  /** 初始文档内容（仅在首次打开该路径 / 外部重载时使用）。 */
   initialContent: string;
   /**
-   * 文档修订号：外部替换了同一路径的内容时由父组件自增，触发整体重建。
+   * 文档修订号：外部替换了同一路径的内容时由父组件自增，触发整体重建（丢弃缓存的撤销栈与选区）。
    * 用于「外部改动自动重载」与「切换编码重读」——不能只靠 initialContent 变化判断，
    * 因为它不是响应式的文档来源（用户编辑不会回写它）。
    */
@@ -63,11 +71,42 @@ let gen = 0;
 /** 当前视图的滚动监听器（随视图销毁一并摘除）。 */
 let scrollHandler: (() => void) | null = null;
 
+/**
+ * 每个路径一份 EditorState，切 tab 时按 key 取出复用 —— 不销毁重建视图，
+ * 因此切换文件不再「重新展开」，且每文件的滚动 / 光标 / 撤销栈各自保留。
+ * 仅在外部重载（docRev）或首次打开时构建新状态。
+ *
+ * 该缓存**不在组件实例上**，而是取自按槽常驻的模块级 registry（`getEditorStateCache(slot)`）：
+ * DSH 右侧栏切换 tab 会整体卸载再重建本组件，实例级缓存会随之丢失、切回时编辑器重新展开；
+ * 放进 registry 后状态跨「卸载→重建」存活。按槽隔离，多编辑器窗口互不污染。
+ */
+const docCache = getEditorStateCache(props.slot ?? 0);
+
 /** 上报当前滚动位置与光标偏移（视图未就绪时静默跳过）。 */
 function reportView(): void {
   const v = view.value;
   if (!v) return;
   emit("view", { scrollTop: v.scrollDOM.scrollTop, anchor: v.state.selection.main.head });
+}
+
+/**
+ * 本实例的更新分发器：文档 / 选区变化时回传父组件（父组件据此更新 buffers 与光标）。
+ * 通过按槽的 sink 表暴露给「跨挂载复用的 EditorState 的 updateListener」调用 ——
+ * 始终作用在**当前实例**上，避免重建后写进旧实例的 buffers。
+ */
+function handleUpdate(raw: unknown): void {
+  const u = raw as ViewUpdate;
+  if (u.docChanged) {
+    emit("change", u.state.doc.toString());
+    // 用户编辑后实时把最新状态写回缓存，下次切回该文件即恢复（含撤销栈）。
+    if (props.path) docCache.set(props.path, u.state);
+  }
+  if (u.selectionSet || u.docChanged) {
+    const head = u.state.selection.main.head;
+    const line = u.state.doc.lineAt(head);
+    emit("cursor", line.number, head - line.from + 1);
+    reportView();
+  }
 }
 
 function buildState(doc: string): EditorState {
@@ -82,17 +121,21 @@ function buildState(doc: string): EditorState {
       themeCompartment.of(props.dark ? oneDark : []),
       roCompartment.of(EditorState.readOnly.of(!!props.readonly)),
       editableCompartment.of(EditorView.editable.of(!props.readonly)),
-      EditorView.updateListener.of((u) => {
-        if (u.docChanged) emit("change", u.state.doc.toString());
-        if (u.selectionSet || u.docChanged) {
-          const head = u.state.selection.main.head;
-          const line = u.state.doc.lineAt(head);
-          emit("cursor", line.number, head - line.from + 1);
-        }
-        if (u.selectionSet || u.docChanged) reportView();
-      }),
+      // 注意：本 listener 随 EditorState 一起被跨挂载复用，**不能**直接闭包本实例的 props/emit，
+      // 否则重建后编辑事件会打到已销毁的旧实例（父组件收不到 change → 保存写旧内容）。
+      // 改为按 slot 转发到「当前实例」的分发器（见 getEditorUpdateSink）。
+      EditorView.updateListener.of((u) => getEditorUpdateSink(props.slot ?? 0)?.(u)),
     ],
   });
+}
+
+/** 取某路径的状态：已缓存则复用（含用户编辑后的文档与选区），否则按初始内容构建并缓存。 */
+function stateFor(path: string): EditorState {
+  const cached = docCache.get(path);
+  if (cached) return cached;
+  const s = buildState(props.initialContent ?? "");
+  docCache.set(path, s);
+  return s;
 }
 
 /** 异步加载并应用语言高亮（动态 import 语言包）。 */
@@ -103,30 +146,54 @@ async function loadLanguage(): Promise<void> {
   view.value.dispatch({ effects: langCompartment.reconfigure(exts) });
 }
 
-/** 在容器内创建新的 EditorView。 */
-function createView(): void {
-  if (!hostRef.value) return;
-  gen++;
-  const v = new EditorView({ state: buildState(props.initialContent), parent: hostRef.value });
-  view.value = v;
-  // 还原滚动位置（等一帧让布局完成，否则 scrollTop 会被重置）。
+/** 还原滚动位置（等一帧让布局完成，否则 scrollTop 会被重置）。 */
+function restoreScroll(v: EditorView): void {
   const top = props.initialView?.scrollTop ?? 0;
   if (top > 0) {
     requestAnimationFrame(() => {
       if (view.value === v) v.scrollDOM.scrollTop = top;
     });
   }
+}
+
+/**
+ * 把当前主题 / 只读态重新对齐到一个视图。
+ * 缓存的 EditorState 可能带着**上次挂载时**的 compartment 值，重建后需按当前 props 复位。
+ */
+function applyEnv(v: EditorView): void {
+  v.dispatch({
+    effects: [
+      themeCompartment.reconfigure(props.dark ? oneDark : []),
+      roCompartment.reconfigure(EditorState.readOnly.of(!!props.readonly)),
+      editableCompartment.reconfigure(EditorView.editable.of(!props.readonly)),
+    ],
+  });
+}
+
+/** 在容器内创建新的 EditorView（首次挂载某路径时调用）。 */
+function createView(): void {
+  if (!hostRef.value) return;
+  gen++;
+  const v = new EditorView({ state: stateFor(props.path), parent: hostRef.value });
+  view.value = v;
+  applyEnv(v);
+  restoreScroll(v);
   scrollHandler = () => reportView();
   v.scrollDOM.addEventListener("scroll", scrollHandler, { passive: true });
   void loadLanguage();
 }
 
-/** 切换文件：销毁旧视图并重建（带新 initialContent）。 */
-function rebuild(): void {
-  detachScroll();
-  view.value?.destroy();
-  view.value = null;
-  createView();
+/** 切到新路径：复用/构建该路径状态，setState 就地替换（不销毁视图，无闪动）。 */
+function swapTo(path: string): void {
+  const v = view.value;
+  if (!v) return;
+  // 先把当前路径的最新状态写回缓存（含用户编辑后的文档与选区）。
+  if (props.path) docCache.set(props.path, v.state);
+  gen++;
+  v.setState(stateFor(path));
+  applyEnv(v);
+  restoreScroll(v);
+  void loadLanguage();
 }
 
 /** 摘除当前视图的滚动监听器。 */
@@ -204,16 +271,42 @@ function format(): boolean {
 
 defineExpose({ focus, format, revealLine });
 
-onMounted(createView);
+onMounted(() => {
+  // 先登记本实例的更新分发器，再建视图：跨挂载复用的 EditorState 的 listener 会按槽找到它。
+  setEditorUpdateSink(props.slot ?? 0, handleUpdate);
+  createView();
+});
 onBeforeUnmount(() => {
+  // 注销本实例的分发器（重建时会登记新实例的）。
+  setEditorUpdateSink(props.slot ?? 0, null);
   detachScroll();
   view.value?.destroy();
   view.value = null;
 });
 
-watch(() => props.path, rebuild);
-// 同一文件内容被外部替换（重载 / 换编码重读）：整体重建以丢弃旧的撤销栈与选区。
-watch(() => props.docRev, rebuild);
+// 切换文件：复用/构建该路径状态并就地 setState（不销毁重建），避免「重新展开」。
+watch(
+  () => props.path,
+  (np, op) => {
+    if (!np) return;
+    if (op && op !== np) swapTo(np);
+    else if (!op) createView();
+  },
+);
+// 同一文件内容被外部替换（重载 / 换编码重读）：丢弃缓存并整体重建以重置撤销栈与选区。
+watch(
+  () => props.docRev,
+  () => {
+    if (!props.path) return;
+    docCache.delete(props.path);
+    const v = view.value;
+    if (!v) return;
+    gen++;
+    v.setState(buildState(props.initialContent ?? ""));
+    restoreScroll(v);
+    void loadLanguage();
+  },
+);
 watch(
   () => props.readonly,
   () => {

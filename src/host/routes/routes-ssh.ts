@@ -139,7 +139,9 @@ export const sshResource: RouteMatcher = async (req, res, seg, _q, method) => {
     return (json(res, 200, { ok: true, data: { path: local, name, size: data.byteLength } }), true);
   }
 
-  // --- 连接冒烟（供前端添加后立刻列目录验证）：/ssh/ping?id=xx ---
+  // --- 连接冒烟（**旧版轮询接口**，新前端已改走推送通道的显式检查）---
+  // 已由 ws-push.ts 的 `{ type: "ssh-check" }` 取代：同一条 WebSocket 长连接即可完成
+  // 「探测 + 回推」，不必为每台主机各发一次 HTTP 请求。此处留存作 REST 兜底。
   if (seg[1] === "ping" && seg.length === 2 && method === "POST") {
     const body = (await readBody(req)) as { id?: string } | null;
     if (!body?.id) return (json(res, 400, { ok: false, error: "id required" }), true);

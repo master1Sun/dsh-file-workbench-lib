@@ -1,11 +1,12 @@
 // 冒烟测试：不依赖 DSH 运行，直接用一个临时目录驱动 host 的文件浏览路由，验证
 // root/list/read/save/search/mkdir/rename/remove 全链路可用。
-import { createServer } from "node:http";
-import { readdirSync } from "node:fs";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { createServer, request as httpRequest } from "node:http";
+import { readdirSync, readFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdtemp, mkdir, stat, utimes, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { makeFileWorkbenchRoutes } from "../lib/index.js";
+import { makeFileWorkbenchRoutes, makePushUpgrade } from "../lib/index.js";
 
 const base = await mkdtemp(join(tmpdir(), "fw-test-"));
 const proj = join(base, "myproj");
@@ -93,7 +94,19 @@ const webRoot = new URL("../lib/web/", import.meta.url);
 const webFiles = readdirSync(webRoot, { withFileTypes: true });
 const hasAssets = webFiles.some((f) => f.isDirectory() && f.name === "assets");
 check("lib/web/assets exists", hasAssets);
-const cssFile = readdirSync(new URL("assets/", webRoot)).find((f) => f.endsWith(".css"));
+// ⛔ 必须按**构建产物里实际引用**的文件名验证，不能取目录里第一个 .css：
+// 带 hash 的构建产物只增不减（copyDirNoDelete + vite emptyOutDir:false），历史死产物同在目录里
+// 且照样能 200 —— 那样这条「产物存活检查」会把「引用已断」判成通过（本机实测踩过一次）。
+const clientJs = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
+const referenced = [
+  ...clientJs.matchAll(/assets\/(index-[A-Za-z0-9_-]+\.js|style-[A-Za-z0-9_-]+\.css)/g),
+].map((m) => m[1]);
+check("build references its own assets", referenced.length > 0);
+const localAssets = readdirSync(new URL("assets/", webRoot));
+for (const name of [...new Set(referenced)]) {
+  check(`referenced asset present on disk (${name})`, localAssets.includes(name));
+}
+const cssFile = referenced.find((n) => n.endsWith(".css"));
 if (cssFile) {
   const okRes = await fetch(u(`/assets/${cssFile}`));
   const okType = okRes.headers.get("content-type") ?? "";
@@ -152,6 +165,230 @@ if (addedHost?.id) {
     removed.ok && hosts2.ok && hosts2.data.hosts.length === baseCount,
   );
 }
+
+/* ---------- 推送通道（WebSocket）：文件改动 + SSH 连通性 ----------
+ * 取代了原先的 /mtimes 与 /ssh/ping 两处轮询，握手与帧编解码是自实现的 RFC6455 子集，
+ * 故必须回归覆盖。客户端也按规范手写（带掩码帧），用来交叉验证服务端的握手应答与帧解析。 */
+const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const wsRoute = makePushUpgrade();
+server.on("upgrade", (req, socket, head) => wsRoute.handler(req, socket, head));
+
+let wsBuf = Buffer.alloc(0);
+const wsSeen = [];
+const wsWaiters = [];
+
+/** 从缓冲里取出下一帧（不足一帧返回 null）。 */
+function wsNextFrame() {
+  if (wsBuf.length < 2) return null;
+  const opcode = wsBuf[0] & 0x0f;
+  const masked = (wsBuf[1] & 0x80) !== 0;
+  let len = wsBuf[1] & 0x7f;
+  let off = 2;
+  if (len === 126) {
+    if (wsBuf.length < 4) return null;
+    len = wsBuf.readUInt16BE(2);
+    off = 4;
+  } else if (len === 127) {
+    if (wsBuf.length < 10) return null;
+    len = Number(wsBuf.readBigUInt64BE(2));
+    off = 10;
+  }
+  const maskLen = masked ? 4 : 0;
+  const total = off + maskLen + len;
+  if (wsBuf.length < total) return null;
+  let payload = wsBuf.subarray(off + maskLen, total);
+  if (masked) {
+    const mask = wsBuf.subarray(off, off + 4);
+    const out = Buffer.allocUnsafe(len);
+    for (let i = 0; i < len; i++) out[i] = payload[i] ^ mask[i & 3];
+    payload = out;
+  }
+  wsBuf = wsBuf.subarray(total);
+  return { opcode, text: payload.toString("utf8") };
+}
+
+function wsFeed(chunk) {
+  wsBuf = wsBuf.length ? Buffer.concat([wsBuf, chunk]) : chunk;
+  for (;;) {
+    const frame = wsNextFrame();
+    if (!frame) return;
+    wsSeen.push(frame);
+    for (let i = wsWaiters.length - 1; i >= 0; i--) {
+      if (wsWaiters[i].pred(frame)) {
+        const w = wsWaiters.splice(i, 1)[0];
+        w.resolve(frame);
+      }
+    }
+  }
+}
+
+/** 等待一个满足条件的帧（已收到则立即返回）。 */
+function wsWait(pred, ms) {
+  const hit = wsSeen.find(pred);
+  if (hit) return Promise.resolve(hit);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("ws frame timeout")), ms);
+    wsWaiters.push({
+      pred,
+      resolve: (f) => {
+        clearTimeout(timer);
+        resolve(f);
+      },
+    });
+  });
+}
+
+/** 编码一个客户端帧（客户端帧必须带掩码）。 */
+function wsClientFrame(text) {
+  const payload = Buffer.from(text, "utf8");
+  const mask = randomBytes(4);
+  const len = payload.length;
+  const head = Buffer.alloc(len < 126 ? 2 : 4);
+  head[0] = 0x81;
+  if (len < 126) {
+    head[1] = 0x80 | len;
+  } else {
+    head[1] = 0x80 | 126;
+    head.writeUInt16BE(len, 2);
+  }
+  const masked = Buffer.allocUnsafe(len);
+  for (let i = 0; i < len; i++) masked[i] = payload[i] ^ mask[i & 3];
+  return Buffer.concat([head, mask, masked]);
+}
+
+const wsJson = (frame) => {
+  try {
+    return JSON.parse(frame.text);
+  } catch {
+    return null;
+  };
+};
+const wsType = (frame) => wsJson(frame)?.type;
+
+const wsKey = randomBytes(16).toString("base64");
+const wsReq = httpRequest({
+  port,
+  host: "127.0.0.1",
+  path: wsRoute.path,
+  method: "GET",
+  headers: {
+    Connection: "Upgrade",
+    Upgrade: "websocket",
+    "Sec-WebSocket-Key": wsKey,
+    "Sec-WebSocket-Version": "13",
+  },
+});
+const upgraded = await new Promise((resolve, reject) => {
+  wsReq.on("upgrade", (res, socket, head) => resolve({ res, socket, head }));
+  wsReq.on("error", reject);
+  wsReq.end();
+});
+check(
+  "ws upgrade: 101 + RFC6455 accept key",
+  upgraded.res.statusCode === 101 &&
+    upgraded.res.headers["sec-websocket-accept"] ===
+      createHash("sha1").update(wsKey + WS_GUID).digest("base64"),
+);
+
+const wsSocket = upgraded.socket;
+wsSocket.on("data", wsFeed);
+// 101 之后紧跟的字节由 head 承载（可能已含 ready 帧）。
+if (upgraded.head?.length) wsFeed(upgraded.head);
+let wsReady = true;
+try {
+  await wsWait((f) => wsType(f) === "ready", 2000);
+} catch {
+  wsReady = false;
+}
+check("ws: server sends ready frame", wsReady);
+
+const watched = join(base, "ws-watch.txt");
+await writeFile(watched, "one");
+wsSocket.write(wsClientFrame(JSON.stringify({ type: "watch", paths: [watched] })));
+// 等一个采样周期：订阅建立时只记基线，不该误报一次「外部改动」。
+await new Promise((r) => setTimeout(r, 1600));
+check("ws: no spurious changed on subscribe", !wsSeen.some((f) => wsType(f) === "changed"));
+
+const before = await stat(watched);
+await writeFile(watched, "two!");
+// mtime 明确推进 2s，避免同毫秒被判成未变化。
+await utimes(watched, before.atime, new Date(before.mtimeMs + 2000));
+const after = await stat(watched);
+let wsChanged = null;
+try {
+  wsChanged = wsJson(await wsWait((f) => wsType(f) === "changed", 5000));
+} catch {
+  /* 由下面两条断言报错 */
+}
+check("ws: pushes changed for the watched file", !!wsChanged?.items?.[watched]);
+check(
+  "ws: pushed size/mtime match disk",
+  wsChanged?.items?.[watched]?.size === after.size &&
+    Math.abs((wsChanged?.items?.[watched]?.mtimeMs ?? 0) - after.mtimeMs) < 1,
+);
+
+// 未订阅的路径不该被推送。
+const unwatched = join(base, "ws-other.txt");
+await writeFile(unwatched, "x");
+await writeFile(unwatched, "yy");
+await new Promise((r) => setTimeout(r, 1600));
+check(
+  "ws: unwatched path is not pushed",
+  !wsSeen.some((f) => wsType(f) === "changed" && wsJson(f)?.items?.[unwatched]),
+);
+
+/* ---- 推送通道的 SSH 分支：取代 /ssh/ping 轮询 ----
+ * 复用上面同一条连接（这正是把两类订阅合并到一条 WS 的意义：不再各占一条长连接）。 */
+const sshProbe = await call("/ssh/add", "", "POST", {
+  name: "ws-probe",
+  host: "127.0.0.1",
+  // 端口 1 必然无监听 → ECONNREFUSED，探测即刻收敛，测试无需等超时。
+  port: 1,
+  user: "smoke",
+  auth: { type: "password", password: "top-secret" },
+});
+const sshProbeId = sshProbe.ok ? sshProbe.data.host.id : "";
+check("ws ssh: probe host added", !!sshProbeId);
+
+// 新订阅的主机不必等一个采样周期：服务端应立刻探测并无条件回推一次。
+wsSocket.write(wsClientFrame(JSON.stringify({ type: "ssh-watch", ids: [sshProbeId] })));
+let sshFrame = null;
+try {
+  sshFrame = wsJson(
+    await wsWait((f) => wsType(f) === "ssh-status" && !!wsJson(f)?.items?.[sshProbeId], 20000),
+  );
+} catch {
+  /* 由下面两条断言报错 */
+}
+const sshItem = sshFrame?.items?.[sshProbeId];
+check("ws ssh: pushes status right after subscribe", sshItem?.alive === false);
+check(
+  "ws ssh: unreachable host carries a readable reason",
+  typeof sshItem?.error === "string" && sshItem.error.length > 0,
+);
+
+// 显式检查（原 POST /ssh/ping 的语义）：即使状态与上次相同也必须无条件回推，
+// 否则「添加后立刻验证」这类调用拿不到结果。
+const sshFramesOfId = () =>
+  wsSeen.filter((f) => wsType(f) === "ssh-status" && !!wsJson(f)?.items?.[sshProbeId]).length;
+const framesBefore = sshFramesOfId();
+wsSocket.write(wsClientFrame(JSON.stringify({ type: "ssh-check", ids: [sshProbeId] })));
+await new Promise((r) => setTimeout(r, 3000));
+check("ws ssh: explicit check re-pushes even when unchanged", sshFramesOfId() > framesBefore);
+
+// 退订后再发显式检查：仍须回推。「订阅集合」与「检查请求」是两条独立通路，
+// 前端 `pingSshHost` 依赖这一点 —— 它可能在主机尚未进入订阅集合时就被调用。
+wsSocket.write(wsClientFrame(JSON.stringify({ type: "ssh-watch", ids: [] })));
+await new Promise((r) => setTimeout(r, 300));
+const beforeUnsub = sshFramesOfId();
+wsSocket.write(wsClientFrame(JSON.stringify({ type: "ssh-check", ids: [sshProbeId] })));
+await new Promise((r) => setTimeout(r, 3000));
+check("ws ssh: check works without a standing subscription", sshFramesOfId() > beforeUnsub);
+
+const closed = await call("/ssh/remove", "", "POST", { id: sshProbeId });
+check("ws ssh: probe host cleaned up", closed.ok);
+
+wsSocket.destroy();
 
 console.log(`\n${pass} passed, ${fail} failed`);
 server.close();

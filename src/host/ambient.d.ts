@@ -14,6 +14,7 @@ declare module "@deepseek-ai/cordis" {
     effect<T>(fn: (ctx: Context) => T, label?: string): void;
     webServer: {
       register(route: unknown): () => void;
+      registerUpgrade(route: unknown): () => void;
     };
     [key: string]: unknown;
   }
@@ -21,9 +22,15 @@ declare module "@deepseek-ai/cordis" {
 
 declare module "@deepseek-ai/dsh-host-webserver" {
   import type { IncomingMessage, ServerResponse } from "node:http";
+  import type { Duplex } from "node:stream";
   export interface WebRoute {
     kind?: "prefix";
     path: string;
     handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
+  }
+  /** 精确路径的 HTTP 升级注册项（协议协商与升级后的 socket 由 handler 自己拥有）。 */
+  export interface WebUpgradeRoute {
+    path: string;
+    handler: (req: IncomingMessage, socket: Duplex, head: Buffer) => void | Promise<void>;
   }
 }

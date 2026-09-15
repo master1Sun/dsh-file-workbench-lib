@@ -6,10 +6,13 @@
  * 导致「加了却在树上看不到」。
  *
  * 列表来自 `/ssh/hosts`，已由 host 抹去机密（只有 authType 与 hasSecret 标记）。
- * 状态另由 `/ssh/ping` 探测（复用已缓存连接跑一次 echo），供连接指示灯渲染。
+ * 状态由推送通道（WebSocket）下发：host 按固定间隔复用连接池的常驻连接跑一次 echo，
+ * 只推**变化**；即时的单次探测走同一通道的显式检查。两者共用一条长连接，
+ * 不再各开 REST 轮询（见 `composables/core/push.ts` 的说明）。
  */
 import { reactive, ref } from "vue";
 import * as api from "../composables/core/useApi";
+import { checkSshNow, onSshStatus, setSshWatchIds } from "../composables/core/push";
 
 /** 已配置的远端主机（无主机时为空数组，不代表加载失败）。 */
 export const sshHosts = ref<api.SshHostPublic[]>([]);
@@ -35,7 +38,14 @@ export function sshErrorOf(id: string): string {
 /** 探测单个主机并更新状态；返回是否在线。 */
 export async function pingSshHost(id: string): Promise<boolean> {
   sshStatus.value = { ...sshStatus.value, [id]: { state: "checking" } };
-  const r = await api.sshPing(id).catch(() => ({ alive: false, error: "" }));
+  // 走推送通道的显式检查（等价于原来的 POST /ssh/ping，但复用同一条长连接）。
+  const items = await checkSshNow([id]);
+  const r = items[id];
+  if (!r) {
+    // 推送通道无响应（超时）：如实退回「未探测」，不谎报在线/离线。
+    sshStatus.value = { ...sshStatus.value, [id]: { state: "unknown" } };
+    return false;
+  }
   sshStatus.value = {
     ...sshStatus.value,
     [id]: r.alive ? { state: "online" } : { state: "offline", error: r.error },
@@ -45,7 +55,12 @@ export async function pingSshHost(id: string): Promise<boolean> {
 
 /** 探测全部主机（并行；任一失败不阻断其余）。 */
 export async function refreshSshStatus(): Promise<void> {
-  await Promise.all(sshHosts.value.map((h) => pingSshHost(h.id).catch(() => false)));
+  const ids = sshHosts.value.map((h) => h.id);
+  if (!ids.length) return;
+  const next = { ...sshStatus.value };
+  for (const id of ids) next[id] = { state: "checking" };
+  sshStatus.value = next;
+  await checkSshNow(ids);
 }
 
 /** 重新拉取主机列表；接口不可用时静默降级为空列表（不阻断导航树渲染）。 */
@@ -58,6 +73,8 @@ export async function refreshSshHosts(): Promise<void> {
     for (const id of Object.keys(sshStatus.value)) {
       if (!alive.has(id)) delete sshStatus.value[id];
     }
+    // 增删主机后同步订阅集合：新增的立刻会被探测并回推，删除的不再占用探测。
+    syncSshWatch();
   } catch {
     sshHosts.value = [];
   } finally {
@@ -65,13 +82,32 @@ export async function refreshSshHosts(): Promise<void> {
   }
 }
 
-/** 连接状态轮询（模块级单例；无主机时跳过探测，不做无谓连接）。 */
-let poller: ReturnType<typeof setInterval> | null = null;
-export function startSshStatusPoller(intervalMs = 30_000): void {
-  if (poller) return;
-  poller = setInterval(() => {
-    if (sshHosts.value.length > 0) void refreshSshStatus();
-  }, intervalMs);
+/**
+ * 连接状态推送订阅（模块级单例，不随面板卸载退订 —— 状态本就是全局的）。
+ *
+ * 取代原先每 30s 一次的轮询：订阅一次后由 host 按自己的节奏探测并只推**变化**，
+ * 新接入的主机由 host 无条件回推一次，指示灯不必等一个采样周期。
+ * 无主机时订阅集合为空，推送通道会自动收起，不留空连接。
+ */
+let watching = false;
+export function startSshStatusWatch(): void {
+  if (!watching) {
+    watching = true;
+    onSshStatus((items) => {
+      const next = { ...sshStatus.value };
+      for (const [id, st] of Object.entries(items)) {
+        next[id] = st.alive ? { state: "online" } : { state: "offline", error: st.error };
+      }
+      sshStatus.value = next;
+    });
+  }
+  syncSshWatch();
+}
+
+/** 把当前主机集合同步给推送通道（增删主机、首次启动都要调）。 */
+function syncSshWatch(): void {
+  if (!watching) return;
+  setSshWatchIds("ssh-store", sshHosts.value.map((h) => h.id));
 }
 
 /** 解析远端引用串（`ssh://<hostId>/<remote>`）；非远端引用返回 null。 */
