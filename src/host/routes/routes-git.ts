@@ -26,9 +26,16 @@ import {
   guardWriteTarget,
   json,
   readBody,
+  remotePathExists,
+  remoteRmRf,
+  remoteRun,
+  REMOTE_EXEC_TIMEOUT_MS,
   requireAbsolute,
+  splitSshDir,
   type RouteMatcher,
 } from "./routes-util.js";
+import { shellQuoteSingle } from "../ssh/ssh-core.js";
+import { connFor } from "../ssh/ssh-hosts.js";
 
 const execFileP = promisify(execFile);
 
@@ -166,21 +173,12 @@ function porcelainStatus(xy: string): GitFileStatus {
 }
 
 /**
- * 计算某目录下各「紧邻子项」聚合的 git 状态（状态徽标数据）。
+ * 由 porcelain 输出聚合成各「紧邻子项」状态（本地与远端共用）。
  * - 子项内部（含更深路径）存在任何改动 → 该子项记为 modified；
  * - 同一子项多个改动取严重度更高者。
+ * `root` 为仓库根、`dir` 为浏览目录（均为归一化 POSIX 或本地路径）。
  */
-async function gitStatus(dir: string): Promise<GitDirStatus> {
-  const root = await findRepoRoot(dir);
-  if (!root) return { inRepo: false, branch: "", entries: {} };
-
-  const branch = await git(["branch", "--show-current"], root).catch(() => "");
-  const porcelain = await git(
-    ["status", "--porcelain=v1", "--untracked-files=normal"],
-    root,
-    "无法读取 git 状态",
-  );
-
+function statusFromPorcelain(porcelain: string, root: string, dir: string): GitDirStatus {
   const entries: Record<string, GitFileStatus> = {};
   const baseDir = dir.replace(/\\/g, "/");
   const baseRoot = root.replace(/\\/g, "/");
@@ -200,7 +198,48 @@ async function gitStatus(dir: string): Promise<GitDirStatus> {
     const st: GitFileStatus = segs.length > 1 ? "modified" : porcelainStatus(xy);
     if (RANK[st] > (RANK[entries[top]] ?? 0)) entries[top] = st;
   }
-  return { inRepo: true, branch, entries };
+  return { inRepo: true, branch: "", entries };
+}
+
+/** 由 porcelain 输出拆出面板三区（未暂存 / 已暂存 / 未跟踪），本地与远端共用。 */
+function panelFromPorcelain(porcelain: string): { unstaged: GitPanelFile[]; staged: GitPanelFile[]; untracked: GitPanelFile[] } {
+  const unstaged: GitPanelFile[] = [];
+  const staged: GitPanelFile[] = [];
+  const untracked: GitPanelFile[] = [];
+  for (const line of porcelain.split("\n")) {
+    if (!line.trim()) continue;
+    const xy = line.slice(0, 2);
+    const stripped = line.slice(3);
+    const arrow = stripped.indexOf(" -> ");
+    const rel = (arrow >= 0 ? stripped.slice(arrow + 4) : stripped).replace(/\\/g, "/");
+    const i = xy[0] ?? "";
+    const w = xy[1] ?? "";
+    if (i === "?" && w === "?") {
+      untracked.push({ path: rel, status: "untracked" });
+      continue;
+    }
+    const st = porcelainStatus(xy);
+    if (i !== " " && i !== "?") staged.push({ path: rel, status: st });
+    if (w !== " " && w !== "?") unstaged.push({ path: rel, status: st });
+  }
+  return { unstaged, staged, untracked };
+}
+
+/**
+ * 计算某目录下各「紧邻子项」聚合的 git 状态（状态徽标数据）。
+ */
+async function gitStatus(dir: string): Promise<GitDirStatus> {
+  const root = await findRepoRoot(dir);
+  if (!root) return { inRepo: false, branch: "", entries: {} };
+
+  const branch = await git(["branch", "--show-current"], root).catch(() => "");
+  const porcelain = await git(
+    ["status", "--porcelain=v1", "--untracked-files=normal"],
+    root,
+    "无法读取 git 状态",
+  );
+  const data = statusFromPorcelain(porcelain, root.replace(/\\/g, "/"), dir.replace(/\\/g, "/"));
+  return { ...data, branch };
 }
 
 /** 取给定绝对路径所属仓库根；非仓库目录抛 400。 */
@@ -311,26 +350,7 @@ async function gitPanel(dir: string): Promise<GitPanel> {
   if (!root) return { inRepo: false, repo: "", branch: "", unstaged: [], staged: [], untracked: [] };
   const branch = await git(["branch", "--show-current"], root).catch(() => "");
   const porcelain = await git(["status", "--porcelain=v1", "--untracked-files=normal"], root, "无法读取 git 状态");
-  const unstaged: GitPanelFile[] = [];
-  const staged: GitPanelFile[] = [];
-  const untracked: GitPanelFile[] = [];
-  for (const line of porcelain.split("\n")) {
-    if (!line.trim()) continue;
-    const xy = line.slice(0, 2);
-    const stripped = line.slice(3);
-    const arrow = stripped.indexOf(" -> ");
-    const rel = (arrow >= 0 ? stripped.slice(arrow + 4) : stripped).replace(/\\/g, "/");
-    const i = xy[0] ?? "";
-    const w = xy[1] ?? "";
-    if (i === "?" && w === "?") {
-      untracked.push({ path: rel, status: "untracked" });
-      continue;
-    }
-    const st = porcelainStatus(xy);
-    if (i !== " " && i !== "?") staged.push({ path: rel, status: st });
-    if (w !== " " && w !== "?") unstaged.push({ path: rel, status: st });
-  }
-  return { inRepo: true, repo: root, branch, unstaged, staged, untracked };
+  return { inRepo: true, repo: root, branch, ...panelFromPorcelain(porcelain) };
 }
 
 /** 最近提交历史。 */
@@ -500,6 +520,180 @@ async function gitGhListReleases(
   }
 }
 
+/* ── 远端（ssh://）git：通过 SSH exec 在远端服务器上执行 git CLI ── */
+
+/** 远端 git 命令的公共环境：无 tty 下防挂住（同本地 gitCloneExec 的考量）。 */
+const REMOTE_GIT_ENV = "export GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat;";
+
+/** 在远端目录执行一条 git 命令（cwd = 该 ssh 引用指向的远端目录）。 */
+function remoteGit(dir: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  const cmd = `${REMOTE_GIT_ENV} git ${args.map(shellQuoteSingle).join(" ")}`;
+  return remoteRun(dir, cmd);
+}
+
+/** 远端目录状态：一次性取仓库根 + 当前分支 + porcelain（非仓库 → inRepo:false）。 */
+async function remoteGitStatus(dir: string): Promise<GitDirStatus> {
+  const script =
+    `${REMOTE_GIT_ENV} git rev-parse --git-dir >/dev/null 2>&1 || exit 93;` +
+    `printf '@@TOP=%s\\n' "$(git rev-parse --show-toplevel)";` +
+    `printf '@@BR=%s\\n' "$(git branch --show-current)";` +
+    `git status --porcelain=v1 --untracked-files=normal`;
+  const r = await remoteRun(dir, script);
+  if (r.code !== 0) return { inRepo: false, branch: "", entries: {} };
+  const top = /^@@TOP=(.*)$/m.exec(r.stdout)?.[1]?.trim() ?? "";
+  const branch = /^@@BR=(.*)$/m.exec(r.stdout)?.[1]?.trim() ?? "";
+  const porcelain = r.stdout
+    .split("\n")
+    .filter((l) => !l.startsWith("@@TOP=") && !l.startsWith("@@BR="))
+    .join("\n");
+  return { ...statusFromPorcelain(porcelain, top, dir), branch };
+}
+
+/** 远端 Git 面板快照（复用 status 的组合命令，按面板三区拆分）。 */
+async function remoteGitPanel(dir: string): Promise<GitPanel> {
+  const script =
+    `${REMOTE_GIT_ENV} git rev-parse --git-dir >/dev/null 2>&1 || exit 93;` +
+    `printf '@@BR=%s\\n' "$(git branch --show-current)";` +
+    `git status --porcelain=v1 --untracked-files=normal`;
+  const r = await remoteRun(dir, script);
+  if (r.code !== 0) return { inRepo: false, repo: "", branch: "", unstaged: [], staged: [], untracked: [] };
+  const branch = /^@@BR=(.*)$/m.exec(r.stdout)?.[1]?.trim() ?? "";
+  const porcelain = r.stdout
+    .split("\n")
+    .filter((l) => !l.startsWith("@@BR="))
+    .join("\n");
+  return { inRepo: true, repo: dir, branch, ...panelFromPorcelain(porcelain) };
+}
+
+/** 远端提交历史（非仓库/无提交 → 空列表）。 */
+async function remoteGitLog(dir: string, count: number): Promise<GitLogItem[]> {
+  const r = await remoteGit(dir, ["log", `--max-count=${count}`, "--pretty=format:%h|%an|%ar|%s"]);
+  if (r.code !== 0 || !r.stdout) return [];
+  return r.stdout.split("\n").map((line) => {
+    const [hash, author, date, subject] = line.split("|");
+    return { hash: hash ?? "", author: author ?? "", date: date ?? "", subject: subject ?? "" };
+  });
+}
+
+/** 远端单路径改动文本：`git diff HEAD -- .`（以浏览目录为界，新文件未 add 时的语义与本地一致）。 */
+async function remoteGitDiff(dir: string): Promise<GitAction> {
+  const r = await remoteGit(dir, ["diff", "HEAD", "--no-color", "--", "."]);
+  if (r.code !== 0) {
+    return { ok: false, repo: dir, output: `（无可用改动或尚无历史提交）\n${r.stderr || r.stdout}` };
+  }
+  return { ok: true, repo: dir, output: r.stdout || `（该路径相对 HEAD 没有可用改动；新文件请先 git add 后再查看）\n.` };
+}
+
+/** 把 ssh 引用拆成「父目录引用 + 末段名」：add/discard/unstage 以父目录为 cwd、末段为 pathspec。 */
+function sshParentAndName(ref: string): { parentRef: string; name: string } {
+  const { hostId, remote } = splitSshDir(ref);
+  if (remote === "/") throw new FsError("bad-request", "远端根目录不支持该操作", 400);
+  const cut = remote.lastIndexOf("/");
+  const parent = cut <= 0 ? "/" : remote.slice(0, cut);
+  const name = remote.slice(cut + 1);
+  return { parentRef: `ssh://${hostId}${parent}`, name };
+}
+
+/** 远端 git add：以父目录为 cwd，用末段名做 pathspec（git 会自动解析到所属仓库）。 */
+async function remoteGitAdd(ref: string): Promise<GitAction> {
+  const { parentRef, name } = sshParentAndName(ref);
+  const r = await remoteGit(parentRef, ["add", "--", name]);
+  if (r.code !== 0) throw new FsError("fs-error", `git add 失败: ${r.stderr || r.stdout}`, 400);
+  return { ok: true, repo: ref, output: `staged ${name}` };
+}
+
+/** 远端 git restore --staged。 */
+async function remoteGitUnstage(ref: string): Promise<GitAction> {
+  const { parentRef, name } = sshParentAndName(ref);
+  const r = await remoteGit(parentRef, ["restore", "--staged", "--", name]);
+  if (r.code !== 0) throw new FsError("fs-error", `取消暂存失败: ${r.stderr || r.stdout}`, 400);
+  return { ok: true, repo: ref, output: `unstaged ${name}` };
+}
+
+/** 远端 git checkout -- <path>（丢弃工作区改动）。 */
+async function remoteGitDiscard(ref: string): Promise<GitAction> {
+  const { parentRef, name } = sshParentAndName(ref);
+  const r = await remoteGit(parentRef, ["checkout", "--", name]);
+  if (r.code !== 0) throw new FsError("fs-error", `还原失败: ${r.stderr || r.stdout}`, 400);
+  return { ok: true, repo: ref, output: `discarded ${name}` };
+}
+
+/** 远端 git commit（commit 不带 pathspec，任意子目录提交整个暂存区）。 */
+async function remoteGitCommit(ref: string, message: string): Promise<GitAction> {
+  const r = await remoteGit(ref, ["commit", "-m", message]);
+  if (r.code !== 0) {
+    throw new FsError("fs-error", `提交失败（可能需要先配置 user.name/user.email）: ${r.stderr || r.stdout}`, 400);
+  }
+  const hash = await remoteGit(ref, ["rev-parse", "--short", "HEAD"]).catch(() => ({ stdout: "" }));
+  return { ok: true, repo: ref, output: hash.stdout.trim() };
+}
+
+/** 远端分支操作：create / checkout / delete。 */
+async function remoteGitBranchOp(
+  ref: string,
+  action: "create" | "checkout" | "delete",
+  name: string,
+): Promise<GitAction> {
+  if (!name) throw new FsError("bad-request", "缺少分支名", 400);
+  if (action === "create") {
+    const exists = await remoteGit(ref, ["branch", "--list", name]);
+    if (exists.code === 0 && exists.stdout.trim()) throw new FsError("bad-request", `分支已存在: ${name}`, 409);
+    const r = await remoteGit(ref, ["branch", name]);
+    if (r.code !== 0) throw new FsError("fs-error", `创建分支失败: ${r.stderr || r.stdout}`, 400);
+    return { ok: true, repo: ref, output: `created branch ${name}` };
+  }
+  if (action === "checkout") {
+    const r = await remoteGit(ref, ["checkout", name]);
+    if (r.code !== 0) throw new FsError("fs-error", `切换分支失败: ${r.stderr || r.stdout}`, 400);
+    return { ok: true, repo: ref, output: `switched to ${name}` };
+  }
+  const r = await remoteGit(ref, ["branch", "-D", name]);
+  if (r.code !== 0) throw new FsError("fs-error", `删除分支失败: ${r.stderr || r.stdout}`, 400);
+  return { ok: true, repo: ref, output: `deleted branch ${name}` };
+}
+
+/** 远端 fetch / pull / push。 */
+async function remoteGitSync(ref: string, action: "fetch" | "pull" | "push"): Promise<GitAction> {
+  const r = await remoteGit(ref, [action]);
+  return { ok: r.code === 0, repo: ref, output: r.stderr || r.stdout || `${action} 完成` };
+}
+
+/**
+ * 远端 ignore：读仓库根 `.gitignore`（SFTP/ExecFs 文件语义），幂等追加后原子写回。
+ * 与本地实现语义一致，但路径判断全部走 POSIX（远端必然是 POSIX 文件系统）。
+ */
+async function remoteGitIgnore(ref: string): Promise<GitAction> {
+  const { hostId, remote } = splitSshDir(ref);
+  const top = await remoteGit(ref, ["rev-parse", "--show-toplevel"]);
+  if (top.code !== 0) throw new FsError("bad-request", `目标不在任何 git 仓库中: ${ref}`, 400);
+  const root = top.stdout.trim();
+  const conn = await connFor(hostId);
+  const fs = await conn.fs();
+  const rel = posix.relative(root, remote).replace(/^\.\//, "").replace(/\\/g, "/");
+  if (!rel || rel.startsWith("..")) throw new FsError("bad-request", `路径不在仓库内: ${ref}`, 400);
+  const giPath = `${root}/.gitignore`;
+  let content = "";
+  try {
+    content = await fs.readText(giPath);
+  } catch {
+    /* 文件尚不存在，下面会新建 */
+  }
+  const lines = content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.includes(rel)) return { ok: true, repo: ref, output: `already ignored ${rel}` };
+  const needSep = content.length > 0 && !content.endsWith("\n");
+  await fs.writeFileAtomic(giPath, `${needSep ? "\n" : ""}${rel}\n`);
+  return { ok: true, repo: ref, output: `ignored ${rel}` };
+}
+
+/** 远端命令台：先确认在仓库内，再在当前目录执行任意 git 命令。 */
+async function remoteGitRunCmd(ref: string, args: string[]): Promise<GitRunResult> {
+  if (!args.length) throw new FsError("bad-request", "no command", 400);
+  const inRepo = await remoteGit(ref, ["rev-parse", "--git-dir"]);
+  if (inRepo.code !== 0) throw new FsError("bad-request", `不在任何 git 仓库内: ${ref}`, 400);
+  const r = await remoteGit(ref, args);
+  return { code: r.code, stdout: r.stdout, stderr: r.stderr };
+}
+
 /** 资源路由：git 只读状态 / diff 不做写保护；add/commit/discard 拒绝受保护区域。 */
 export const gitResource: RouteMatcher = async (req, res, seg, q, method, host) => {
   void host;
@@ -507,29 +701,68 @@ export const gitResource: RouteMatcher = async (req, res, seg, q, method, host) 
   const op = seg[1];
 
   /*
-   * 远端（ssh）引用短路：首版不支持在远端目录上跑 git，但前端刷新徽标时会把当前
-   * 目录（可能是 `ssh://<id>/<path>`）直接带过来。若落到下面的 requireAbsolute，
-   * 会被报成 400「不是绝对路径」——语义完全不对，且每次进入远端目录都弹一次错。
-   * 这里统一：只读接口按「非仓库」回空结果（徽标 / Git 栏 / 面板都不显示），写操作明确 501。
+   * 远端（ssh://）引用：不再是「一律不支持」——只读状态与写操作都改为通过 SSH exec
+   * 在远端服务器上执行 git（见 REMOTE_GIT_ENV 上方各 remoteGit* 辅助）。若落到下面的
+   * requireAbsolute，远端引用会被报成 400「不是绝对路径」，语义完全不对。
+   * 仅 gh-release（依赖本机 GitHub 凭据）等少数能力在远端保持 skipped/501。
    */
   const rawPath = (q.get("path") ?? "").trim();
   if (rawPath.startsWith("ssh://")) {
     if (method === "GET") {
       if (op === "status") {
-        return (json(res, 200, { ok: true, data: { inRepo: false, branch: "", entries: {} } }), true);
+        return (json(res, 200, { ok: true, data: await remoteGitStatus(rawPath) }), true);
       }
       if (op === "panel") {
-        return (
-          json(res, 200, { ok: true, data: { inRepo: false, repo: "", branch: "", unstaged: [], staged: [], untracked: [] } }),
-          true
-        );
+        return (json(res, 200, { ok: true, data: await remoteGitPanel(rawPath) }), true);
       }
-      if (op === "log") return (json(res, 200, { ok: true, data: [] }), true);
-      if (op === "diff") return (json(res, 200, { ok: true, data: { ok: false, repo: "", output: "" } }), true);
+      if (op === "log") {
+        const count = Number(q.get("count") ?? "20") || 20;
+        return (json(res, 200, { ok: true, data: await remoteGitLog(rawPath, count) }), true);
+      }
+      if (op === "diff") {
+        return (json(res, 200, { ok: true, data: await remoteGitDiff(rawPath) }), true);
+      }
       if (op === "gh-releases") return (json(res, 200, { ok: true, data: { list: [], skipped: "remote" } }), true);
       return (json(res, 200, { ok: true, data: { inRepo: false } }), true);
     }
-    return (json(res, 501, { ok: false, error: "git is not supported on remote (ssh) paths" }), true);
+    if (method === "POST" && seg.length === 2) {
+      const body = (await readBody(req)) as { path?: string; message?: string; action?: string; name?: string; tag?: string; body?: string; args?: unknown[] } | null;
+      const path = (body?.path ?? "").trim();
+      if (!path.startsWith("ssh://")) return (json(res, 400, { ok: false, error: "ssh reference required" }), true);
+      if (op === "add") return (json(res, 200, { ok: true, data: await remoteGitAdd(path) }), true);
+      if (op === "unstage") return (json(res, 200, { ok: true, data: await remoteGitUnstage(path) }), true);
+      if (op === "ignore") return (json(res, 200, { ok: true, data: await remoteGitIgnore(path) }), true);
+      if (op === "commit") {
+        const message = (body?.message as string)?.trim() ?? "";
+        if (!message) return (json(res, 400, { ok: false, error: "commit message required" }), true);
+        return (json(res, 200, { ok: true, data: await remoteGitCommit(path, message) }), true);
+      }
+      if (op === "discard") return (json(res, 200, { ok: true, data: await remoteGitDiscard(path) }), true);
+      if (op === "branch") {
+        return (
+          json(res, 200, {
+            ok: true,
+            data: await remoteGitBranchOp(path, (body?.action as "create" | "checkout" | "delete") ?? "checkout", (body?.name as string) ?? ""),
+          }),
+          true
+        );
+      }
+      if (op === "sync") {
+        return (
+          json(res, 200, {
+            ok: true,
+            data: await remoteGitSync(path, body?.action === "fetch" || body?.action === "push" ? body.action : "pull"),
+          }),
+          true
+        );
+      }
+      if (op === "run") {
+        const args = (Array.isArray(body?.args) ? body.args : []).map((a: unknown) => String(a)).filter(Boolean);
+        return (json(res, 200, { ok: true, data: await remoteGitRunCmd(path, args) }), true);
+      }
+      return (json(res, 501, { ok: false, error: `git op "${op}" is not supported on remote (ssh) paths` }), true);
+    }
+    return false;
   }
 
   // —— 目录 git 状态（徽标） ——
@@ -594,7 +827,11 @@ export const gitResource: RouteMatcher = async (req, res, seg, q, method, host) 
     } | null;
     const url = (body?.url ?? "").trim();
     if (!url) return (json(res, 400, { ok: false, error: "url required" }), true);
-    const dir = requireAbsolute((body?.dir ?? "").trim());
+    const rawDir = (body?.dir ?? "").trim();
+    // 目标父目录可以是本机绝对路径，也可以是 `ssh://<hostId>/<remote>` 远端引用 ——
+    // 后者改为**在远端服务器上执行 git clone**（复用 SSH 连接池），而不是在本机落盘。
+    const isRemote = rawDir.startsWith("ssh://");
+    const dir = isRemote ? rawDir : requireAbsolute(rawDir);
     // 名字：显式传入的以传入为准（仍要过 sanitize），否则按 URL 推导。
     const givenName = (body?.name ?? "").trim();
     const name = givenName ? sanitizeRepoDirName(givenName) : deriveRepoDirName(url);
@@ -606,6 +843,31 @@ export const gitResource: RouteMatcher = async (req, res, seg, q, method, host) 
         }),
         true
       );
+    }
+    if (isRemote) {
+      const { remote, hostId } = splitSshDir(dir);
+      const targetRef = `ssh://${hostId}${remote === "/" ? "" : remote}/${name}`;
+      // 远端不套 guardWriteTarget：目标由远端引用语义决定，本地工作区 containment 不适用
+      // （与 routes-fs 的 guardWrite 对非 local 引用直接放行一致）。
+      if (await remotePathExists(dir, name)) {
+        return (json(res, 409, { ok: false, error: `target already exists: ${targetRef}` }), true);
+      }
+      const args = ["clone"];
+      const depth = Number(body?.depth ?? 0);
+      if (Number.isFinite(depth) && depth > 0) args.push("--depth", String(Math.floor(depth)));
+      // GIT_TERMINAL_PROMPT=0 / GIT_PAGER=cat：远端 exec 同样无 tty，可交互提示会挂住。
+      // 名字已过 sanitize（不含分隔符），仍统一走单引号转义，URL 亦然。
+      const cmd = `env GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat git ${args.map(shellQuoteSingle).join(" ")} -- ${shellQuoteSingle(url)} ${shellQuoteSingle(name)}`;
+      const r = await remoteRun(dir, cmd);
+      if (r.code !== 0) {
+        await remoteRmRf(dir, name);
+        const reason =
+          r.code === 124
+            ? `git clone 超时（${Math.round(REMOTE_EXEC_TIMEOUT_MS / 1000)}s，已终止）`
+            : r.stderr || r.stdout || `exit ${r.code}`;
+        throw new FsError("fs-error", `git clone 失败: ${reason}`, 400);
+      }
+      return (json(res, 200, { ok: true, data: { path: targetRef, name, stdout: r.stdout, stderr: r.stderr } }), true);
     }
     const target = join(dir, name);
     // 先守卫再探测：受保护 / 工作区外直接 403，不必泄露「那里有没有东西」。

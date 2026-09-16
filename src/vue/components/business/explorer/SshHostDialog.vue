@@ -2,12 +2,21 @@
   <el-dialog
     v-model="visible"
     class="fw-ssh-dlg"
-    :title="editing ? t('sshEditTitle') : t('sshNewHost')"
     width="420px"
     :close-on-click-modal="true"
     append-to-body
     @closed="onClosed"
   >
+    <!-- 头部与「克隆 Git / 检出 SVN」弹窗同款：彩色徽标 + 标题/副标题 -->
+    <template #header>
+      <div class="fw-clone-head">
+        <span class="fw-clone-badge"><icon name="hardDrive" :size="20" /></span>
+        <div class="fw-clone-headtext">
+          <div class="fw-clone-headtitle">{{ editing ? t('sshEditTitle') : t('sshNewHost') }}</div>
+          <div class="fw-clone-headsub">{{ t('sshHostCaption') }}</div>
+        </div>
+      </div>
+    </template>
     <div class="fw-ssh-dlg-body">
       <label class="fw-ssh-field">
         <span class="fw-ssh-lb">{{ t('sshName') }}</span>
@@ -56,6 +65,7 @@
 import { computed, reactive, ref, watch } from "vue";
 import { useI18n } from "../../../composables/core/i18n";
 import { toastError, toastOk, toastWarning } from "../../../composables/core/toast";
+import Icon from "../../common/Icon.vue";
 import * as api from "../../../composables/core/useApi";
 import {
   sshHosts,
@@ -229,23 +239,48 @@ async function save(): Promise<void> {
 }
 </script>
 
+<style src="../repo/clone-shared.css"></style>
 <style scoped>
+/* SSH 主机弹窗与「克隆 Git / 检出 SVN」弹窗同一套视觉：深色面板 + 徽标头部 +
+   同款输入框/按钮。强调色用 SSH 绿；头部/标签类直接复用 clone-shared.css 的
+   .fw-clone-head / .fw-clone-badge。 */
 :global(.fw-ssh-dlg.el-dialog) {
   --el-dialog-bg-color: var(--dsh-bg2, #161b22);
   --el-text-color-primary: var(--dsh-fg, #c9d1d9);
+  --el-text-color-regular: var(--dsh-fg, #c9d1d9);
   --el-border-color: var(--dsh-border, #30363d);
   --el-border-radius-base: 8px;
+  /* 控件尺寸与克隆弹窗对齐：输入框 / 下拉 / 按钮统一 32px。 */
+  --el-component-size-small: 32px;
+  /* clone-shared 的强调色变量：SSH 用绿色。 */
+  --clone-accent: var(--dsh-accent, #3fb950);
+  --clone-accent-weak: rgba(63, 185, 80, 0.16);
+  --clone-accent-border: rgba(63, 185, 80, 0.45);
   border: 1px solid var(--dsh-border, #30363d);
-  border-radius: 8px;
+  border-radius: 12px;
   overflow: hidden;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.6);
+  padding: 0;
 }
-:global(.fw-ssh-dlg .el-dialog__header) { margin-right: 0; padding: 12px 16px; border-bottom: 1px solid var(--dsh-border, #30363d); }
-:global(.fw-ssh-dlg .el-dialog__body) { padding: 14px 16px; }
-.fw-ssh-dlg-body { display: flex; flex-direction: column; gap: 12px; }
-.fw-ssh-field { display: flex; flex-direction: column; gap: 4px; }
-.fw-ssh-lb { font-size: calc(11px * var(--dsh-fs-scale, 1)); color: var(--dsh-fg-weak, #8b949e); }
-.fw-ssh-addr { display: flex; align-items: center; gap: 6px; }
+:global(.fw-ssh-dlg .el-dialog__header) {
+  margin-right: 0;
+  padding: 16px 20px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+:global(.fw-ssh-dlg .el-dialog__body) {
+  padding: 8px 20px 16px;
+}
+.fw-ssh-dlg-body { display: flex; flex-direction: column; gap: 16px; }
+.fw-ssh-field { display: flex; flex-direction: column; gap: 7px; }
+.fw-ssh-lb {
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  color: var(--dsh-fg-weak, #8b949e);
+}
+.fw-ssh-addr { display: flex; align-items: center; gap: 8px; }
 .fw-ssh-user { width: 84px; flex: none; }
 .fw-ssh-host { flex: 1 1 auto; min-width: 0; }
 .fw-ssh-port { width: 62px; flex: none; }
@@ -253,6 +288,76 @@ async function save(): Promise<void> {
 .fw-ssh-secret { flex: 1 1 auto; min-width: 0; }
 .fw-ssh-at { color: var(--dsh-fg-weak, #8b949e); flex: none; }
 .fw-ssh-err { font-size: calc(12px * var(--dsh-fs-scale, 1)); color: #f85149; }
+
+/* 输入框：与 .fw-clone-input 同观感（深底、细描边、聚焦强调色光晕） */
+:global(.fw-ssh-dlg .el-input__wrapper) {
+  background: var(--dsh-bg, #0d1117);
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px var(--dsh-border, #30363d) inset;
+  transition: box-shadow 0.15s;
+}
+:global(.fw-ssh-dlg .el-input__wrapper:hover:not(.is-focus)) {
+  box-shadow: 0 0 0 1px var(--dsh-fg-weak, #8b949e) inset;
+}
+:global(.fw-ssh-dlg .el-input__wrapper.is-focus) {
+  box-shadow: 0 0 0 1px var(--clone-accent) inset, 0 0 0 3px var(--clone-accent-weak);
+}
+:global(.fw-ssh-dlg .el-input__inner) {
+  color: var(--dsh-fg, #c9d1d9);
+}
+:global(.fw-ssh-dlg .el-input__inner::placeholder) {
+  color: var(--dsh-fg-weak, #8b949e);
+  opacity: 0.7;
+}
+/* 下拉框：同输入框描边/聚焦语义（EP 的 min-height 写死，需单独覆盖尺寸）。 */
+:global(.fw-ssh-dlg .el-select--small .el-select__wrapper) {
+  min-height: 32px;
+  background: var(--dsh-bg, #0d1117);
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px var(--dsh-border, #30363d) inset;
+}
+:global(.fw-ssh-dlg .el-select--small .el-select__wrapper.is-hovering:not(.is-focused)) {
+  box-shadow: 0 0 0 1px var(--dsh-fg-weak, #8b949e) inset;
+}
+:global(.fw-ssh-dlg .el-select--small .el-select__wrapper.is-focused) {
+  box-shadow: 0 0 0 1px var(--clone-accent) inset, 0 0 0 3px var(--clone-accent-weak);
+}
+/* 页脚：flex + gap 保证按钮间距（EP 的 .el-button+.el-button margin 规则会被
+   上面覆盖出来的样式环境吞掉，显式给 gap 更稳）。 */
+:global(.fw-ssh-dlg .el-dialog__footer) {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 20px 16px;
+}
+/* 按钮：默认档与 .fw-clone-btn 同观感，主档强调色实底（EP 高度走 --el-button-size）。 */
+:global(.fw-ssh-dlg .el-button--small) {
+  --el-button-size: 32px;
+  height: 32px;
+  min-width: 84px;
+  border-radius: 8px;
+  background: var(--dsh-bg, #0d1117);
+  border: 1px solid var(--dsh-border, #30363d);
+  color: var(--dsh-fg, #c9d1d9);
+  font-weight: 500;
+  transition: border-color 0.15s, color 0.15s, filter 0.15s;
+}
+:global(.fw-ssh-dlg .el-button--small:not(.el-button--primary):hover) {
+  border-color: var(--clone-accent);
+  color: var(--clone-accent);
+  background: var(--dsh-bg, #0d1117);
+}
+:global(.fw-ssh-dlg .el-button--small.el-button--primary) {
+  background: var(--clone-accent);
+  border-color: var(--clone-accent);
+  color: #fff;
+  font-weight: 600;
+}
+:global(.fw-ssh-dlg .el-button--small.el-button--primary:hover:not(.is-disabled)) {
+  background: var(--clone-accent);
+  filter: brightness(1.08);
+  color: #fff;
+}
 /* el-select 下拉面板 Teleport 到 body：抬升层级并沿用项目主题色。 */
 :global(.fw-set-popper) {
   z-index: 2147483200 !important;

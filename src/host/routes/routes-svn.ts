@@ -16,7 +16,8 @@ import { dirname, join } from "node:path";
 
 import { deriveRepoDirName, sanitizeRepoDirName } from "../../shared/repo.js";
 import { FsError, isProtectedPath } from "../fs/fs-tree.js";
-import { guardWriteTarget, json, readBody, requireAbsolute, type RouteMatcher } from "./routes-util.js";
+import { guardWriteTarget, json, readBody, remotePathExists, remoteRmRf, remoteRun, requireAbsolute, splitSshDir, type RouteMatcher } from "./routes-util.js";
+import { shellQuoteSingle } from "../ssh/ssh-core.js";
 
 const execFileP = promisify(execFile);
 
@@ -166,24 +167,67 @@ async function checkSvn(): Promise<boolean> {
   return (await resolveSvnExe()) !== null;
 }
 
+/** 解析 `svn info` 文本为关键字段（本地与远端共用；标签查表见 SVN_INFO_LABELS）。 */
+function parseSvnInfoFields(text: string): { url: string | null; revision: string | null; relativeUrl: string | null } {
+  const out: { url: string | null; revision: string | null; relativeUrl: string | null } = {
+    url: null,
+    revision: null,
+    relativeUrl: null,
+  };
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(/^([^:]+):\s*(.*)$/);
+    if (!m) continue;
+    const field = SVN_INFO_LABELS[m[1].trim().toLowerCase()];
+    if (!field || out[field]) continue;
+    out[field] = m[2].trim() || null;
+  }
+  return out;
+}
+
+/** 远端 svn info：先探远端 svn CLI 是否存在，再取工作副本信息（非工作副本 → inRepo:false）。 */
+async function remoteSvnInfo(dir: string): Promise<{
+  inRepo: boolean;
+  root: string | null;
+  svnAvailable: boolean;
+  url: string | null;
+  revision: string | null;
+  relativeUrl: string | null;
+}> {
+  const data = { inRepo: false, root: null as string | null, svnAvailable: false, url: null as string | null, revision: null as string | null, relativeUrl: null as string | null };
+  const which = await remoteRun(dir, "command -v svn >/dev/null 2>&1");
+  if (which.code !== 0) return data;
+  data.svnAvailable = true;
+  const r = await remoteRun(dir, "svn info --non-interactive");
+  if (r.code !== 0) return data;
+  data.inRepo = true;
+  const fields = parseSvnInfoFields(r.stdout);
+  data.url = fields.url;
+  data.revision = fields.revision;
+  data.relativeUrl = fields.relativeUrl;
+  return data;
+}
+
 export const svnResource: RouteMatcher = async (req, res, seg, q, method, host) => {
   void host;
   if (seg[0] !== "svn") return false;
   const op = seg[1];
 
-  // 远端（ssh）引用短路：与 git 同理，避免 requireAbsolute 把远端引用报成「不是绝对路径」。
+  // 远端（ssh）引用：info 与 run 改为在远端执行 svn CLI（与远端 git 同一套 SSH exec 通道）。
   const rawPath = (q.get("path") ?? "").trim();
   if (rawPath.startsWith("ssh://")) {
     if (method === "GET" && op === "info") {
-      return (
-        json(res, 200, {
-          ok: true,
-          data: { inRepo: false, root: null, svnAvailable: false, url: null, revision: null, relativeUrl: null },
-        }),
-        true
-      );
+      return (json(res, 200, { ok: true, data: await remoteSvnInfo(rawPath) }), true);
     }
-    return (json(res, 501, { ok: false, error: "svn is not supported on remote (ssh) paths" }), true);
+    if (method === "POST" && op === "run") {
+      const body = (await readBody(req)) as { path?: string; args?: unknown[] } | null;
+      const path = (body?.path ?? "").trim();
+      if (!path.startsWith("ssh://")) return (json(res, 400, { ok: false, error: "ssh reference required" }), true);
+      const args = (Array.isArray(body?.args) ? body.args : []).map((a: unknown) => String(a)).filter(Boolean);
+      if (!args.length) return (json(res, 400, { ok: false, error: "no command" }), true);
+      const data = await remoteRun(path, `svn ${args.map(shellQuoteSingle).join(" ")}`);
+      return (json(res, 200, { ok: true, data }), true);
+    }
+    return (json(res, 501, { ok: false, error: `svn op "${op}" is not supported on remote (ssh) paths` }), true);
   }
 
   // —— 探测工作副本 + 环境（GET /svn/info） ——
@@ -201,16 +245,11 @@ export const svnResource: RouteMatcher = async (req, res, seg, q, method, host) 
     } = { inRepo: !!root, root, svnAvailable: available, url: null, revision: null, relativeUrl: null };
     if (root && available) {
       try {
-        // 兼容 svn 1.8（无 --show-item）：读完整 info 输出后解析标签行。
-        // svn 1.8 中文标签为 `版本:` / `正确的相对 URL:`，与英文不同名，故走 SVN_INFO_LABELS 查表。
-        const text = await svn(["info"], root, "无法读取仓库信息");
-        for (const line of text.split(/\r?\n/)) {
-          const m = line.match(/^([^:]+):\s*(.*)$/);
-          if (!m) continue;
-          const field = SVN_INFO_LABELS[m[1].trim().toLowerCase()];
-          if (!field || data[field]) continue;
-          data[field] = m[2].trim() || null;
-        }
+        // 兼容 svn 1.8（无 --show-item）：读完整 info 输出后按标签查表解析（本地/远端共用）。
+        const fields = parseSvnInfoFields(await svn(["info"], root, "无法读取仓库信息"));
+        data.url = fields.url;
+        data.revision = fields.revision;
+        data.relativeUrl = fields.relativeUrl;
       } catch {
         /* 信息读取失败不影响判定 */
       }
@@ -218,7 +257,7 @@ export const svnResource: RouteMatcher = async (req, res, seg, q, method, host) 
     return (json(res, 200, { ok: true, data }), true);
   }
 
-  // —— 检出工作副本（POST /svn/checkout）：把远端仓库拉到本地**新目录** ——
+  // —— 检出工作副本（POST /svn/checkout）：把远端仓库拉到本地/远端**新目录** ——
   if (op === "checkout" && method === "POST" && seg.length === 2) {
     const body = (await readBody(req)) as {
       url?: string;
@@ -229,7 +268,11 @@ export const svnResource: RouteMatcher = async (req, res, seg, q, method, host) 
     } | null;
     const rawUrl = (body?.url ?? "").trim();
     if (!rawUrl) return (json(res, 400, { ok: false, error: "url required" }), true);
-    const dir = requireAbsolute((body?.dir ?? "").trim());
+    const rawDir = (body?.dir ?? "").trim();
+    // 目标父目录可以是本机绝对路径，也可以是 `ssh://<hostId>/<remote>` 远端引用 ——
+    // 后者改为**在远端服务器上执行 svn checkout**（与远端 git clone 同一套 SSH exec 通道）。
+    const isRemote = rawDir.startsWith("ssh://");
+    const dir = isRemote ? rawDir : requireAbsolute(rawDir);
     const givenName = (body?.name ?? "").trim();
     const name = givenName ? sanitizeRepoDirName(givenName) : deriveRepoDirName(rawUrl);
     if (!name) {
@@ -240,6 +283,24 @@ export const svnResource: RouteMatcher = async (req, res, seg, q, method, host) 
         }),
         true
       );
+    }
+    if (isRemote) {
+      const { remote, hostId } = splitSshDir(dir);
+      const targetRef = `ssh://${hostId}${remote === "/" ? "" : remote}/${name}`;
+      if (await remotePathExists(dir, name)) {
+        return (json(res, 409, { ok: false, error: `target already exists: ${targetRef}` }), true);
+      }
+      const args = ["checkout", "--non-interactive"];
+      const rev = (body?.revision ?? "").trim();
+      if (/^-?\d+$/.test(rev)) args.push("-r", rev);
+      args.push("--", rawUrl, name);
+      const cmd = `svn ${args.map(shellQuoteSingle).join(" ")}`;
+      const r = await remoteRun(dir, cmd);
+      if (r.code !== 0) {
+        await remoteRmRf(dir, name);
+        throw new FsError("fs-error", `svn checkout 失败: ${r.stderr || r.stdout || `exit ${r.code}`}`, 400);
+      }
+      return (json(res, 200, { ok: true, data: { path: targetRef, name, stdout: r.stdout, stderr: r.stderr } }), true);
     }
     const target = join(dir, name);
     await guardWriteTarget(body?.key, target);

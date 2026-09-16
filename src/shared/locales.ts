@@ -16,6 +16,11 @@ export const zh = {
   // VS Code 编辑器面板
   tabVSCode: "文件编辑器",
   tabVSCodeDesc: "浏览项目目录，多标签编辑代码并高亮语法",
+
+  // tab 下拉菜单（sidebar.right.tab.menu.item 追加项）
+  tabMenuOpenInEditor: "在文件编辑器中打开工作区",
+  tabMenuNewEditor: "新建编辑器窗口",
+  tabMenuAnotherEditor: "再开一个编辑器窗口",
   vsNoProject: "未选择项目目录",
   vsOpenFolder: "打开文件夹",
   vsFolderPath: "请输入项目目录绝对路径",
@@ -278,9 +283,9 @@ export const zh = {
   sshAuthKey: "私钥认证",
   sshPassword: "SSH 口令",
   sshKeyPath: "私钥文件路径（支持 ~）",
-  sshSaveAdd: "添加并连接",
+  sshSaveAdd: "添加",
   sshTest: "测试",
-  sshTestConn: "测试连接",
+  sshTestConn: "测试",
   sshDelete: "删除",
   sshDeleteConfirm: "再点一次确认删除",
   sshTestOk: "SSH 连接成功",
@@ -290,6 +295,7 @@ export const zh = {
   sshNewHost: "添加 SSH 主机",
   sshEdit: "编辑",
   sshEditTitle: "编辑 SSH 主机",
+  sshHostCaption: "连接远程服务器，浏览文件与登录终端",
   sshUpdateSuccess: "主机已更新",
   sshSaveEdit: "保存修改",
   sshKeepSecret: "（留空则沿用原口令）",
@@ -785,6 +791,11 @@ export const en: Record<CopyKey, string> = {
   // VS Code editor pane
   tabVSCode: "File Editor",
   tabVSCodeDesc: "Open a code editor in the right sidebar: browse project tree, multi-tab editing, syntax highlight",
+
+  // Tab dropdown menu (extras appended via sidebar.right.tab.menu.item)
+  tabMenuOpenInEditor: "Open Workspace in File Editor",
+  tabMenuNewEditor: "New Editor Window",
+  tabMenuAnotherEditor: "Open Another Editor Window",
   vsNoProject: "No project folder selected",
   vsOpenFolder: "Open Folder",
   vsFolderPath: "Enter the absolute path of the project folder",
@@ -1052,9 +1063,9 @@ export const en: Record<CopyKey, string> = {
   sshAuthKey: "Private key auth",
   sshPassword: "SSH password",
   sshKeyPath: "Private key path (supports ~)",
-  sshSaveAdd: "Add & Connect",
+  sshSaveAdd: "Add",
   sshTest: "Test",
-  sshTestConn: "Test Connection",
+  sshTestConn: "Test",
   sshDelete: "Delete",
   sshDeleteConfirm: "Click again to confirm",
   sshTestOk: "SSH connection OK",
@@ -1064,6 +1075,7 @@ export const en: Record<CopyKey, string> = {
   sshNewHost: "Add SSH Host",
   sshEdit: "Edit",
   sshEditTitle: "Edit SSH Host",
+  sshHostCaption: "Connect a remote server for file browsing and terminal",
   sshUpdateSuccess: "Host updated",
   sshSaveEdit: "Save Changes",
   sshKeepSecret: "(leave blank to keep existing password)",

@@ -16,6 +16,9 @@ import type { ApiResponse } from "../../shared/types.js";
 import { FsError, isProtectedPath, isWithin, requireAbsolute } from "../fs/fs-tree.js";
 import { getRoot } from "../store/root-store.js";
 import { getPersistKey } from "../store/workbench-store.js";
+import { parseRef } from "../fs/fs-provider.js";
+import { connFor } from "../ssh/ssh-hosts.js";
+import { shellQuoteSingle } from "../ssh/ssh-core.js";
 
 /** host 端用于解析子 agent / 会话等运行时服务的能力；资源模块按需使用。 */
 export interface RouteHost {
@@ -274,3 +277,68 @@ export async function assertFile(path: string): Promise<void> {
 }
 
 export { FsError };
+
+/* ── 远端（ssh://）目录上的命令执行辅助：git clone / svn checkout 共用 ── */
+
+/** 远端长命令（克隆/检出）的超时与输出上限，语义与本地 gitCloneExec 对齐。 */
+export const REMOTE_EXEC_TIMEOUT_MS = 10 * 60 * 1000;
+const REMOTE_EXEC_MAX_STDOUT = 4 * 1024 * 1024;
+
+/** 解析 `ssh://<hostId>/<remoteAbsPath>` 目录引用；非 ssh 引用抛 400。 */
+export function splitSshDir(dir: string): { hostId: string; remote: string } {
+  const ref = parseRef(dir);
+  if (ref.conn !== "ssh" || !ref.hostId) {
+    throw new FsError("bad-request", `"${dir}" is not a valid ssh directory reference`, 400);
+  }
+  // 远端 POSIX 归一：折叠多余斜杠、目录去尾斜杠（根除外）——与 SftpFsProvider 的约定一致。
+  let remote = ref.path.replace(/\/{2,}/g, "/");
+  if (remote.length > 1) remote = remote.replace(/\/+$/, "");
+  return { hostId: ref.hostId, remote };
+}
+
+/**
+ * 在远端目录执行一条命令（git clone / svn checkout 等长命令）。
+ *
+ * `cwd` 由 ssh-core 的 buildRemoteCommand 落成 `cd '<dir>' && <cmd>`，目录不存在时
+ * cd 即失败，错误信息可直接透出。返回码/输出形态与本地 gitRun 对齐，失败不抛错。
+ */
+export async function remoteRun(dir: string, cmd: string): Promise<{ code: number; stdout: string; stderr: string }> {
+  const { hostId, remote } = splitSshDir(dir);
+  const conn = await connFor(hostId);
+  try {
+    const r = await conn.exec(cmd, {
+      cwd: remote,
+      timeoutMs: REMOTE_EXEC_TIMEOUT_MS,
+      maxStdoutBytes: REMOTE_EXEC_MAX_STDOUT,
+    });
+    return { code: r.code, stdout: r.stdout.trim(), stderr: r.stderr.trim() };
+  } catch (error) {
+    // exec 层异常（超时 / 连接断开 / 输出超限）没有退出码，归一成失败码透出。
+    const msg = error instanceof Error ? error.message : String(error);
+    const timedOut = /exec timed out/.test(msg);
+    return { code: timedOut ? 124 : 127, stdout: "", stderr: msg };
+  }
+}
+
+/** 远端目标（`<dir>/<name>`，POSIX 拼接）是否已存在。 */
+export async function remotePathExists(dir: string, name: string): Promise<boolean> {
+  const { hostId, remote } = splitSshDir(dir);
+  const conn = await connFor(hostId);
+  const fs = await conn.fs();
+  try {
+    return (await fs.stat(`${remote}/${name}`)) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 删除远端目录（克隆/检出失败清理半成品用）：调用方必须事先确认目标原本不存在，
+ * 这里只负责把失败残留删掉；删除本身失败不抛错（残留只影响重试时的 409 提示）。
+ */
+export async function remoteRmRf(dir: string, name: string): Promise<void> {
+  const { hostId, remote } = splitSshDir(dir);
+  const conn = await connFor(hostId).catch(() => null);
+  if (!conn) return;
+  await conn.exec(`rm -rf -- ${shellQuoteSingle(`${remote}/${name}`)}`, { timeoutMs: 30_000 }).catch(() => {});
+}

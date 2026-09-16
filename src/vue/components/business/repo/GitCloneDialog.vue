@@ -59,7 +59,9 @@
         />
       </label>
 
-      <label class="fw-clone-check">
+      <!-- 复选框行套与输入框同高的槽位：SVN 面板第 4 行是「版本」输入框（40px），
+           Git 这行若按内容自适应会矮一截，两个弹窗切换时高度跳变、第四行对不齐。 -->
+      <label class="fw-clone-check fw-clone-slot">
         <input v-model="state.shallow" type="checkbox" :disabled="busy" />
         <span>{{ t("repoCloneShallow") }}</span>
         <span class="fw-clone-checkhint">{{ t("repoCloneShallowHint") }}</span>

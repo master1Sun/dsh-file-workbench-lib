@@ -12,8 +12,8 @@ export const svnState = reactive<{ dirs: Record<string, { inRepo: boolean }> }>(
 
 /** 拉取并缓存某目录的 SVN 探测结果；失败时静默（菜单缺失不阻断浏览）。 */
 export async function refreshSvnStatus(dir: string): Promise<void> {
-  // 与 git 同理：远端（ssh）目录不做 SVN 探测。
-  if (!dir || api.isRemoteRef(dir)) return;
+  // 远端（ssh）目录同样探测：host 侧对 ssh:// 引用走 SSH exec 在远端执行 svn info。
+  if (!dir) return;
   try {
     const s = await api.svnInfo(dir);
     svnState.dirs[dir] = { inRepo: !!s.inRepo };

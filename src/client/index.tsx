@@ -8,6 +8,7 @@ import { zh, en } from "../shared/locales.js";
 import type { ReactNode } from "react";
 import { RightPaneBridge, VSCodePaneBridge, vsKindInUse, vsKindTabId, vsOpenKindCount } from "./RightPaneBridge.js";
 import { ComposerBridge } from "./ComposerBridge.js";
+import { createTabMenuItems } from "./TabMenuBridge.js";
 import { setSidebarRight } from "./api.js";
 
 /** 前端资源基址（host REST + 静态资源前缀）。 */
@@ -633,6 +634,28 @@ export function apply(ctx: ClientCtx): void {
         };
       });
     }, "dsh-file-workbench: vscode tab bodies");
+
+    // ⑤ tab 下拉菜单追加项（sidebar.right.tab.menu.item，list 插槽）：给工作台 / 编辑器
+    //    tab 的「…」动作菜单尾部追加本插件的操作项（打开工作区 / 新建编辑器窗口）。
+    //    DSH 0.1.6 起宿主把该插槽的全部注册项按顺序渲染进 dockkit 的 tab 菜单；
+    //    旧版宿主没有该插槽时 inject 抛错，静默降级即可。
+    ctx.effect(() => {
+      const slots = ctx.slots;
+      if (!slots) return;
+      const off = slots.inject("sidebar.right.tab.menu.item", () =>
+        slots.register(
+          // list 插槽按 options.id 排序/去重（key 是 keyed 插槽的约定），必须带 id + order。
+          { name: "sidebar.right.tab.menu.item", id: `${ID}.menu`, order: 10 },
+          createTabMenuItems({
+            tr,
+            getSessionDir,
+            openEditor: (params) => openNextEditorTab(params),
+          }) as (props: unknown) => ReactNode,
+        ),
+      );
+      console.info("[dsh-file-workbench] tab menu items registered (sidebar.right.tab.menu.item)");
+      return off;
+    }, "dsh-file-workbench: tab menu items");
   } catch (e) {
     console.warn("[dsh-file-workbench] 右侧面板注册失败（已降级）：", e);
   }

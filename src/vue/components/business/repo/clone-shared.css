@@ -112,10 +112,13 @@
   gap: 10px;
 }
 .fw-clone-input {
-  flex: 1;
+  /* flex-basis 必须是 auto：字段容器是纵向 flex，简写 `flex: 1`（basis 0%）会把主轴
+     （= 高度）压成内容最小高度，导致直接放在字段里的输入框变矮；横向的 .fw-clone-row
+     里 basis auto 也不影响伸展填宽。 */
+  flex: 1 1 auto;
   min-width: 0;
-  height: 40px;
-  line-height: 38px;
+  height: 32px;
+  line-height: 30px;
   padding: 0 12px;
   border: 1px solid var(--dsh-border, #30363d);
   border-radius: 8px;
@@ -149,6 +152,11 @@
   color: var(--dsh-fg, #c9d1d9);
   cursor: pointer;
   user-select: none;
+}
+/* 与 .fw-clone-input 同高的槽位：让 Git 的复选框行与 SVN 的「版本」输入框行占位一致，
+   两个弹窗切换时总高度与各行位置完全对齐。 */
+.fw-clone-slot {
+  min-height: 32px;
 }
 .fw-clone-check:hover {
   color: var(--clone-accent);
@@ -230,8 +238,8 @@
 }
 
 .fw-clone-btn {
-  height: 40px;
-  line-height: 38px;
+  height: 32px;
+  line-height: 30px;
   padding: 0 18px;
   border: 1px solid var(--dsh-border, #30363d);
   border-radius: 8px;
