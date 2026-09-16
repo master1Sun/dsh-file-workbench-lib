@@ -7,7 +7,7 @@
  *  - 不在 .fw-root 内，取色依赖 useTheme 打在 html 上的 data-theme 与 --dsh-* 变量，
  *    以及 App.vue 写在 html 上的 --dsh-fs-scale（故字号随「界面字号」设置缩放）。
  */
-import { onBeforeUnmount, onMounted } from "vue";
+import { onBeforeUnmount, onMounted, reactive } from "vue";
 import Icon from "./Icon.vue";
 import { t } from "../../composables/core/i18n";
 import { dismissToast, toasts, type ToastItem, type ToastKind } from "../../composables/core/toast";
@@ -42,6 +42,28 @@ const ICON: Record<ToastKind, string> = {
   info: "info",
 };
 
+/**
+ * 已展开全文的提示 id：默认**最多 3 行 + 省略号**（见 .fw-toast-msg 的 line-clamp），
+ * 点一下文案展开全文。长报错/长路径不折叠会把气泡撑得很高，挡住大片界面。
+ */
+const opened = reactive(new Set<number>());
+
+/** 切换某条的展开态。 */
+function toggleOpen(id: number): void {
+  if (opened.has(id)) opened.delete(id);
+  else opened.add(id);
+}
+
+/**
+ * 文案够长才补 `title`（原生 tooltip）：短提示弹 tooltip 反而打断视线，
+ * 长文案被折叠后则需要一个能看到全文的出口（悬停还会暂停倒计时，读得完）。
+ * 字符数只是近似（是否真被截断取决于宽度与换行），宁可多给也不漏给。
+ */
+const LONG_MSG = 48;
+function fullText(it: ToastItem): string | undefined {
+  return it.message.length > LONG_MSG ? it.message : undefined;
+}
+
 /** 剩余秒数（向上取整：3.0→3、2.1→3…… 最短也会显示 1s，不会出现 0s 停留）。 */
 function secondsLeft(it: ToastItem): number {
   return Math.max(0, Math.ceil(it.remain / 1000));
@@ -67,7 +89,13 @@ function leftPercent(it: ToastItem): string {
       @mouseleave="it.paused = false"
     >
       <span class="fw-toast-ico" aria-hidden="true"><icon :name="ICON[it.kind]" :size="15" /></span>
-      <span class="fw-toast-msg">{{ it.message }}</span>
+      <span
+        class="fw-toast-msg"
+        :class="{ 'is-open': opened.has(it.id) }"
+        :title="fullText(it)"
+        @click="toggleOpen(it.id)"
+        >{{ it.message }}</span
+      >
       <span v-if="it.duration > 0" class="fw-toast-count" :title="`${secondsLeft(it)}s`">
         {{ secondsLeft(it) }}s
       </span>
@@ -169,10 +197,24 @@ html[data-theme="dark"] .fw-toast.k-info {
 .fw-toast-msg {
   flex: 1 1 auto;
   min-width: 0;
-  /* 长路径 / 报错串允许换行，但连续无空格的串也要能断行，否则会撑破气泡。 */
+  /* 折叠到 3 行 + 省略号：长报错/长路径不折叠会把气泡撑成半屏高。
+     连续无空格的串也要能断行（anywhere），否则单行超宽会溢出。 */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   padding-top: 1px;
+}
+
+/* 点开看全文：取消行数上限（仍限宽，超长时气泡内部纵向增高）。 */
+.fw-toast-msg.is-open {
+  display: block;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  overflow: visible;
 }
 
 /* 倒计时读数：等宽数字，避免每秒跳动时宽度抖动。 */
