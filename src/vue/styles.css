@@ -33,9 +33,17 @@ html[data-theme="dark"],
   color-scheme: dark;
   --dsh-bg: #0d1117;
   --dsh-bg2: #161b22;
+  /* 第三级面（比 bg2 再抬一级：卡片/小窗标题条等）。⛔ 必须有定义 —— 缺失时消费方
+     `var(--dsh-bg3, #21262d)` 会**永远**落到那个深色兜底上，白天模式下就露出一条黑条。 */
+  --dsh-bg3: #21262d;
   --dsh-border: #30363d;
   --dsh-fg: #c9d1d9;
   --dsh-fg-weak: #8b949e;
+  /* 比 fg-weak 再弱一档的辅助墨色（次要提示文字）与警示色。
+     两者此前都只有 `var(--dsh-x, <兜底>)` 里的兜底值 —— 兜底是**写死的深色系**，
+     白天模式下不会自动变浅，故必须显式定义（与 --dsh-bg3 同一类问题）。 */
+  --dsh-fg-muted: #6e7681;
+  --dsh-warn: #d29922;
   --dsh-select: #1f6feb33;
   --dsh-hover: #30363d;
   --dsh-accent: #238636;
@@ -76,9 +84,13 @@ html[data-theme="light"],
   color-scheme: light;
   --dsh-bg: #ffffff;
   --dsh-bg2: #f6f8fa;
+  /* 第三级面：白天取比 bg2 略深一档的灰，卡片标题条才有层次且不刺眼。 */
+  --dsh-bg3: #eaeef2;
   --dsh-border: #d0d7de;
   --dsh-fg: #1f2328;
   --dsh-fg-weak: #656d76;
+  --dsh-fg-muted: #6e7781;
+  --dsh-warn: #9a6700;
   --dsh-select: #0969da33;
   --dsh-hover: #d7dce3;
   --dsh-accent: #1f883d;

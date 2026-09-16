@@ -8,7 +8,7 @@
  */
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { stat, readFile, appendFile } from "node:fs/promises";
+import { stat, readFile, appendFile, mkdir, rm } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
 
 import type {
@@ -20,8 +20,10 @@ import type {
   GitPanelFile,
   GitRunResult,
 } from "../../shared/types.js";
+import { deriveRepoDirName, sanitizeRepoDirName } from "../../shared/repo.js";
 import { FsError, isProtectedPath } from "../fs/fs-tree.js";
 import {
+  guardWriteTarget,
   json,
   readBody,
   requireAbsolute,
@@ -57,6 +59,74 @@ function guardGitWritable(target: string): void {
   if (isProtectedPath(target)) {
     throw new FsError("forbidden", `path "${target}" is read-only (protected system area)`, 403);
   }
+}
+
+/** 克隆命令的超时（毫秒）：大仓库慢，但也不能让请求无限挂着。 */
+const CLONE_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * 执行 `git clone`：需要 `spawn` 而非 `execFile`，因为要**主动超时终止**。
+ *
+ * ⛔ `GIT_TERMINAL_PROMPT=0` 不可省：宿主进程没有可交互终端，若远端要求用户名/口令，
+ *    git 会**一直阻塞在提示上**直到超时 —— 用户看到的是「卡住不动」，而不是「要登录」。
+ *    置 0 后它会立刻报 `could not read Username`，我们把它如实回给界面。
+ *    （因此 HTTPS 私有仓库请用带 token 的地址，或改用 SSH 密钥地址。）
+ * `GIT_PAGER=cat` 同理：分页器在无 tty 下会挂住。
+ */
+function gitCloneExec(
+  args: string[],
+  cwd: string,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolvePromise) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn("git", args, {
+        cwd,
+        windowsHide: true,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat" },
+      });
+    } catch (error) {
+      resolvePromise({ code: 127, stdout: "", stderr: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    let out = "";
+    let err = "";
+    let settled = false;
+    const finish = (code: number): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolvePromise({ code, stdout: out.trim(), stderr: err.trim() });
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        /* 进程可能已退出 */
+      }
+      // 124 沿用 GNU timeout 的约定，便于调用方区分「超时」与普通失败。
+      finish(124);
+    }, CLONE_TIMEOUT_MS);
+    child.stdout?.on("data", (c: Buffer) => {
+      out += c.toString("utf8");
+    });
+    child.stderr?.on("data", (c: Buffer) => {
+      err += c.toString("utf8");
+    });
+    child.on("error", (e) => {
+      err += err ? `\n${e.message}` : e.message;
+      finish(127);
+    });
+    child.on("close", (code) => finish(typeof code === "number" ? code : 1));
+  });
+}
+
+/** 目标路径是否已存在（用于「已存在即 409」前置拦截）。 */
+async function pathExists(p: string): Promise<boolean> {
+  return stat(p).then(
+    () => true,
+    () => false,
+  );
 }
 
 /** 从某路径向上查找仓库根（存在 .git 目录/文件即视为仓库）。非仓库返回 null。 */
@@ -509,6 +579,58 @@ export const gitResource: RouteMatcher = async (req, res, seg, q, method, host) 
     const dir = requireAbsolute(q.get("path")?.trim() ?? "");
     const data = await gitGhListReleases(dir);
     return (json(res, 200, { ok: true, data }), true);
+  }
+
+  // —— 克隆仓库（POST /git/clone）：把远端仓库拉到一个**新目录** ——
+  // 与下面的「写操作」块分开：那块的 `path` 语义是「已有的仓库/文件」，而这里的目标
+  // 目录还不存在（也正因如此才有「已存在即 409」这条前置检查）。
+  if (op === "clone" && method === "POST" && seg.length === 2) {
+    const body = (await readBody(req)) as {
+      url?: string;
+      dir?: string;
+      name?: string;
+      depth?: number;
+      key?: string;
+    } | null;
+    const url = (body?.url ?? "").trim();
+    if (!url) return (json(res, 400, { ok: false, error: "url required" }), true);
+    const dir = requireAbsolute((body?.dir ?? "").trim());
+    // 名字：显式传入的以传入为准（仍要过 sanitize），否则按 URL 推导。
+    const givenName = (body?.name ?? "").trim();
+    const name = givenName ? sanitizeRepoDirName(givenName) : deriveRepoDirName(url);
+    if (!name) {
+      return (
+        json(res, 400, {
+          ok: false,
+          error: "invalid or missing target directory name (must not be empty or contain path separators)",
+        }),
+        true
+      );
+    }
+    const target = join(dir, name);
+    // 先守卫再探测：受保护 / 工作区外直接 403，不必泄露「那里有没有东西」。
+    await guardWriteTarget(body?.key, target);
+    if (await pathExists(target)) {
+      return (json(res, 409, { ok: false, error: `target already exists: ${target}` }), true);
+    }
+    await mkdir(dir, { recursive: true });
+    const args = ["clone", "--progress"];
+    const depth = Number(body?.depth ?? 0);
+    if (Number.isFinite(depth) && depth > 0) args.push("--depth", String(Math.floor(depth)));
+    // `--` 之后才是位置参数：URL 以 `-` 开头也不会被 git 当成选项。
+    args.push("--", url, target);
+    const r = await gitCloneExec(args, dir);
+    if (r.code !== 0) {
+      // 失败清理：git 多数情况会自己删掉半成品目录，但**超时被 kill 时不会** ——
+      // 残骸会让用户重试直接撞上 409，且看不出原因。force 只删我们刚确认不存在的目标。
+      await rm(target, { recursive: true, force: true }).catch(() => {});
+      const reason =
+        r.code === 124
+          ? `git clone 超时（${Math.round(CLONE_TIMEOUT_MS / 1000)}s，已终止）`
+          : r.stderr || r.stdout || `exit ${r.code}`;
+      throw new FsError("fs-error", `git clone 失败: ${reason}`, 400);
+    }
+    return (json(res, 200, { ok: true, data: { path: target, name, stdout: r.stdout, stderr: r.stderr } }), true);
   }
 
   // —— 写操作：解析请求体 ——

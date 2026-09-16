@@ -460,6 +460,9 @@ watch(expanded, (v) => {
 
 /** 头部刷新：重新探测 + 拉取提交列表。 */
 async function refresh(): Promise<void> {
+  // 用户点的是「刷新」→ 必须重新问宿主，不能吃 30s 读缓存（否则点了没反应）。
+  api.invalidateReadCache("git");
+  api.invalidateReadCache("svn");
   await reload();
   if (kind.value) void loadCommits();
 }

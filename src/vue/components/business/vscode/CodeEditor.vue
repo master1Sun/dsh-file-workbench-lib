@@ -3,6 +3,60 @@
   <div ref="hostRef" class="vs-code-editor" @contextmenu.prevent.stop="onContextMenu"></div>
 </template>
 
+<!--
+ * 模块级（跨挂载常驻）状态：把 EditorView 实例从组件实例上「剥离」到模块级表，
+ * 使切换 DSH 右侧 tab 导致的「卸载 → 重建」不再销毁/重建视图（否则表现为折叠后再展开的闪动）。
+ * 见同文件下方 <script setup> 内的 createView / onBeforeUnmount。
+ -->
+<script lang="ts">
+import { acquireVSCodeSlot } from "../../../stores/vscode";
+
+/**
+ * 跨挂载常驻的「活编辑器视图」：键 = 槽号，值 = 当前挂载的 EditorView 与其所在路径。
+ *
+ * 背景：DSH 右侧栏切换 tab 会把整个 VSCodePane 的 Vue 应用卸载再重建（React 桥卸载），
+ * 若 EditorView 随组件卸载被 destroy，切回时编辑器要从缓存状态**重新建视图**——表现为
+ * 「折叠后再展开」的闪动（容器高度从 0 重新测量）。这里把视图实例从组件实例上「剥离」：
+ * 卸载时只把它的 DOM 从宿主里摘下、存进模块级表；重挂载时把同一份 DOM 重新挂回新宿主，
+ * **不重建视图**，于是完全没有闪动，且滚动 / 光标 / 选区 / 撤销栈原样保留。
+ *
+ * 仅在「真正关闭」该编辑器 tab（tab.signal 中止，见 RightPaneBridge）时才 dispose 掉视图，
+ * 避免内存泄漏；切走再切回属于「卸载-重挂载」，视图要保留复用。
+ */
+/**
+ * 跨挂载保留的视图只需用到这两个方法（detach 后重新挂回 + 真正关闭时释放），
+ * 这里用最小接口声明，避免与 <script setup> 里对 `EditorView` 的 value 导入重复声明。
+ */
+interface StoredEditorView {
+  dom: HTMLElement;
+  destroy(): void;
+}
+
+const liveEditorViews = new Map<number, { view: StoredEditorView; path: string }>();
+/** 已被真正关闭的槽：其视图要么已销毁、要么不该再被本次卸载误存（见 onBeforeUnmount 的守卫）。 */
+const disposedEditorSlots = new Set<number>();
+
+/** 真正关闭某编辑器 tab（由桥接层在 tab.signal 中止时调用）：销毁该槽残留的活视图。 */
+function disposeEditorSlotByTabId(tabId: string): void {
+  const slot = acquireVSCodeSlot(tabId);
+  const rec = liveEditorViews.get(slot);
+  if (rec) {
+    try {
+      rec.view.destroy();
+    } catch {
+      /* 视图可能已是 detached 状态，忽略 */
+    }
+    liveEditorViews.delete(slot);
+  }
+  disposedEditorSlots.add(slot);
+}
+
+// 跨 bundle 暴露给 React 桥接层（RightPaneBridge）：它拿得到 tab id 但无法 import 本模块。
+if (typeof window !== "undefined") {
+  (window as unknown as Record<string, unknown>).__dshFWDisposeEditorSlotByTabId = disposeEditorSlotByTabId;
+}
+</script>
+
 <script setup lang="ts">
 /**
  * CodeMirror 6 封装：语法高亮 + 行号 + 折叠 + 查找/替换（basicSetup 自带 searchKeymap，
@@ -11,6 +65,10 @@
  * 受控方式：父组件按文件切换时传入新的 path/initialContent；本组件**不销毁重建** EditorView，
  * 而是按 path 在 docCache 中取出/构建对应 EditorState 并 `setState` 就地替换——
  * 因此切换文件标签不再「重新展开」，且每文件的滚动 / 光标 / 撤销栈各自保留。
+ *
+ * 跨挂载保活：DSH 右侧栏切换 tab 会把整个 VSCodePane 卸载再重建，本组件把 EditorView 实例存进
+ * 模块级 `liveEditorViews`（按槽），卸载时不 destroy、只把视图 DOM 摘下，重挂载时把同一份 DOM
+ * 挂回新宿主——因此切走再切回**不再折叠后展开**，滚动 / 光标 / 选区 / 撤销栈原样保留。
  *
  * 位置持久化：`initialView` 传入该文件上次的滚动位置与光标偏移，建视图时还原；
  * 滚动 / 光标变化通过 @view 回传父组件（父组件按路径暂存并节流落盘）。
@@ -80,7 +138,8 @@ let scrollHandler: (() => void) | null = null;
  * DSH 右侧栏切换 tab 会整体卸载再重建本组件，实例级缓存会随之丢失、切回时编辑器重新展开；
  * 放进 registry 后状态跨「卸载→重建」存活。按槽隔离，多编辑器窗口互不污染。
  */
-const docCache = getEditorStateCache(props.slot ?? 0);
+const slot = props.slot ?? 0;
+const docCache = getEditorStateCache(slot);
 
 /** 上报当前滚动位置与光标偏移（视图未就绪时静默跳过）。 */
 function reportView(): void {
@@ -170,11 +229,40 @@ function applyEnv(v: EditorView): void {
   });
 }
 
-/** 在容器内创建新的 EditorView（首次挂载某路径时调用）。 */
+/** 在容器内创建（或复用）EditorView。存在跨卸载保留的活视图且路径一致时，直接把同一份 DOM 重新挂回新宿主（不重建，无闪动）。 */
 function createView(): void {
-  if (!hostRef.value) return;
+  const host = hostRef.value;
+  if (!host) return;
+  const existing = liveEditorViews.get(slot);
+  if (existing && existing.view.dom && existing.path === props.path) {
+    // 复用跨卸载保留的视图：DOM 重新挂回新宿主，避免「折叠后再展开」的闪动。
+    const v = existing.view as unknown as EditorView;
+    gen++;
+    view.value = v;
+    liveEditorViews.delete(slot);
+    host.appendChild(v.dom);
+    applyEnv(v);
+    restoreScroll(v);
+    scrollHandler = () => reportView();
+    v.scrollDOM.addEventListener("scroll", scrollHandler, { passive: true });
+    // 重新挂回后强制重新测量（DOM 经过 detach/attach，高度可能尚未刷新），避免残留折叠态。
+    requestAnimationFrame(() => {
+      if (view.value === v) v.requestMeasure();
+    });
+    void loadLanguage();
+    return;
+  }
+  // 路径不符（极少见）：旧活视图已失效，销毁以免泄漏，再建新的。
+  if (existing) {
+    try {
+      existing.view.destroy();
+    } catch {
+      /* ignore */
+    }
+    liveEditorViews.delete(slot);
+  }
   gen++;
-  const v = new EditorView({ state: stateFor(props.path), parent: hostRef.value });
+  const v = new EditorView({ state: stateFor(props.path), parent: host });
   view.value = v;
   applyEnv(v);
   restoreScroll(v);
@@ -278,9 +366,19 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   // 注销本实例的分发器（重建时会登记新实例的）。
-  setEditorUpdateSink(props.slot ?? 0, null);
+  setEditorUpdateSink(slot, null);
   detachScroll();
-  view.value?.destroy();
+  // 真正关闭该编辑器 tab（tab.signal 中止 → disposedEditorSlots 已登记）时销毁视图，释放内存。
+  if (disposedEditorSlots.has(slot)) {
+    view.value?.destroy();
+    view.value = null;
+    return;
+  }
+  // 切走再切回：把活视图从宿主里摘下、存进模块级表，重挂载时重新挂回（不重建、无闪动）。
+  // 注意：不要 destroy——DOM 由 liveEditorViews 持有，重挂载时 appendChild 回新宿主即可。
+  if (view.value) {
+    liveEditorViews.set(slot, { view: view.value as unknown as StoredEditorView, path: props.path });
+  }
   view.value = null;
 });
 

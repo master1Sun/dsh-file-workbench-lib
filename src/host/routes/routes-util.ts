@@ -13,8 +13,9 @@ import { fileURLToPath } from "node:url";
 
 import type { Context } from "@deepseek-ai/cordis";
 import type { ApiResponse } from "../../shared/types.js";
-import { FsError, requireAbsolute } from "../fs/fs-tree.js";
+import { FsError, isProtectedPath, isWithin, requireAbsolute } from "../fs/fs-tree.js";
 import { getRoot } from "../store/root-store.js";
+import { getPersistKey } from "../store/workbench-store.js";
 
 /** host 端用于解析子 agent / 会话等运行时服务的能力；资源模块按需使用。 */
 export interface RouteHost {
@@ -37,8 +38,16 @@ export const PREFIX = "/api/dsh-file-workbench";
 export const WEB_DIR = fileURLToPath(new URL("./web", import.meta.url));
 
 function sendJson(res: ServerResponse, status: number, body: ApiResponse<unknown>): void {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(body));
+  // 连接已断开（客户端中止 / 套接字销毁）：写响应既无意义又可能抛未捕获错误，直接跳过。
+  if (res.writableEnded || res.destroyed) return;
+  try {
+    // 吞掉底层套接字错误（已断开时 res.end 可能异步触发），避免未处理 error 事件崩进程。
+    res.on("error", () => {});
+    res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(body));
+  } catch {
+    /* 连接已断开：静默 */
+  }
 }
 
 export function json<T>(res: ServerResponse, status: number, body: ApiResponse<T>): void {
@@ -57,25 +66,48 @@ export function fail(res: ServerResponse, error: unknown): void {
 export const MAX_BODY_SIZE = 512 * 1024 * 1024;
 
 export async function readBody(req: IncomingMessage): Promise<unknown> {
-  return new Promise((resolvePromise, reject) => {
+  return new Promise((resolve, reject) => {
     let body = "";
     let size = 0;
+    let settled = false;
+    const finish = (value: unknown, isError: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (isError) reject(value as Error);
+      else resolve(value);
+    };
     req.on("data", (c: Buffer) => {
+      if (settled) return;
       size += c.length;
       if (size > MAX_BODY_SIZE) {
         // 只结算字节数，不再继续拼接，避免内存无限增长；同时持续消费流防止背压。
         body = "";
-        reject(new FsError("too-large", `request body exceeds the ${MAX_BODY_SIZE} byte limit`, 413));
+        finish(new FsError("too-large", `request body exceeds the ${MAX_BODY_SIZE} byte limit`, 413), true);
         return;
       }
       body += c.toString();
     });
     req.on("end", () => {
-      try {
-        resolvePromise(JSON.parse(body));
-      } catch {
-        resolvePromise(null);
+      if (settled) return;
+      let parsed: unknown = null;
+      if (body) {
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          parsed = null;
+        }
       }
+      finish(parsed, false);
+    });
+    // ⛔ 客户端中止 / 连接断开 / 读取错误时，Promise 必须立即结算：
+    // 否则句柄与连接被永久占用——面板切换时 `cancelAll()` 会中止在途请求，若无此兜底，
+    // 被中止的 `/exec-input` 等服务端句柄永不释放，累积后同源连接配额耗尽，后续请求排死。
+    req.on("aborted", () => finish(new FsError("fs-error", "request aborted by client", 499), true));
+    req.on("error", (e: Error) =>
+      finish(e instanceof FsError ? e : new FsError("bad-request", e.message, 400), true),
+    );
+    req.on("close", () => {
+      if (!settled) finish(new FsError("fs-error", "request closed before complete", 499), true);
     });
   });
 }
@@ -89,6 +121,38 @@ export function currentRoot(key: string | undefined): string {
   const root = getRoot(key);
   if (!root) throw new FsError("bad-request", "no workspace root set — open a folder first", 409);
   return root;
+}
+
+/**
+ * 禁止对受保护只读目录（如 `C:\Windows` 整棵）进行任何写操作 —— 一律抛 403。
+ *
+ * 抽到共享层是因为**每个写路由都需要它**（fs / git / svn / 克隆检出）。此前 fs 路由
+ * 私有一份、git 与 svn 各写一份近乎相同的判断，任何一处漏掉就是一条绕过路径。
+ */
+export function guardWritablePath(target: string): void {
+  if (isProtectedPath(target)) {
+    throw new FsError("forbidden", `path "${target}" is read-only (protected system area)`, 403);
+  }
+}
+
+/**
+ * 工作区外写操作守卫：仅当开启「root 开关」（prefs.allowOutsideRoot）后才允许操作工作区
+ * 根目录之外的文件；默认工作区外只能浏览/查看。工作区内路径与非受保护一律放行。
+ *
+ * ⛔ 克隆/检出**必须**过这道闸：它们会凭空创建整棵目录树，且 URL 来自用户输入 ——
+ *    不守卫就等于给了一个「往任意系统目录写一堆文件」的入口。
+ */
+export async function guardWriteTarget(key: string | undefined, target: string): Promise<void> {
+  guardWritablePath(target);
+  const root = getRoot(key);
+  if (!root || isWithin(root, target)) return;
+  const prefs = (await getPersistKey("prefs")) as { allowOutsideRoot?: boolean } | null;
+  if (prefs && prefs.allowOutsideRoot === true) return;
+  throw new FsError(
+    "forbidden",
+    `path "${target}" is outside workspace root; enable the root toggle in Settings to operate it`,
+    403,
+  );
 }
 
 /** 判断一段路径是否为绝对路径（跨平台，供 target 类接口校验）。 */

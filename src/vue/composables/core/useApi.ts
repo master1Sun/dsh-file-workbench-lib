@@ -8,6 +8,7 @@
  */
 import { computed, reactive } from "vue";
 import { toastError } from "./toast";
+import { cachedRead, invalidateRead } from "./readCache";
 import type {
   ApiResponse,
   BrowseListing,
@@ -25,6 +26,9 @@ import type {
   MyComputerItem,
   RecycleEntry,
   ReplaceOutcome,
+  RepoCloneKind,
+  RepoCloneRequest,
+  RepoCloneResult,
   SearchHit,
   TaskArchiveMap,
   TaskLogRecord,
@@ -32,6 +36,7 @@ import type {
   TextReadOptions,
 } from "../../../shared/types";
 import { t } from "./i18n";
+import { wsEndpointUrl } from "./ws-url";
 
 export const PREFIX = "/api/dsh-file-workbench";
 
@@ -185,17 +190,64 @@ const qs = (params: Record<string, string | undefined>) => {
   return s ? `?${s}` : "";
 };
 
+/*
+ * ── 只读接口的结果缓存 ────────────────────────────────────────────────────────
+ *
+ * 下面这批**幂等只读**接口一律经 `cachedRead()` 出去：切面板导致的「卸载→重建」
+ * 不会再把列目录 / git 状态 / 仓库探测 / 文件索引重新问一遍（详见 readCache.ts 的说明）。
+ *
+ * ⛔ 铁律：
+ *  - 只给只读接口用。**`readFile` 绝不可进缓存**（外部改动检测、另存为重读都依赖真正读盘）；
+ *    `exists` 同理（刚写完的文件存在性必须现问）。
+ *  - 每个 key 必须完整编码入参（含 `key` 根标识），否则不同根/不同目录会互相命中。
+ *  - 写接口成功后必须 `invalidateRead(...)`，否则用户会遇到「改了不生效」——
+ *    见下面各写接口里的调用。
+ */
+
+/** 列单层目录（结果缓存 30s：同目录重复列在「切走再切回」场景下是纯浪费）。 */
+export function listDir(path: string, key?: string): Promise<FsListing> {
+  return cachedRead(`list:${key ?? ""}:${path}`, () => request<FsListing>("GET", `/list${qs({ key, path })}`));
+}
+
+/**
+ * 写操作的统一包装：**成功后作废读缓存**。
+ *
+ * 目录内容 / 文件状态 / 仓库状态可能已经变了，刚才缓存的列目录与 git 状态不再可信。
+ * 缓存本身很小，整体清掉比逐个推断影响范围更不容易漏 —— 漏一个就是用户侧的
+ * 「刚建的文件刷新看不到」「提交后徽标还挂在那」。
+ */
+function writeThen<T>(p: Promise<T>): Promise<T> {
+  return p.then((v) => {
+    invalidateRead();
+    return v;
+  });
+}
+
+/** 只作废 `git` 前缀的写包装：git 写操作不影响目录内容，没必要连列目录缓存一起清。 */
+function writeThenGit<T>(p: Promise<T>): Promise<T> {
+  return p.then((v) => {
+    invalidateRead("git");
+    return v;
+  });
+}
+
+/**
+ * 供「刷新」这类**显式要求最新数据**的动作使用：作废指定前缀的读缓存
+ * （`"list"` / `"git"` / `"svn"` / `"files"`；缺省全部）。
+ *
+ * 必须显式调的场合：用户点了刷新按钮 / 右键刷新 / 面板关闭后重算徽标 ——
+ * 这些动作的语义就是「不要用缓存」，否则点了没反应。
+ */
+export function invalidateReadCache(prefix = ""): number {
+  return invalidateRead(prefix);
+}
+
 /** 取/设工作区根。 */
 export function fetchRoot(key?: string): Promise<{ root: string }> {
   return request("GET", `/root${qs({ key })}`);
 }
 export function setRoot(path: string, key?: string): Promise<{ root: string }> {
   return request("POST", "/root", { key, path });
-}
-
-/** 列单层目录。 */
-export function listDir(path: string, key?: string): Promise<FsListing> {
-  return request("GET", `/list${qs({ key, path })}`);
 }
 
 /** 取父路径。 */
@@ -216,16 +268,18 @@ export interface SaveTextOptions {
 }
 
 export function saveFile(path: string, content: string, opts: SaveTextOptions = {}): Promise<FileTextSaved> {
-  return request("POST", "/save", {
-    key: opts.key,
-    path,
-    content,
-    encoding: opts.encoding,
-    hasBom: opts.hasBom,
-    eol: opts.eol,
-    expectedMtime: opts.expectedMtime,
-    force: opts.force,
-  });
+  return writeThen(
+    request<FileTextSaved>("POST", "/save", {
+      key: opts.key,
+      path,
+      content,
+      encoding: opts.encoding,
+      hasBom: opts.hasBom,
+      eol: opts.eol,
+      expectedMtime: opts.expectedMtime,
+      force: opts.force,
+    }),
+  );
 }
 
 /**
@@ -240,7 +294,10 @@ export function mtimes(
 
 /** 项目文件索引（「快速打开」用）：返回相对路径列表（'/' 分隔）+ 是否被预算截断。 */
 export function projectFiles(path: string, key?: string): Promise<{ files: string[]; truncated: boolean }> {
-  return request("GET", `/files${qs({ key, path })}`);
+  // 这是**全量递归扫描**，全项目最贵的一次读；缓存它收益最大（切面板不该重扫一遍）。
+  return cachedRead(`files:${key ?? ""}:${path}`, () =>
+    request<{ files: string[]; truncated: boolean }>("GET", `/files${qs({ key, path })}`),
+  );
 }
 
 /** 搜索（可指定任意绝对目录作范围，path 缺省用工作区根）。caseSensitive/regex 控制匹配模式。 */
@@ -267,14 +324,16 @@ export function batchReplace(
   replacement: string,
   opts: { key?: string; scope?: string; caseSensitive?: boolean; regex?: boolean } = {},
 ): Promise<ReplaceOutcome> {
-  return request("POST", "/replace", {
-    key: opts.key,
-    scope: opts.scope,
-    q,
-    replacement,
-    caseSensitive: opts.caseSensitive,
-    regex: opts.regex,
-  });
+  return writeThen(
+    request<ReplaceOutcome>("POST", "/replace", {
+      key: opts.key,
+      scope: opts.scope,
+      q,
+      replacement,
+      caseSensitive: opts.caseSensitive,
+      regex: opts.regex,
+    }),
+  );
 }
 
 /** 全局内容搜索（grep 式）：按行命中、按文件分组，供左栏「搜索」tab 展示与跳转。
@@ -311,12 +370,13 @@ export function isRemoteRef(path: string): boolean {
 
 /** “我的电脑”顶层入口（盘符/Home/下载/工作区/回收站）。 */
 export function myComputer(key?: string): Promise<{ items: MyComputerItem[] }> {
-  return request("GET", `/mycomputer${qs({ key })}`);
+  return cachedRead(`mycomputer:${key ?? ""}`, () => request<{ items: MyComputerItem[] }>("GET", `/mycomputer${qs({ key })}`));
 }
 
 /** 驱动器列表（「此电脑」的「设备和驱动器」视图：含容量与卷标）。 */
 export function drives(): Promise<{ drives: DriveInfo[] }> {
-  return request("GET", "/drives");
+  // 选择文件夹弹窗每次挂载都会问一遍，但盘符几乎不变。
+  return cachedRead("drives", () => request<{ drives: DriveInfo[] }>("GET", "/drives"));
 }
 
 /* ── SSH 远端主机管理 ── */
@@ -414,19 +474,19 @@ export function recycleCount(): Promise<{ count: number }> {
   return request("GET", "/recycle-count");
 }
 
-/** 恢复（还原）回收站条目到原路径。 */
+/** 恢复（还原）回收站条目到原路径。会往原目录写回文件 → 读缓存作废。 */
 export function recycleRestore(fullPath: string): Promise<{ restored: boolean }> {
-  return request("POST", "/recycle-restore", { fullPath });
+  return writeThen(request<{ restored: boolean }>("POST", "/recycle-restore", { fullPath }));
 }
 
 /** 彻底删除回收站条目（不可恢复）。 */
 export function recycleDelete(fullPath: string): Promise<{ deleted: boolean }> {
-  return request("POST", "/recycle-delete", { fullPath });
+  return writeThen(request<{ deleted: boolean }>("POST", "/recycle-delete", { fullPath }));
 }
 
 /** 清空回收站（后端异步执行，调用后轮询 recycleCount 展示进度）。 */
 export function recycleEmpty(): Promise<{ started: boolean }> {
-  return request("POST", "/recycle-empty", {});
+  return writeThen(request<{ started: boolean }>("POST", "/recycle-empty", {}));
 }
 
 /** 浏览任意绝对目录（不受工作区限制）。 */
@@ -471,16 +531,59 @@ export function streamTerminal(
  * 帧里多带 `session` 字段，由调用方按会话分发。之所以必须复用：宿主是 `node:http`（HTTP/1.1），
  * 浏览器对同一源只允许约 6 条并发连接——每个终端各占一条 SSE 时，开几个终端就会把配额耗尽，
  * 新会话的 `/exec-stream` 与 `/exec-input` 会被浏览器**永久排队**（一直空白、且无法输入）。
+ *
+ * ⛔ 传输用 **WebSocket**（`/exec-mux-ws`）而不是 SSE：SSE 每条占一个 HTTP/1.1 同源连接池
+ * 配额——终端页叠加 session 流 / push 通道后逼近 6 条上限，`/exec-input` 等 REST 请求被浏览器
+ * 排队（「敲键盘无响应 / 整页请求假死」）。WS 连接不计入该配额，终端页对 HTTP 池占用为 0。
+ * 帧格式：服务端每帧一条 JSON（同 MuxTermStreamEvent，无 SSE 的 `data:` 包装）。
  */
 export function streamTerminalMux(
   onEvent: (ev: import("../../../shared/types").MuxTermStreamEvent) => void,
   opts: { key?: string },
   signal?: AbortSignal,
 ): Promise<void> {
-  const params = new URLSearchParams();
-  if (opts.key) params.set("key", opts.key);
-  const s = params.toString();
-  return openEventStream(`/exec-mux-stream${s ? `?${s}` : ""}`, onEvent, signal);
+  const href = typeof location !== "undefined" ? location.href : "http://127.0.0.1/";
+  const url =
+    wsEndpointUrl(apiBase, href, "exec-mux-ws") +
+    (opts.key ? `?key=${encodeURIComponent(opts.key)}` : "");
+  return new Promise<void>((resolve) => {
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(url);
+    } catch {
+      resolve();
+      return;
+    }
+    let settled = false;
+    /** 关闭并结束 Promise：连接出错、服务端关闭、或外部 abort。 */
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      try {
+        signal?.removeEventListener("abort", onAbort);
+      } catch {
+        /* ignore */
+      }
+      try {
+        ws.close();
+      } catch {
+        /* 已关闭：忽略 */
+      }
+      resolve();
+    };
+    const onAbort = (): void => finish();
+    signal?.addEventListener("abort", onAbort);
+    ws.onmessage = (ev) => {
+      try {
+        onEvent(JSON.parse(String(ev.data)) as import("../../../shared/types").MuxTermStreamEvent);
+      } catch {
+        /* 非 JSON 帧：忽略 */
+      }
+    };
+    ws.onclose = finish;
+    // 错误必随 onclose，统一在 finish 收尾；resolve 语义与旧 SSE 版一致（挂到断开才结束）。
+    ws.onerror = () => {};
+  });
 }
 
 /**
@@ -526,13 +629,31 @@ function openEventStream<T>(url: string, onEvent: (ev: T) => void, signal?: Abor
  * 多路复用流只负责接收输出，会话本身必须由这里显式建立——否则「没有任何会话」时
  * 复用流上永远不会有该会话的输出。幂等：同 session 同 shell 同 cwd 时直接复用既有会话。
  */
-export function openTerminalSession(body: {
-  session: string;
-  shell: "cmd" | "powershell";
-  cwd?: string;
-  key?: string;
-}): Promise<{ cwd: string }> {
-  return request<{ cwd: string }>("POST", "/exec-open", body);
+/**
+ * 终端会话的派生参数：本机 shell，或**远端 ssh**（凭据取自主机配置，自动登录、不弹口令）。
+ * 判别用 `kind`；不带 `kind` 时按本机处理（兼容旧调用点）。
+ */
+export type TermSessionOpen =
+  | { session: string; kind?: "local"; shell: "cmd" | "powershell"; cwd?: string; key?: string }
+  | { session: string; kind: "ssh"; hostId: string; remote: string; key?: string };
+
+/**
+ * 终端：派生一个常驻会话。返回宿主**实际**建立的后端类型（`kind`）。
+ *
+ * `kind` 是握手信号：老宿主不认识 `kind:"ssh"`，会把请求当本机会话照建成功 —— 只看有没有
+ * 报错无法区分「已登录远端」与「拿到一个本机 cmd」，故一律以回执里的 kind 为准。
+ */
+export function openTerminalSession(body: TermSessionOpen): Promise<{ cwd: string; kind?: "local" | "ssh" }> {
+  return request<{ cwd: string; kind?: "local" | "ssh" }>("POST", "/exec-open", body);
+}
+
+/**
+ * 终端：上报伪终端尺寸（前端 fit 后调用）。
+ * silent：fit 是高频动作，会话可能刚被关掉 —— 失败没有可恢复动作，不该弹提示刷屏。
+ * 老 host 无该路由（404）时静默失败，终端只是尺寸不准，不影响使用。
+ */
+export function resizeTerminalSession(session: string, cols: number, rows: number): Promise<unknown> {
+  return request("POST", "/exec-resize", { session, cols, rows }, { silent: true });
 }
 
 /**
@@ -577,27 +698,27 @@ export function spawnSubagent(
 
 /** 建目录。 */
 export function mkdir(path: string, key?: string): Promise<{ path: string }> {
-  return request("POST", "/mkdir", { key, path });
+  return writeThen(request<{ path: string }>("POST", "/mkdir", { key, path }));
 }
 
 /** 重命名/移动。 */
 export function rename(from: string, to: string, key?: string): Promise<{ path: string }> {
-  return request("POST", "/rename", { key, from, to });
+  return writeThen(request<{ path: string }>("POST", "/rename", { key, from, to }));
 }
 
 /** 删除。 */
 export function remove(path: string, key?: string): Promise<{ path: string }> {
-  return request("DELETE", `/remove${qs({ key, path })}`);
+  return writeThen(request<{ path: string }>("DELETE", `/remove${qs({ key, path })}`));
 }
 
 /** 新建文本文件。 */
 export function touch(path: string, key?: string): Promise<{ path: string }> {
-  return request("POST", "/touch", { key, path });
+  return writeThen(request<{ path: string }>("POST", "/touch", { key, path }));
 }
 
 /** 复制 src 到 destDir（粘贴-复制）。 */
 export function copyEntry(src: string, destDir: string, key?: string): Promise<{ path: string }> {
-  return request("POST", "/copy", { key, src, destDir });
+  return writeThen(request<{ path: string }>("POST", "/copy", { key, src, destDir }));
 }
 
 /** 上传文件字节到目标目录（浏览器 File 直接作请求体，后端流式落盘）。 */
@@ -612,6 +733,8 @@ export async function uploadFile(destDir: string, file: File, key?: string): Pro
     if (!payload.ok) {
       throw new Error(payload.error || `HTTP ${res.status}`);
     }
+    // 目录内容变了：列目录缓存必须作废，否则「上传完看不到新文件」。
+    invalidateRead();
     return payload.data as { path: string };
   } finally {
     api.pending--;
@@ -631,14 +754,18 @@ export function detail(path: string): Promise<FileDetail> {
  *  - 404 → `false`，静默；
  *  - 其它失败（网络中断 / 500 / 被取消）→ 提示后**抛出**，绝不能退化成 `false`：
  *    调用方把「探测失败」当成「不存在」就会跳过覆盖确认，直接写坏同名文件。
+ *
+ * `opts.silent` 供**后台巡检**类调用方使用（如窗口重新获得焦点时核对项目根是否还在）：
+ * 语义完全不变（失败依旧抛出、依旧不降级成 `false`），只是**不弹提示** ——
+ * 否则宿主抖动一下、焦点每切一次就弹一条用户看不懂的错误。
  */
-export async function exists(path: string): Promise<boolean> {
+export async function exists(path: string, opts?: { silent?: boolean }): Promise<boolean> {
   try {
     await request<FileDetail>("GET", `/detail${qs({ path })}`, undefined, { silent: true });
     return true;
   } catch (e) {
     if (e instanceof ApiError && e.status === 404) return false;
-    if (!isAbortError(e)) {
+    if (!isAbortError(e) && !opts?.silent) {
       toastError(e instanceof ApiError ? mapError(e.status, e.message) : t("errNetwork"));
     }
     throw e;
@@ -662,6 +789,9 @@ export async function detailOrNull(path: string): Promise<FileDetail | null> {
 /**
  * 读取文本文件内容（编辑用；大文件由后端以 413 拒绝）。
  * 返回内容 + 编码 / 行尾 / BOM / mtime 元数据；编码可显式覆盖以支持状态栏手动切换。
+ *
+ * ⛔ **绝不缓存**：外部改动检测、换编码重读、另存为重读都依赖「真的读了一次盘」。
+ * 缓存它会让用户看到旧内容、甚至把旧内容写回文件。
  */
 export function readFile(path: string, opts: TextReadOptions = {}): Promise<FileTextRead> {
   return request(
@@ -674,14 +804,14 @@ export function readFile(path: string, opts: TextReadOptions = {}): Promise<File
   );
 }
 
-/** 压缩单文件或目录为 .zip（to 缺省放源同目录）。 */
+/** 压缩单文件或目录为 .zip（to 缺省放源同目录）。会在源目录写出 .zip → 读缓存作废。 */
 export function compress(path: string, to?: string, key?: string): Promise<{ path: string }> {
-  return request("POST", "/compress", { key, path, to });
+  return writeThen(request<{ path: string }>("POST", "/compress", { key, path, to }));
 }
 
-/** 解压 .zip 到 destDir（缺省为 zip 所在目录）。 */
+/** 解压 .zip 到 destDir（缺省为 zip 所在目录）。会在目标目录写出文件 → 读缓存作废。 */
 export function extract(zipPath: string, destDir?: string, key?: string): Promise<{ destDir: string; count: number }> {
-  return request("POST", "/extract", { key, zipPath, destDir });
+  return writeThen(request<{ destDir: string; count: number }>("POST", "/extract", { key, zipPath, destDir }));
 }
 
 /** 用系统默认程序打开 / 在资源管理器中打开。 */
@@ -693,7 +823,8 @@ export function openExternal(path: string): Promise<{ path: string }> {
 
 /** 取某目录下各子项的 git 状态聚合（状态徽标）。非仓库目录返回 inRepo:false。 */
 export function gitStatus(dir: string): Promise<GitDirStatus> {
-  return request("GET", `/git/status${qs({ path: dir })}`);
+  // 目录树每列一层目录就问一次；切面板重建时整批重问纯属浪费。
+  return cachedRead(`gitstatus:${dir}`, () => request<GitDirStatus>("GET", `/git/status${qs({ path: dir })}`));
 }
 
 /** 取某路径相对最近提交的改动文本（右键「查看改动」）。 */
@@ -703,52 +834,66 @@ export function gitDiff(path: string): Promise<GitAction> {
 
 /** 暂存一个文件/目录（git add）。 */
 export function gitAdd(path: string): Promise<GitAction> {
-  return request("POST", "/git/add", { path });
+  return writeThenGit(request<GitAction>("POST", "/git/add", { path }));
 }
 
 /** 把文件/目录加入仓库根 .gitignore（git ignore）。 */
 export function gitIgnore(path: string): Promise<GitAction> {
-  return request("POST", "/git/ignore", { path });
+  return writeThenGit(request<GitAction>("POST", "/git/ignore", { path }));
 }
 
 /** 提交当前暂存的全部改动（git commit）。 */
 export function gitCommit(path: string, message: string): Promise<GitAction> {
-  return request("POST", "/git/commit", { path, message });
+  return writeThenGit(request<GitAction>("POST", "/git/commit", { path, message }));
 }
 
-/** 丢弃工作区改动（git checkout -- <path>）。 */
+/** 丢弃工作区改动（git checkout -- <path>）——会改写工作树文件，读缓存整体作废。 */
 export function gitDiscard(path: string): Promise<GitAction> {
-  return request("POST", "/git/discard", { path });
+  return writeThen(request<GitAction>("POST", "/git/discard", { path }));
 }
 
 /** 取消暂存（git restore --staged）。 */
 export function gitUnstage(path: string): Promise<GitAction> {
-  return request("POST", "/git/unstage", { path });
+  return writeThenGit(request<GitAction>("POST", "/git/unstage", { path }));
 }
 
 /** 取仓库级快照（Git 面板：未暂存/已暂存/未跟踪）。 */
 export function gitPanel(path: string): Promise<GitPanel> {
-  return request("GET", `/git/panel${qs({ path })}`);
+  return cachedRead(`gitpanel:${path}`, () => request<GitPanel>("GET", `/git/panel${qs({ path })}`));
 }
 
 /** 取提交历史（Git 面板）。 */
 export function gitLog(path: string, count = 20): Promise<GitLogItem[]> {
-  return request("GET", `/git/log${qs({ path, count: String(count) })}`);
+  return cachedRead(`gitlog:${path}:${count}`, () => request<GitLogItem[]>("GET", `/git/log${qs({ path, count: String(count) })}`));
 }
 
-/** 分支操作（create / checkout / delete）。 */
+/** 分支操作（create / checkout / delete）。checkout 会改写工作树 → 读缓存整体作废。 */
 export function gitBranch(path: string, action: "create" | "checkout" | "delete", name: string): Promise<GitAction> {
-  return request("POST", "/git/branch", { path, action, name });
+  const p = request<GitAction>("POST", "/git/branch", { path, action, name });
+  return action === "checkout" ? writeThen(p) : writeThenGit(p);
 }
 
-/** 远程同步（fetch / pull / push）。 */
+/** 远程同步（fetch / pull / push）。pull 会改写工作树 → 读缓存整体作废。 */
 export function gitSync(path: string, action: "fetch" | "pull" | "push"): Promise<GitAction> {
-  return request("POST", "/git/sync", { path, action });
+  const p = request<GitAction>("POST", "/git/sync", { path, action });
+  return action === "pull" ? writeThen(p) : writeThenGit(p);
 }
 
 /** 命令台：在仓库根执行任意 git 命令（args 不含开头的 git）。 */
 export function gitRun(path: string, args: string[]): Promise<GitRunResult> {
   return request("POST", "/git/run", { path, args });
+}
+
+/**
+ * 克隆（git）/ 检出（svn）仓库到本地新目录。
+ *
+ * 走 `writeThen`（**全量**失效读缓存）：新目录会出现在文件列表里，且它本身可能就是一个
+ * 仓库（影响父目录的 git 状态徽标）—— 只失效 `git` 前缀不够，目录树会停在旧快照上。
+ *
+ * 超时给足：git 走宿主侧 10 分钟上限、svn 同理；前端 request 不另设超时（大仓库要慢）。
+ */
+export function cloneRepo(kind: RepoCloneKind, body: RepoCloneRequest): Promise<RepoCloneResult> {
+  return writeThen(request<RepoCloneResult>("POST", kind === "git" ? "/git/clone" : "/svn/checkout", body));
 }
 
 /** GitHub Release 创建（幂等）：origin 为 GitHub 时用本机凭据创建/复用 release。 */
@@ -802,7 +947,7 @@ export function   gitSetUserConfig(name: string, email: string): Promise<GitActi
 
   /** 检测给定目录是否处于 SVN 工作副本内，并返回仓库信息。 */
   export function svnInfo(path: string): Promise<SvnInfo> {
-    return request("GET", `/svn/info${qs({ path })}`);
+    return cachedRead(`svninfo:${path}`, () => request<SvnInfo>("GET", `/svn/info${qs({ path })}`));
   }
 
   /** 在给定目录的 SVN 工作副本上执行任意子命令，返回原始输出。 */

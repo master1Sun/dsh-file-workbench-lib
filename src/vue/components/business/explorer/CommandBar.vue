@@ -1,6 +1,10 @@
 <template>
   <!-- Win11 风格命令栏：位于 explorer 面板内部顶部（经典风格仅此渲染）。 -->
   <div class="fw-cmdbar">
+    <!-- 导航栏被自动折叠后的手动展开入口（面板拖窄时收起左栏，点此恢复）。 -->
+    <button v-if="navFolded" class="fw-cb-btn fw-cb-navtoggle" :title="t('expShowNav')" @click="$emit('unfold-nav')">
+      <span class="fw-cb-hamburger" aria-hidden="true">☰</span>{{ t("expShowNav") }}
+    </button>
     <!-- 回收站视图：仅还原 / 永久删除 / 清空 / 刷新（与文件列表同一套 UI，操作语义不同）。 -->
     <template v-if="st.isRecycle">
       <button class="fw-cb-btn" :disabled="!sel" :title="t('recycleRestore')" @click="cmd('restore')">{{ t('recycleRestore') }}</button>
@@ -42,7 +46,10 @@
             <el-dropdown-item command="newFolder" class="fw-panelitem">{{ t('menuNewFolder') }}</el-dropdown-item>
             <el-dropdown-item command="newFile" class="fw-panelitem">{{ t('menuNewFile') }}</el-dropdown-item>
             <el-dropdown-item command="upload" class="fw-panelitem">{{ t('menuUpload') }}</el-dropdown-item>
+            <el-dropdown-item command="cloneGit" class="fw-panelitem">{{ t('menuCloneGit') }}</el-dropdown-item>
+            <el-dropdown-item command="cloneSvn" class="fw-panelitem">{{ t('menuCloneSvn') }}</el-dropdown-item>
             <el-dropdown-item divided command="newSshHost" class="fw-panelitem">{{ t('sshNewHost') }}</el-dropdown-item>
+            <el-dropdown-item command="openTerminal" class="fw-panelitem">{{ t('terminalNew') }}</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
@@ -84,11 +91,17 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useI18n } from "../../../composables/core/i18n";
+
+/** 导航栏当前是否被自动折叠（ExplorerPane 传入）。折叠时命令栏首位出现「显示导航栏」按钮。 */
+defineProps<{ navFolded?: boolean }>();
+defineEmits<{ (e: "unfold-nav"): void }>();
 // activeView = 当前区域正在生效的视图（按目录记忆后可能与全局默认 prefs.view 不同）。
 import { prefs, activeView } from "../../../composables/core/settings";
 import { fileCmdState as st, runFileCmd } from "../../../stores/fileCommands";
-import { explorer } from "../../../stores/explorer";
+import { explorer, browseTo } from "../../../stores/explorer";
 import { openSshAddDialog } from "../../../stores/ssh";
+import { wb, openTerminal } from "../../../stores/workbench";
+import { openCloneDialog } from "../../../composables/core/cloneDialog";
 
 const { t } = useI18n();
 const ro = computed(() => st.isRecycle || !st.canOperate);
@@ -113,6 +126,23 @@ const views = computed<[string, string][]>(() => [
 function cmd(name: string, arg?: string): void {
   if (name === "newSshHost") {
     openSshAddDialog();
+    return;
+  }
+  if (name === "openTerminal") {
+    // 在当前浏览目录打开一个新终端窗口。
+    void openTerminal(explorer.listing?.path ?? "");
+    return;
+  }
+  if (name === "cloneGit" || name === "cloneSvn") {
+    // 目标默认当前浏览目录；完成后进入新目录（同时刷新列表）。
+    openCloneDialog({
+      kind: name === "cloneGit" ? "git" : "svn",
+      dir: explorer.listing?.path ?? "",
+      key: wb.key,
+      onDone: ({ path }) => {
+        void browseTo(path);
+      },
+    });
     return;
   }
   runFileCmd(name, arg);
@@ -150,6 +180,10 @@ function onViewCmd(name: string): void {
 .fw-cb-btn .caret { font-size: calc(10px * var(--dsh-fs-scale, 1)); opacity: 0.7; }
 .fw-cb-sep { width: 1px; height: 16px; background: var(--dsh-border, #30363d); margin: 0 4px; }
 .fw-cb-flex { flex: 1 1 0; }
+/* 导航栏被折叠时的「显示导航栏」入口：命令栏首位，带汉堡图标。 */
+.fw-cb-navtoggle { color: var(--dsh-accent, #238636); font-weight: 600; }
+.fw-cb-navtoggle:hover:not(:disabled) { background: var(--dsh-border, #30363d); }
+.fw-cb-hamburger { margin-right: 4px; font-size: calc(13px * var(--dsh-fs-scale, 1)); line-height: 1; }
 .fw-pmenu-check {
   display: inline-block;
   width: 14px;

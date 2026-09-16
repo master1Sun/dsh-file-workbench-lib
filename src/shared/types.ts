@@ -511,4 +511,41 @@ export interface TaskLogRecord {
  */
 export type TaskArchiveMap = Record<string, TaskLogRecord[]>;
 
+/** 版本库类型（克隆 / 检出共用）。 */
+export type RepoCloneKind = "git" | "svn";
+
+/**
+ * 克隆（git）/ 检出（svn）请求。
+ *
+ * `dir` 是**父目录**，`name` 是要创建的子目录名 —— 目标路径由两者 join 而成，
+ * 而不是直接传一个完整路径：这样宿主能对 `name` 单独做「不含分隔符」的校验，
+ * 从根上堵住目录穿越（见 `shared/repo.ts` 的 `sanitizeRepoDirName`）。
+ */
+export interface RepoCloneRequest {
+  /** 仓库地址（https://… / git@host:o/r.git / svn://…）。 */
+  url: string;
+  /** 父目录（绝对路径，本地）。 */
+  dir: string;
+  /** 子目录名；缺省时宿主按 URL 推导。 */
+  name?: string;
+  /** git 专用：浅克隆深度（>0 时生效；0/缺省为完整克隆）。 */
+  depth?: number;
+  /** svn 专用：检出的版本号（缺省取 HEAD）。 */
+  revision?: string;
+  /** 工作区根 key（与其它路由一致，用于工作区外守卫判定）。 */
+  key?: string;
+}
+
+/** 克隆 / 检出的结果。 */
+export interface RepoCloneResult {
+  /** 实际创建的绝对路径。 */
+  path: string;
+  /** 实际使用的子目录名。 */
+  name: string;
+  /** 命令的标准输出（供「任务日志」展示；失败时为空）。 */
+  stdout?: string;
+  /** 命令的标准错误（成功时通常含进度信息，可留空展示）。 */
+  stderr?: string;
+}
+
 export {};

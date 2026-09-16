@@ -16,6 +16,8 @@
 
 # 工作流产生的临时诊断/消息文件
 /_*.txt
+/_*.log
+/_*.out
 # Windows 保留名垃圾文件（会导致 git add -A 报 invalid path）
 /nul
 tmp

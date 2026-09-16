@@ -15,11 +15,9 @@ import { homedir } from "node:os";
 import {
   FsError,
   isWithin,
-  isProtectedPath,
 } from "../fs/fs-tree.js";
 import { decodeText, encodeText, type EolStyle, type TextEncoding } from "../fs/text-codec.js";
 import { getRoot, setRoot } from "../store/root-store.js";
-import { getPersistKey } from "../store/workbench-store.js";
 import { parseRef, getFs, localFsProvider, type FsProvider, type FileRef } from "../fs/fs-provider.js";
 
 import {
@@ -31,15 +29,19 @@ import {
   serveAsset,
   streamFile,
   IMAGE_EXT,
+  guardWritablePath,
+  guardWriteTarget,
   type RouteMatcher,
 } from "./routes-util.js";
 
-/** 禁止对受保护只读目录（如 C:\Windows 整棵）进行任何写操作。 */
-function guardWritable(target: string): void {
-  if (isProtectedPath(target)) {
-    throw new FsError("forbidden", `path "${target}" is read-only (protected system area)`, 403);
-  }
-}
+/**
+ * 禁止对受保护只读目录（如 C:\Windows 整棵）进行任何写操作。
+ *
+ * 实现已上提到 `routes-util.ts`（git / svn / 克隆检出共用同一份判断），这里只保留
+ * 本模块内的短名字，避免 40+ 个调用点全部改名 —— 但**不再**保有自己的实现副本，
+ * 否则两处策略会随时间分叉。
+ */
+const guardWritable = guardWritablePath;
 
 /** ssh 引用的展示文件名：取远端路径的 POSIX basename（本地路径由 streamFile 自行处理）。 */
 function posixBasenameOf(raw: string): string {
@@ -69,19 +71,10 @@ function scopeSub(base: string, subRaw: string): { scanRoot: string; sub: string
 /**
  * 工作区外写操作守卫：仅当开启「root 开关」（prefs.allowOutsideRoot）后才允许操作工作区
  * 根目录之外的文件；默认工作区外只能浏览/查看。工作区内路径与非受保护一律放行。
+ *
+ * 实现已上提到 `routes-util.ts` 的 `guardWriteTarget`（与克隆/检出共用同一份策略）。
  */
-async function guardWsRoot(key: string | undefined, target: string): Promise<void> {
-  guardWritable(target);
-  const root = getRoot(key);
-  if (!root || isWithin(root, target)) return;
-  const prefs = (await getPersistKey("prefs")) as { allowOutsideRoot?: boolean } | null;
-  if (prefs && prefs.allowOutsideRoot === true) return;
-  throw new FsError(
-    "forbidden",
-    `path "${target}" is outside workspace root; enable the root toggle in Settings to operate it`,
-    403,
-  );
-}
+const guardWsRoot = guardWriteTarget;
 
 /**
  * 把请求里的「路径字符串」解析为连接感知的目标。

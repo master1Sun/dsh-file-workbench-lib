@@ -45,6 +45,93 @@
   </div>
 </template>
 
+<script lang="ts">
+/**
+ * ⛔ **本块是模块作用域**：每次挂载只执行一次，跨「卸载 → 重建」存活。
+ *
+ * 为什么必须写在这里：`<script setup>` 的顶层代码其实被编译进 `setup()`，**每次挂载都会重跑**
+ * （已用 `vue/compiler-sfc` 实测确认：顶层 const 落在 `setup(){…}` 里面）。
+ * 所以「切换右侧面板 tab 时要保住的注册表」只能放普通 `<script>` 块
+ * —— 与 `CodeEditor.vue` 的 `liveEditorViews` 同一套做法。
+ */
+
+/** 目录树的节点（见下面 `<script setup>` 里对树的说明）。 */
+interface TreeEntry {
+  path: string;
+  name: string;
+  isDir: boolean;
+  depth: number;
+  expanded: boolean;
+  loaded: boolean;
+  loading: boolean;
+  /**
+   * 该节点在 git/svn 状态查询中的「归属目录」：文件为其所在目录，目录为其父目录，
+   * 根节点为自身路径。状态徽标按 `owner` 目录查询、以 `name` 为键读取。
+   */
+  owner: string;
+  /** 子节点 path 列表（仅目录）。 */
+  children: string[];
+}
+
+/**
+ * 目录树的**跨挂载缓存**（按编辑器实例槽隔离）。
+ *
+ * 为什么需要：DSH 切右侧面板 tab 会把整个 Vue 应用卸载重建（React 桥接层），组件里的
+ * `nodes` 随之清空 —— 于是每次切回来都要把「根 + 已展开目录」重新 `/list` 一遍。
+ * 目录树默认展开就是根 + 一级子目录（上限 20 个），叠上每个目录的 git/svn 状态探测，
+ * 一次切换能打出几十个请求，而内容其实一个字节都没变。
+ *
+ * 于是把整棵树（子项 / 展开态 / 已加载标记）留在模块级：重新挂载时**直接接管**
+ * （零请求、瞬时渲染），只有缓存**超过 {@link TREE_REVALIDATE_MS} 没动过**时，
+ * 才在后台重列一遍「当前可见且已加载」的目录，保证内容不会长期陈旧。
+ *
+ * ⛔ 不要把这里当成「永远不刷新」：`refreshNode` / `refreshBadges`（用户主动刷新、右键刷新、
+ *    Git/SVN 面板关闭后重算徽标）都会先作废读缓存再重新拉取。
+ */
+interface TreeCache {
+  /** 这份树属于哪个项目根（根变了必须重新建树）。 */
+  root: string;
+  /** 节点表（与某个已卸载实例的 `nodes` 是**同一个响应式对象**）。 */
+  nodes: Record<string, TreeEntry>;
+  rootPath: string | null;
+  /** 最近一次真正从宿主列到目录的时刻（毫秒戳）。 */
+  at: number;
+}
+
+const treeCaches = new Map<string, TreeCache>();
+/** 缓存多久没刷新就在后台补一次新鲜度（间隔内的挂载/切换完全不发请求）。 */
+const TREE_REVALIDATE_MS = 30_000;
+
+/** 取某槽在模块级缓存里的树（槽与项目根都一致才可接管）。 */
+function cachedTreeOf(key: string, root: string | null): TreeCache | null {
+  if (!root) return null;
+  const c = treeCaches.get(key);
+  return c && c.root === root ? c : null;
+}
+
+/** 默认展开时跳过的重量级 / 无关目录（避免首屏上百个请求与无意义展开）。 */
+const AUTO_EXPAND_SKIP = new Set([
+  "node_modules",
+  ".git",
+  ".svn",
+  ".hg",
+  "dist",
+  "build",
+  "out",
+  ".next",
+  ".nuxt",
+  ".cache",
+  "coverage",
+  "vendor",
+  "target",
+  ".venv",
+  "venv",
+  "__pycache__",
+  "bin",
+  "obj",
+]);
+</script>
+
 <script setup lang="ts">
 /**
  * 项目目录树（VS Code 风格）：懒加载（/list 按需展开）、展开/折叠 + 滚动位置持久化、右键菜单，
@@ -65,7 +152,7 @@
  * （跳过 node_modules/.git 等重量级目录，并限 20 个目录以内），写进 `expanded`；此后一律按
  * `expanded` 还原——包括根节点自身，用户折叠过就保持折叠。
  */
-import { computed, inject, nextTick, reactive, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import * as api from "../../../composables/core/useApi";
 import { confirmDialog, promptDialog } from "../../../composables/core/dialog";
 import { copyText } from "../../../composables/ui/clipboard";
@@ -82,23 +169,6 @@ import GitPanel from "../git/GitPanel.vue";
 import SvnPanel from "../git/SvnPanel.vue";
 import { sshProjectLabelOf } from "../../../stores/ssh";
 
-export interface TreeEntry {
-  path: string;
-  name: string;
-  isDir: boolean;
-  depth: number;
-  expanded: boolean;
-  loaded: boolean;
-  loading: boolean;
-  /**
-   * 该节点在 git/svn 状态查询中的「归属目录」：文件为其所在目录，目录为其父目录，
-   * 根节点为自身路径。状态徽标按 `owner` 目录查询、以 `name` 为键读取。
-   */
-  owner: string;
-  /** 子节点 path 列表（仅目录）。 */
-  children: string[];
-}
-
 const props = defineProps<{
   /** 项目根目录绝对路径。 */
   root: string | null;
@@ -110,6 +180,10 @@ const emit = defineEmits<{
   (e: "open-file", path: string): void;
   (e: "file-removed", path: string): void;
   (e: "file-renamed", from: string, to: string): void;
+  /** 项目根目录已被外部删除：通知父面板从「最近项目」移除并关闭项目。 */
+  (e: "project-missing", dir: string): void;
+  /** 用户在根节点右键「移出项目」：通知父面板从最近项目移除并关闭该项目。 */
+  (e: "remove-project", dir: string): void;
 }>();
 
 /**
@@ -126,9 +200,78 @@ const VS_KEY = store.rootKey;
 const persistVSCode = (): void => store.persist();
 const persistVSCodeSoon = (): void => store.persistSoon();
 
-const nodes = reactive<Record<string, TreeEntry>>({});
-const rootPath = ref<string | null>(null);
+/** 本次挂载接管的缓存（null = 从零建树）；注册表在文件顶部的模块作用域块里。 */
+let adoptedTree: TreeCache | null = cachedTreeOf(VS_KEY, props.root);
+/** 节点表：接管时**直接复用**缓存里那份响应式对象，展开态与子项原样带过来。 */
+const nodes: Record<string, TreeEntry> = adoptedTree ? adoptedTree.nodes : reactive<Record<string, TreeEntry>>({});
+const rootPath = ref<string | null>(adoptedTree ? adoptedTree.rootPath : null);
 const treeRef = ref<HTMLElement | null>(null);
+
+/** 把（重建完的）树登记进模块级缓存，供下次挂载接管。 */
+function bindTreeCache(root?: string | null): void {
+  const r = root ?? props.root;
+  if (!r) return;
+  adoptedTree = { root: r, nodes, rootPath: rootPath.value, at: Date.now() };
+  treeCaches.set(VS_KEY, adoptedTree);
+}
+
+/**
+ * 项目根目录已不存在（被外部删除）：清空目录树（界面回到「未选择项目目录」），
+ * 并清掉模块级缓存 —— 否则下次挂载又会从缓存接管一份早已失效的旧树，目录删除后界面仍显示旧文件。
+ * 真正的清理（从最近项目移除、关闭项目）由父面板在收到 `project-missing` 后统一处理。
+ */
+function clearTreeOnMissing(): void {
+  adoptedTree = null;
+  treeCaches.delete(VS_KEY);
+  for (const k of Object.keys(nodes)) delete nodes[k];
+  rootPath.value = null;
+}
+
+/* ---------- 项目根存在性巡检 ---------- */
+
+/** 上次巡检时间（节流用：焦点事件可能连发，没必要每次都打一个请求）。 */
+let lastProbeAt = 0;
+const PROBE_THROTTLE_MS = 3000;
+
+/**
+ * 静默巡检项目根是否还在：不在则清空目录树并通知父面板移除最近项目。
+ *
+ * 触发时机＝**窗口重新获得焦点**。用户删掉项目目录的典型顺序是「在资源管理器里删 → 切回浏览器」，
+ * 焦点事件正好卡在这一刻，于是无需轮询就能让过期的目录树与「最近项目」立刻消失。
+ * （只靠 `rebuild()` 是不够的：它只在挂载 / 根变化时跑，删目录时树早就建好了，会一直显示旧文件。）
+ *
+ * ⛔ 只有**明确 404** 才判定「不存在」；宿主离线 / 网络抖动 / SSH 瞬断一律当「仍在」，
+ * 否则一次瞬时故障就会把用户项目从最近项目里清掉。因此这里用 `silent: true` 探测。
+ */
+async function probeRoot(): Promise<void> {
+  const root = props.root;
+  if (!root || !vsReady.value) return;
+  if (Date.now() - lastProbeAt < PROBE_THROTTLE_MS) return;
+  lastProbeAt = Date.now();
+  let exists = true;
+  try {
+    exists = await api.exists(root, { silent: true });
+  } catch {
+    exists = true;
+  }
+  // 异步返回时根可能已被切换（用户在这期间换了项目）→ 别拿旧结果去清新项目。
+  if (!exists && props.root === root) {
+    clearTreeOnMissing();
+    emit("project-missing", root);
+  }
+}
+
+function onFocusProbe(): void {
+  void probeRoot();
+}
+
+onMounted(() => window.addEventListener("focus", onFocusProbe));
+onBeforeUnmount(() => window.removeEventListener("focus", onFocusProbe));
+
+/** 轻量刷新「最近一次列目录时刻」：任何一次成功的 `/list`（展开 / 后台复查）都算。 */
+function touchTreeCache(): void {
+  if (adoptedTree) adoptedTree.at = Date.now();
+}
 
 /** 当前根节点（若有）。 */
 const root = computed<TreeEntry | null>(() => (rootPath.value ? nodes[rootPath.value] ?? null : null));
@@ -208,6 +351,8 @@ async function loadChildren(node: TreeEntry, retry = false): Promise<void> {
       node.children.push(e.path);
     }
     node.loaded = true;
+    // 刚真正问过宿主 → 刷新缓存时间戳（下次挂载据此判断要不要后台复查）。
+    touchTreeCache();
     // 还原持久化的展开态：曾展开过的目录自动展开并继续加载其子项。
     applyExpansion(node);
   } catch (e) {
@@ -218,6 +363,13 @@ async function loadChildren(node: TreeEntry, retry = false): Promise<void> {
         await new Promise((r) => setTimeout(r, 150));
         await loadChildren(node, true);
       }
+      return;
+    }
+    // 项目根已不存在（被删除）：清空目录树并通知父面板移除最近项目记录。
+    // rebuild 的 exists 探测已拦下绝大多数情况；这里是后台 revalidateVisible 的兜底。
+    if (node.depth === 0 && e instanceof api.ApiError && e.status === 404) {
+      clearTreeOnMissing();
+      emit("project-missing", node.path);
       return;
     }
     toast("error", (e as Error).message);
@@ -263,27 +415,7 @@ function markExpanded(path: string, on: boolean, persistNow = true): void {
  * 再深就属于用户主动探索，交给持久化记忆。
  */
 const DEFAULT_EXPAND_DEPTH = 1;
-/** 默认展开时跳过的重量级 / 无关目录（避免首屏上百个请求与无意义展开）。 */
-const AUTO_EXPAND_SKIP = new Set([
-  "node_modules",
-  ".git",
-  ".svn",
-  ".hg",
-  "dist",
-  "build",
-  "out",
-  ".next",
-  ".nuxt",
-  ".cache",
-  "coverage",
-  "vendor",
-  "target",
-  ".venv",
-  "venv",
-  "__pycache__",
-  "bin",
-  "obj",
-]);
+/** 默认展开 / 展开全部时跳过的重量级目录：常量在模块作用域块里（避免每次挂载重建一个大 Set）。 */
 /** 默认展开的目录数上限（含各级），超出即停，避免大仓库首屏请求风暴。 */
 const AUTO_EXPAND_LIMIT = 20;
 
@@ -340,9 +472,52 @@ async function restoreScroll(): Promise<void> {
 /** rebuild 的世代号：并发/连续重建时丢弃旧一轮的异步结果，避免把内容写进已被清空的树。 */
 let rebuildGen = 0;
 
+/**
+ * 后台补新鲜度：只重列**当前可见且已加载**的目录。
+ *
+ * 没展开的目录没在显示任何内容，重新列它纯属浪费。串行执行而不是并发：
+ * 一次返回面板就可能命中几十个目录，全并发会把 host 的 stat/git 子进程打满。
+ */
+async function revalidateVisible(): Promise<void> {
+  const gen = rebuildGen;
+  for (const d of visibleNodes.value.filter((n) => n.isDir && n.loaded).map((n) => n.path)) {
+    if (gen !== rebuildGen) return;
+    const live = nodes[d];
+    if (!live || live.loading) continue;
+    await loadChildren(live);
+  }
+  touchTreeCache();
+}
+
 /** 依据 root 重建树。 */
 async function rebuild(): Promise<void> {
   const gen = ++rebuildGen;
+  // 项目根已不存在（被外部删除）→ 清空目录树并通知父面板：从「最近项目」移除 + 关闭项目。
+  // ⛔ 必须放在「接管缓存」之前：否则缓存里那份旧树会被原样接管，目录删除后界面仍显示旧文件。
+  if (props.root) {
+    let exists = true;
+    try {
+      // 只对「明确 404」做出反应；其它失败（宿主离线 / 网络抖动）一律当作「仍在」，
+      // 避免一次瞬时故障误把用户项目从最近项目里清掉。
+      exists = await api.exists(props.root);
+    } catch {
+      exists = true;
+    }
+    if (!exists) {
+      clearTreeOnMissing();
+      emit("project-missing", props.root);
+      return;
+    }
+  }
+  // ① 本次挂载接管了同槽同根的树，且根没变 → 直接用（零请求、瞬时可见）。
+  //    只有缓存够旧时才在后台补一次新鲜度，保证内容不至于长期陈旧。
+  if (adoptedTree && props.root && adoptedTree.root === props.root && nodes[props.root]) {
+    rootPath.value = props.root;
+    if (Date.now() - adoptedTree.at > TREE_REVALIDATE_MS) void revalidateVisible();
+    else await restoreScroll();
+    return;
+  }
+  adoptedTree = null;
   for (const k of Object.keys(nodes)) delete nodes[k];
   if (!props.root) {
     rootPath.value = null;
@@ -399,6 +574,8 @@ async function rebuild(): Promise<void> {
   }
   if (gen !== rebuildGen) return;
   await restoreScroll();
+  // 建完登记进模块级缓存：下次挂载（切面板导致的卸载重建）直接接管，不再重列目录。
+  bindTreeCache();
 }
 
 /** 供父面板在「状态就绪 / 重新激活」时显式重建（切回面板、换项目后确保有内容）。 */
@@ -521,6 +698,15 @@ function buildMenu(node: TreeEntry): MenuItem[] {
     { separator: true },
     { label: t("vsRefresh"), icon: "refresh", onClick: () => void actRefresh(node) },
   );
+  // 项目根节点：移出项目（从最近项目移除并关闭该项目的文件树）。
+  if (node.depth === 0) {
+    items.push({ separator: true });
+    items.push({
+      label: t("vsRemoveProject"),
+      icon: "close",
+      onClick: () => emit("remove-project", node.path),
+    });
+  }
   return items;
 }
 
@@ -543,6 +729,8 @@ function buildBlankMenu(rootNode: TreeEntry): MenuItem[] {
     { label: t("vsAddToSession"), icon: "sparkle", onClick: () => actAddToSession(rootNode) },
     { separator: true },
     { label: t("vsRefresh"), icon: "refresh", onClick: () => void actRefresh(rootNode) },
+    { separator: true },
+    { label: t("vsRemoveProject"), icon: "close", onClick: () => emit("remove-project", rootNode.path) },
   ];
 }
 
@@ -663,6 +851,9 @@ function onSvnPanelToggle(v: boolean): void {
 
 /** 重探已探测过的目录（有界集合，即当前已展开过的那些目录）。 */
 async function refreshBadges(): Promise<void> {
+  // Git / SVN 面板刚关掉 —— 里面的操作可能改了仓库状态，徽标必须重算而不是吃缓存。
+  api.invalidateReadCache("git");
+  api.invalidateReadCache("svn");
   const dirs = new Set<string>([...Object.keys(gitState.dirs), ...Object.keys(svnState.dirs)]);
   if (props.root) dirs.add(props.root);
   await Promise.all([...dirs].flatMap((d) => [refreshGitStatus(d), refreshSvnStatus(d)]));
@@ -776,6 +967,14 @@ async function actDelete(node: TreeEntry): Promise<void> {
   try {
     await api.remove(node.path, VS_KEY);
     emit("file-removed", node.path);
+    // ⛔ 删掉的正是项目根：不能再走下面的 `refreshNode(parent)` —— 项目根的父目录根本不在树里
+    //    （`nodes[parent]` 恒为 undefined），等于什么都不刷新，于是已删除的目录树会**原样留在左侧**、
+    //    「最近项目」也照旧留着它。必须清空整棵树并通知父面板移除该最近项目。
+    if (node.depth === 0) {
+      clearTreeOnMissing();
+      emit("project-missing", node.path);
+      return;
+    }
     const pNode = nodes[parent];
     if (pNode) await refreshNode(pNode);
   } catch (e) {
@@ -789,6 +988,8 @@ async function actRefresh(node: TreeEntry): Promise<void> {
 
 /** 刷新某目录节点（强制重新拉取子项，保持展开态）。 */
 async function refreshNode(node: TreeEntry): Promise<void> {
+  // 用户明确要最新的目录内容（右键刷新 / 新建删除后）→ 先作废列目录缓存，否则会拿到 30s 内的旧结果。
+  api.invalidateReadCache("list:");
   node.loaded = false;
   node.expanded = true;
   markExpanded(node.path, true);

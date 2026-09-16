@@ -22,6 +22,7 @@ export const PERSIST_KEYS = [
   "layout",
   // 终端浮窗几何 / 按目录视图记忆 / 后台任务历史：均为客户端实际在用的键。
   "termWin",
+  "termWins",
   "folderViews",
   "taskLogs",
   // VS Code 编辑器面板状态（项目目录 / 已开标签 / 激活标签 / 展开节点 / 比例）。

@@ -13,6 +13,7 @@
 import { reactive, ref } from "vue";
 import type { ViewMode } from "../../../shared/types";
 import * as api from "./useApi";
+import { loadTermWins } from "../domain/terminalStore";
 
 export interface Prefs {
   /** 是否显示隐藏文件。 */
@@ -135,6 +136,10 @@ export async function initPersist(): Promise<void> {
     if (typeof tw.h === "number" && tw.h > 0) termWin.h = tw.h;
     if (typeof tw.x === "number") termWin.x = tw.x;
     if (typeof tw.y === "number") termWin.y = tw.y;
+  }
+  // 每终端独立窗口的几何按 tab id 持久化，落盘由 store 侧处理。
+  if (state.termWins && typeof state.termWins === "object") {
+    loadTermWins(state.termWins);
   }
   if (state.folderViews && typeof state.folderViews === "object") {
     for (const key of Object.keys(folderViews)) delete folderViews[key];

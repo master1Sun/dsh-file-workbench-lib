@@ -1,13 +1,16 @@
 /**
- * 会话实时流资源路由：后端 SSE 实时推送「当前会话触碰文件 + 活动会话运行态」。
+ * 会话实时流：后端实时推送「当前会话触碰文件 + 活动会话运行态」。
  *
- * 端点：GET /api/dsh-file-workbench/stream/session?session=<id>&cwd=<urlencoded>
+ * 两个出口共用同一套来源逻辑（createSessionStreamSource）：
+ *  1. SSE 路由 GET /api/dsh-file-workbench/stream/session?session=<id>&cwd=<urlencoded>
+ *     （保留给 e2e / 旧客户端；前端已改走 push WS，不再占用 HTTP/1.1 连接池配额）；
+ *  2. push WS（ws-push.ts）的 `session-watch` 消息 —— **浏览器对同一源只允许约 6 条并发
+ *     HTTP 长连接**，SSE 每条占一个配额；WS 不占。会话流并入推送通道后，前端常驻长连接
+ *     全部落在 WS 上，/exec-input 等 REST 请求不再被排队。
  *
  * 前端（浏览器端）上报当前选中的会话 id（活动会话选择本质在浏览器，宿主无法独立感知），
- * 宿主在此侧的持久连接里：解析该会话 → 首次全量快照 → 订阅宿主 `session/event` 总线
+ * 宿主在此侧的持久订阅里：解析该会话 → 首次全量快照 → 订阅宿主 `session/event` 总线
  * 事件驱动地推送增量/运行态。未在内存运行的旧会话回退一次性读磁盘转写做快照。
- *
- * 参考：routes-terminal.ts 的 /exec-stream SSE 先例（text/event-stream、req close、心跳）。
  */
 import { opendir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -44,19 +47,10 @@ interface HostSessionEvent {
 }
 
 /** 宿主 context 的最小形状（@deepseek-ai/cordis 的 Context 在此处仅需 get/on/off）。 */
-interface HostCtx {
+export interface HostCtx {
   get(name: string): unknown;
   on(name: string, handler: (...args: unknown[]) => void): unknown;
   off?(name: string, handler: (...args: unknown[]) => void): void;
-}
-
-/** 写一条 SSE 事件帧。 */
-function writeFrame(res: import("node:http").ServerResponse, ev: SessionStreamEvent): void {
-  try {
-    res.write(`data: ${JSON.stringify(ev)}\n\n`);
-  } catch {
-    /* 连接已损坏，由 req close 清理 */
-  }
 }
 
 /** 一次性读磁盘转写（{DSH_HOME}/sessions/<cwd编码>/<会话id>/session.jsonl.zstd）收集文件。
@@ -94,14 +88,27 @@ async function readTranscriptFiles(sessionId: string): Promise<{ files: string[]
   return { files: [] };
 }
 
-/** 资源路由：会话实时 SSE。 */
-export const sessionStreamResource: RouteMatcher = async (req, res, seg, q, method, host) => {
-  if (seg[0] !== "stream" || seg[1] !== "session" || method !== "GET") return false;
+/** 会话实时来源的参数。 */
+export interface SessionSourceOpts {
+  /** 目标会话 id。 */
+  sessionId: string;
+  /** 活动会话 cwd 提示（浏览器侧带来；宿主内存里有会话时以宿主为准）。 */
+  cwdHint?: string;
+  /** 宿主 context（不可得时只发一个 status 帧后结束）。 */
+  ctx?: HostCtx | undefined;
+  /** 事件出口（SSE 直写帧；WS 包一层 `{ type: "session-ev", ev }` 再发）。 */
+  send: (ev: SessionStreamEvent) => void;
+  /** 心跳间隔（ms）；0/缺省 = 不心跳（SSE 需要，WS 有协议级 ping 不需要）。 */
+  heartbeatMs?: number;
+}
 
-  const sessionId = (q.get("session") ?? "").trim();
-  if (!sessionId) return false; // 缺 session：交回 404 统一处理
-
-  const ctx = host?.ctxProvider?.() as unknown as HostCtx | undefined;
+/**
+ * 建立一路「当前会话触碰文件 + 运行态」实时订阅，返回清理函数（幂等）。
+ *
+ * SSE 路由与 push WS 的 session-watch 都走这里：改快照/增量/磁盘转写兜底逻辑只改这一处。
+ */
+export function createSessionStreamSource(opts: SessionSourceOpts): () => void {
+  const { sessionId, cwdHint, ctx, send } = opts;
   const runningOf = (): boolean => {
     try {
       return (ctx?.get("agents") as HostAgents | undefined)?.get?.(sessionId)?.status === "running";
@@ -110,18 +117,23 @@ export const sessionStreamResource: RouteMatcher = async (req, res, seg, q, meth
     }
   };
 
-  res.writeHead(200, {
-    "content-type": "text/event-stream; charset=utf-8",
-    "cache-control": "no-cache, no-transform",
-    connection: "keep-alive",
-    "x-accel-buffering": "no",
-  });
+  let disposed = false;
+  const cleanup = (): void => {
+    if (disposed) return;
+    disposed = true;
+    if (heartbeat) clearInterval(heartbeat);
+    if (anyFailedTimer) clearTimeout(anyFailedTimer);
+    try {
+      offLive?.();
+    } catch {
+      /* ignore */
+    }
+  };
 
-  // 宿主 context/sessions/agents 任不可得：仅发一个 status 帧后关闭（无法提供实时能力）。
+  // 宿主 context/sessions/agents 任不可得：仅发一个 status 帧后结束（无法提供实时能力）。
   if (!ctx || !ctx.get?.("sessions") || !ctx.get?.("agents")) {
-    writeFrame(res, { type: "status", sessionId, running: runningOf() });
-    res.end();
-    return true;
+    send({ type: "status", sessionId, running: runningOf() });
+    return cleanup;
   }
 
   const sessions = ctx.get("sessions") as HostSessions;
@@ -130,7 +142,7 @@ export const sessionStreamResource: RouteMatcher = async (req, res, seg, q, meth
   // 解析会话：优先活 agent.session，其次 sessions 存储。
   const agent = agents.get?.(sessionId);
   const liveSession = agent?.session ?? sessions.get?.(sessionId);
-  const cwd = liveSession?.header?.cwd ?? q.get("cwd") ?? undefined;
+  const cwd = liveSession?.header?.cwd ?? cwdHint ?? undefined;
 
   // 按规范化键累积（避免同一文件的不同写法产生重复），保留首次出现的展示写法。
   const collected = new Map<string, string>();
@@ -144,38 +156,21 @@ export const sessionStreamResource: RouteMatcher = async (req, res, seg, q, meth
   const files = (): string[] => [...collected.values()];
 
   // 首次快照。
-  writeFrame(res, { type: "snapshot", sessionId, cwd, files: files(), running: runningOf() });
+  send({ type: "snapshot", sessionId, cwd, files: files(), running: runningOf() });
 
   let receivedLive = false;
-  let disposed = false;
   let heartbeat: NodeJS.Timeout | null = null;
 
-  // 心跳：保持连接与代理不被缓冲。
-  heartbeat = setInterval(() => {
-    try {
-      res.write(": ping\n\n");
-    } catch {
-      /* ignore */
-    }
-  }, 15000);
-
-  const cleanup = (): void => {
-    if (disposed) return;
-    disposed = true;
-    if (heartbeat) clearInterval(heartbeat);
-    if (anyFailedTimer) clearTimeout(anyFailedTimer);
-    try {
-      offLive?.();
-    } catch {
-      /* ignore */
-    }
-    try {
-      res.end();
-    } catch {
-      /* ignore */
-    }
-  };
-  req.on("close", cleanup);
+  // 心跳：保持连接与代理不被缓冲（仅 SSE 出口需要；WS 有协议级 ping）。
+  if (opts.heartbeatMs && opts.heartbeatMs > 0) {
+    heartbeat = setInterval(() => {
+      try {
+        (send as (ev: unknown) => void)({ type: "__ping__" } as unknown as SessionStreamEvent);
+      } catch {
+        /* ignore */
+      }
+    }, opts.heartbeatMs);
+  }
 
   // 订阅宿主 session/event 总线，只处理目标会话。
   const handler = (session: HostSessionEvent | undefined, ev: unknown): void => {
@@ -185,7 +180,7 @@ export const sessionStreamResource: RouteMatcher = async (req, res, seg, q, meth
     receivedLive = true;
     // 从事件增量收集文件后整表推送（基于内存 events 重新全量，保证演进一致）。
     addFiles(collectSessionFiles([ev], cwd));
-    writeFrame(res, { type: "files", sessionId, cwd, files: files(), running: runningOf() });
+    send({ type: "files", sessionId, cwd, files: files(), running: runningOf() });
   };
   let offLive: (() => void) | undefined;
   try {
@@ -196,7 +191,7 @@ export const sessionStreamResource: RouteMatcher = async (req, res, seg, q, meth
   // 若 ctx.on 未返回可调用的注销函数，退路用 ctx.off。
   if (typeof offLive !== "function") {
     try {
-      offLive = () => (ctx.off as Function)?.( "session/event", handler);
+      offLive = () => (ctx.off as Function)?.("session/event", handler);
     } catch {
       offLive = undefined;
     }
@@ -210,8 +205,58 @@ export const sessionStreamResource: RouteMatcher = async (req, res, seg, q, meth
     const hist = await readTranscriptFiles(sessionId);
     if (disposed) return;
     addFiles(hist.files);
-    writeFrame(res, { type: "files", sessionId, cwd: cwd ?? hist.cwd, files: files(), running: runningOf() });
+    send({ type: "files", sessionId, cwd: cwd ?? hist.cwd, files: files(), running: runningOf() });
   }, 10000);
+
+  return cleanup;
+}
+
+/**
+ * 资源路由：会话实时 SSE（保留出口；前端主链路已改走 push WS 的 session-watch）。
+ */
+export const sessionStreamResource: RouteMatcher = async (req, res, seg, q, method, host) => {
+  if (seg[0] !== "stream" || seg[1] !== "session" || method !== "GET") return false;
+
+  const sessionId = (q.get("session") ?? "").trim();
+  if (!sessionId) return false; // 缺 session：交回 404 统一处理
+
+  const ctx = host?.ctxProvider?.() as unknown as HostCtx | undefined;
+
+  res.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    "x-accel-buffering": "no",
+  });
+
+  /** 写一条 SSE 事件帧；心跳复用同一出口（`__ping__` 转成注释行）。 */
+  const writeFrame = (ev: SessionStreamEvent): void => {
+    try {
+      if ((ev as { type?: string }).type === "__ping__") {
+        res.write(": ping\n\n");
+        return;
+      }
+      res.write(`data: ${JSON.stringify(ev)}\n\n`);
+    } catch {
+      /* 连接已损坏，由 req close 清理 */
+    }
+  };
+
+  const cleanup = createSessionStreamSource({
+    sessionId,
+    cwdHint: q.get("cwd") ?? undefined,
+    ctx,
+    send: writeFrame,
+    heartbeatMs: 15000,
+  });
+  req.on("close", () => {
+    cleanup();
+    try {
+      res.end();
+    } catch {
+      /* ignore */
+    }
+  });
 
   return true;
 };

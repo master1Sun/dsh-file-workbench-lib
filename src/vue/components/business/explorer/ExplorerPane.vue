@@ -1,8 +1,8 @@
 <template>
   <div ref="rootRef" class="fw-explorer">
     <!-- Win11 命令栏：面板内部顶部 -->
-    <CommandBar />
-    <div class="fw-exp-body">
+    <CommandBar :nav-folded="leftFolded" @unfold-nav="leftFolded = false" />
+    <div class="fw-exp-body" :class="{ 'left-folded': leftFolded }">
       <!-- 左栏：Win11 风格导航树（此电脑 / 图库 / 桌面 / 下载 / …） -->
       <div class="fw-exp-left" :style="leftStyle">
         <NavPane />
@@ -32,7 +32,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import NavPane from "./NavPane.vue";
 import SearchPane from "./SearchPane.vue";
 import FileListPane from "./FileListPane.vue";
@@ -45,6 +45,24 @@ import { explorer } from "../../../stores/explorer";
 
 const rootRef = ref<HTMLElement | null>(null);
 const dragging = ref(false);
+
+/* ---------- 左栏自动折叠：面板拖窄收起导航树，拖宽恢复 ----------
+ * 与 VSCodePane 的右栏折叠同一套思路：触发源是面板自身宽度（ResizeObserver 观察
+ * `rootRef`）——拖 DSH 右侧面板的宽度分隔条不会触发 window resize，必须观察面板元素。
+ * 迟滞带（LEFT_FOLD_BELOW 折叠 / LEFT_UNFOLD_ABOVE 恢复）防抖动。点击命令栏的
+ * 「显示导航栏」会手动展开（用户意图优先，直到宽度再次跨过阈值才重新评估）。 */
+/** 面板宽度 ≤ 此值时折叠左栏（导航树）。 */
+const LEFT_FOLD_BELOW = 640;
+/** 面板宽度 ≥ 此值时恢复左栏；与上者之间是迟滞死区。 */
+const LEFT_UNFOLD_ABOVE = 780;
+const leftFolded = ref(false);
+let foldRO: ResizeObserver | null = null;
+
+function evalLeftFold(): void {
+  const w = rootRef.value?.clientWidth ?? 0;
+  if (w <= LEFT_FOLD_BELOW) leftFolded.value = true;
+  else if (w >= LEFT_UNFOLD_ABOVE) leftFolded.value = false;
+}
 
 /** 右栏处于搜索态：顶部搜索框有内容时切换为搜索结果面板。 */
 const searching = computed(() => !!searchTerm.value.trim());
@@ -81,6 +99,17 @@ function startDrag(): void {
 onBeforeUnmount(() => {
   document.removeEventListener("mousemove", onMove);
   document.removeEventListener("mouseup", onUp);
+  foldRO?.disconnect();
+  foldRO = null;
+});
+
+onMounted(() => {
+  // 面板宽度监听：拖窄到放不下导航树时收起左栏，拖宽恢复（迟滞带防抖动）。
+  if (rootRef.value) {
+    foldRO = new ResizeObserver(() => evalLeftFold());
+    foldRO.observe(rootRef.value);
+    evalLeftFold();
+  }
 });
 </script>
 
@@ -112,6 +141,14 @@ onBeforeUnmount(() => {
   min-width: 0;
   height: 100%;
   overflow: hidden;
+}
+/* 左栏自动折叠：面板拖窄时收起导航树（含分隔条），文件列表占满整栏；拖宽自动恢复。 */
+.fw-exp-body.left-folded .fw-exp-left,
+.fw-exp-body.left-folded .fw-exp-split {
+  display: none;
+}
+.fw-exp-body.left-folded .fw-exp-right {
+  flex: 1 1 100%;
 }
 /* 可拖拽分隔条：细线 + 悬停/拖拽高亮，与 Win11 资源管理器分隔条手感一致。 */
 .fw-exp-split {

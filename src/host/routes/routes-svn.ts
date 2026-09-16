@@ -11,10 +11,12 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync } from "node:fs";
+import { mkdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import { deriveRepoDirName, sanitizeRepoDirName } from "../../shared/repo.js";
 import { FsError, isProtectedPath } from "../fs/fs-tree.js";
-import { json, readBody, requireAbsolute, type RouteMatcher } from "./routes-util.js";
+import { guardWriteTarget, json, readBody, requireAbsolute, type RouteMatcher } from "./routes-util.js";
 
 const execFileP = promisify(execFile);
 
@@ -83,21 +85,41 @@ async function svn(args: string[], cwd: string, hint = "svn 命令执行失败")
   }
 }
 
+/** svn 命令超时（毫秒）：与 git 克隆同理，避免请求无限挂着占住连接。 */
+const SVN_TIMEOUT_MS = 10 * 60 * 1000;
+
 /** 执行 svn 命令并返回退出码/输出（供前端命令台与写操作使用，失败不抛错）。 */
 async function svnRun(args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }> {
   const exe = await resolveSvnExe();
   if (!exe) return { code: 127, stdout: "", stderr: "未找到可用的 svn 命令行工具，请安装 Subversion（含命令行客户端）" };
   try {
-    const { stdout, stderr } = await execFileP(exe, args, { cwd, windowsHide: true, encoding: "buffer", maxBuffer: 32 * 1024 * 1024 });
+    const { stdout, stderr } = await execFileP(exe, args, {
+      cwd,
+      windowsHide: true,
+      encoding: "buffer",
+      maxBuffer: 32 * 1024 * 1024,
+      timeout: SVN_TIMEOUT_MS,
+    });
     return { code: 0, stdout: decodeSvnOutput(stdout as Buffer).trim(), stderr: decodeSvnOutput(stderr as Buffer).trim() };
   } catch (error) {
-    const e = error as NodeJS.ErrnoException & { stderr?: Buffer | string; stdout?: Buffer | string };
+    const e = error as NodeJS.ErrnoException & { stderr?: Buffer | string; stdout?: Buffer | string; killed?: boolean };
+    // 超时被 kill 时 code 不是数字（null/undefined），若不特判会退成 "exit 1"，
+    // 用户看到的原因与真实情况（超时）完全不符。
+    const code = e.killed ? 124 : typeof e.code === "number" ? Number(e.code) : 1;
     return {
-      code: typeof e.code === "number" ? Number(e.code) : 1,
+      code,
       stdout: e.stdout ? decodeSvnOutput(e.stdout as Buffer).trim() : "",
-      stderr: (e.stderr ? decodeSvnOutput(e.stderr as Buffer) : e.message ?? String(error)).trim(),
+      stderr: (e.killed ? `svn 命令超时（${Math.round(SVN_TIMEOUT_MS / 1000)}s，已终止）` : e.stderr ? decodeSvnOutput(e.stderr as Buffer) : e.message ?? String(error)).trim(),
     };
   }
+}
+
+/** 目标路径是否已存在（用于「已存在即 409」前置拦截）。 */
+async function pathExists(p: string): Promise<boolean> {
+  return stat(p).then(
+    () => true,
+    () => false,
+  );
 }
 
 /**
@@ -194,6 +216,57 @@ export const svnResource: RouteMatcher = async (req, res, seg, q, method, host) 
       }
     }
     return (json(res, 200, { ok: true, data }), true);
+  }
+
+  // —— 检出工作副本（POST /svn/checkout）：把远端仓库拉到本地**新目录** ——
+  if (op === "checkout" && method === "POST" && seg.length === 2) {
+    const body = (await readBody(req)) as {
+      url?: string;
+      dir?: string;
+      name?: string;
+      revision?: string;
+      key?: string;
+    } | null;
+    const rawUrl = (body?.url ?? "").trim();
+    if (!rawUrl) return (json(res, 400, { ok: false, error: "url required" }), true);
+    const dir = requireAbsolute((body?.dir ?? "").trim());
+    const givenName = (body?.name ?? "").trim();
+    const name = givenName ? sanitizeRepoDirName(givenName) : deriveRepoDirName(rawUrl);
+    if (!name) {
+      return (
+        json(res, 400, {
+          ok: false,
+          error: "invalid or missing target directory name (must not be empty or contain path separators)",
+        }),
+        true
+      );
+    }
+    const target = join(dir, name);
+    await guardWriteTarget(body?.key, target);
+    if (await pathExists(target)) {
+      return (json(res, 409, { ok: false, error: `target already exists: ${target}` }), true);
+    }
+    // svn CLI 缺失是**环境问题**（不是请求错），但要给出可操作的原因，别落成 500 的裸英文。
+    if (!(await resolveSvnExe())) {
+      throw new FsError(
+        "fs-error",
+        "未找到可用的 svn 命令行工具，请安装 Subversion（含命令行客户端）后重试",
+        400,
+      );
+    }
+    await mkdir(dir, { recursive: true });
+    // `--non-interactive`：无 tty 时可交互的凭据询问会挂住，必须显式关掉（同 git 的
+    // GIT_TERMINAL_PROMPT=0）。私有仓库请用带凭据的 URL 或在 svn 配置里存好。
+    const args = ["checkout", "--non-interactive"];
+    const rev = (body?.revision ?? "").trim();
+    if (/^-?\d+$/.test(rev)) args.push("-r", rev);
+    args.push("--", rawUrl, target);
+    const r = await svnRun(args, dir);
+    if (r.code !== 0) {
+      await rm(target, { recursive: true, force: true }).catch(() => {});
+      throw new FsError("fs-error", `svn checkout 失败: ${r.stderr || r.stdout || `exit ${r.code}`}`, 400);
+    }
+    return (json(res, 200, { ok: true, data: { path: target, name, stdout: r.stdout, stderr: r.stderr } }), true);
   }
 
   // —— 通用命令执行（POST /svn/run）：复用前端 GUI 发起的任意 svn 子命令 ——

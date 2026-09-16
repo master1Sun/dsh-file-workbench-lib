@@ -242,6 +242,24 @@ export function VSCodePaneBridge(props: { useTabInfo?: UseTabInfo }): ReactNode 
     if (!el) return;
     const id = identityRef.current;
     if (id.tabId && id.kind) trackVsKind(id.kind, id.tabId, id.signal);
+    // 真正关闭该编辑器 tab 时（tab.signal 中止，而非切走再切回）释放跨挂载保留的活编辑器视图，
+    // 否则 detached 的 EditorView 会随每次关闭累积、吃内存。切面板不触发中止，视图照常复用。
+    if (id.signal) {
+      id.signal.addEventListener(
+        "abort",
+        () => {
+          if (!id.tabId) return;
+          try {
+            (
+              window as unknown as Record<string, ((tabId: string) => void) | undefined>
+            ).__dshFWDisposeEditorSlotByTabId?.(id.tabId);
+          } catch (e) {
+            console.warn("[dsh-file-workbench] dispose editor slot failed:", e);
+          }
+        },
+        { once: true },
+      );
+    }
     return mountInto(
       el,
       "__dshVSCodeMountPane__",

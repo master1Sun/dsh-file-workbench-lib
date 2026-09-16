@@ -1,0 +1,97 @@
+/*
+ * WebTUI 接入层（仅作用于终端子树 #dsh-term-root）。
+ *
+ * 关键约束：@webtui/css 的 base.css 带有全局 `body,html{...}` 与 `*{margin:0;padding:0;outline:none}`
+ * 重置，若整体引入会破坏 DSH 主界面（Element Plus）布局。因此这里**不引入 base.css**，
+ * 而是把 WebTUI 的变量体系直接定义在 `#dsh-term-root` 上，
+ * 仅引入「属性作用域」的工具与组件（box / badge），它们只命中我们显式打上属性的元素，不会外溢。
+ *
+ * 配色：终端面板**统一跟随 DSH 项目主题**（`--dsh-*`，由 core/theme.ts 从宿主皮肤 token
+ * `--dsw-alias-*` 同步到 html 上，随全局 `data-theme` 日夜翻转），不再自成一套 Catppuccin ——
+ * 这样窗口底 / 标题栏 / 边框 / dock 的底色与强调色和主界面完全一致。
+ * 终端画布内的 ANSI 配色另给一组同风格色（`--wt-term-*` / `--red` 等），靠 `data-term-theme`
+ * 切深浅（该属性由 TerminalHost 从全局 data-theme 转发而来）。
+ */
+@layer base, utils, components;
+
+/* 属性作用域的 WebTUI 工具/组件（安全，不影响 DSH 主界面） */
+@import "@webtui/css/utils/box.css";
+@import "@webtui/css/components/badge.css";
+
+/* 面板外壳：全部映射到 DSH 项目 token（--dsh-*），日夜由全局 data-theme 自动切换。 */
+#dsh-term-root {
+  --background0: var(--dsh-bg, #0d1117);
+  --background1: var(--dsh-bg2, #161b22);
+  --background2: var(--dsh-border, #30363d);
+  --background3: var(--dsh-hover, #30363d);
+  --foreground0: var(--dsh-fg, #c9d1d9);
+  --foreground1: var(--dsh-fg, #c9d1d9);
+  --foreground2: var(--dsh-fg-weak, #8b949e);
+
+  --font-size: 13px;
+  --line-height: 1.4;
+  --font-weight-bold: 700;
+  --font-weight-normal: 400;
+  --font-family: "Cascadia Code", "JetBrains Mono", "Fira Code", "Courier New", Consolas, monospace;
+  --box-border-color: var(--dsh-border, #30363d);
+  --badge-text: var(--dsh-bg, #0d1117);
+  --list-marker-color: var(--dsh-fg-weak, #8b949e);
+
+  /* 外壳语义色（供 TerminalWindow / TerminalHost 的 scoped 样式消费） */
+  --base: var(--dsh-bg, #0d1117);          /* 画布底 / 搜索条底 */
+  --mantle: var(--dsh-bg2, #161b22);       /* 窗口底 */
+  --crust: var(--dsh-bg, #0d1117);
+  --surface0: var(--dsh-bg2, #161b22);     /* 标题栏底 */
+  --surface1: var(--dsh-border, #30363d);  /* 边框 */
+  --surface2: var(--dsh-hover, #30363d);   /* 悬停面 */
+  --overlay0: var(--dsh-fg-weak, #8b949e);
+  --subtext0: var(--dsh-fg-weak, #8b949e);
+  --subtext1: var(--dsh-fg, #c9d1d9);
+  --text: var(--dsh-fg, #c9d1d9);
+
+  /* 面板强调 / 危险色：与 DSH 的按钮、链接、成功态观感一致 */
+  --term-accent: var(--dsh-accent, #238636);
+  --term-danger: #f85149;
+
+  /* 选区 / 搜索高亮：取纯色值（xterm 只认 #hex / rgba()，故不用 color-mix / 8 位 hex） */
+  --wt-sel-bg: rgba(88, 166, 255, 0.35);
+  --wt-search-match-bg: rgba(110, 118, 129, 0.4);
+  --wt-search-active-bg: rgba(63, 185, 80, 0.45);
+  --wt-search-active-border: #3fb950;
+}
+
+/* 深色（默认或无属性）：xterm ANSI 用与项目深色皮肤相配的一组。 */
+#dsh-term-root,
+#dsh-term-root[data-term-theme="dark"] {
+  --wt-term-black: #484f58;
+  --wt-term-white: #b1bac4;
+  --wt-term-brightblack: #6e7681;
+  --wt-term-brightwhite: #f0f6fc;
+  --red: #ff7b72;
+  --green: #3fb950;
+  --yellow: #d29922;
+  --blue: #58a6ff;
+  --mauve: #bc8cff;
+  --teal: #39c5cf;
+  --sapphire: #79c0ff;
+}
+
+/* 浅色：xterm ANSI 取偏深色，浅底上才看得清。 */
+#dsh-term-root[data-term-theme="light"] {
+  --term-danger: #cf222e;
+  --wt-term-black: #24292f;
+  --wt-term-white: #6e7781;
+  --wt-term-brightblack: #8c959f;
+  --wt-term-brightwhite: #1f2328;
+  --red: #cf222e;
+  --green: #1a7f37;
+  --yellow: #9a6700;
+  --blue: #0969da;
+  --mauve: #8250df;
+  --teal: #1b7c83;
+  --sapphire: #0969da;
+  --wt-sel-bg: rgba(9, 105, 218, 0.28);
+  --wt-search-match-bg: rgba(84, 174, 255, 0.35);
+  --wt-search-active-bg: rgba(26, 127, 55, 0.4);
+  --wt-search-active-border: #1a7f37;
+}

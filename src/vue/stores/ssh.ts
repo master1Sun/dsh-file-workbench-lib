@@ -9,10 +9,12 @@
  * 状态由推送通道（WebSocket）下发：host 按固定间隔复用连接池的常驻连接跑一次 echo，
  * 只推**变化**；即时的单次探测走同一通道的显式检查。两者共用一条长连接，
  * 不再各开 REST 轮询（见 `composables/core/push.ts` 的说明）。
+ * 通道不可用时（被中间代理拦掉 / 宿主较旧）自动回落 REST 兜底，见 `ensureFallbackPoller`。
  */
 import { reactive, ref } from "vue";
 import * as api from "../composables/core/useApi";
-import { checkSshNow, onSshStatus, setSshWatchIds } from "../composables/core/push";
+import { checkSshNow, isPushOnline, onSshStatus, setSshWatchIds } from "../composables/core/push";
+import type { TermSshInfo } from "../composables/domain/terminalStore";
 
 /** 已配置的远端主机（无主机时为空数组，不代表加载失败）。 */
 export const sshHosts = ref<api.SshHostPublic[]>([]);
@@ -60,6 +62,11 @@ export async function refreshSshStatus(): Promise<void> {
   const next = { ...sshStatus.value };
   for (const id of ids) next[id] = { state: "checking" };
   sshStatus.value = next;
+  // 推送通道不可用（被代理拦掉 / 宿主较旧）时直接走 REST，别让灯停在「检测中」直到超时。
+  if (!isPushOnline()) {
+    await fallbackPingAll();
+    return;
+  }
   await checkSshNow(ids);
 }
 
@@ -102,6 +109,42 @@ export function startSshStatusWatch(): void {
     });
   }
   syncSshWatch();
+  ensureFallbackPoller();
+}
+
+/**
+ * 推送通道不可用时的兜底探测（REST `/ssh/ping`）。
+ *
+ * 长连接可能被中间代理拦掉、或宿主是未升级的旧版本（没有 `/push` 路由）——此时订阅永远
+ * 收不到推送，而症状是**完全静默**：指示灯一直停在「未检测」且无任何报错。故用宿主侧仍
+ * 保留的 REST 接口兜底，保证「通道坏了也只是慢一点，不会永远不亮」。
+ *
+ * 代价：通道正常时每次 tick 只做一次 `readyState` 判断，零网络请求。
+ */
+const FALLBACK_POLL_MS = 30_000;
+let fallbackTimer: ReturnType<typeof setInterval> | null = null;
+
+async function fallbackPingAll(): Promise<void> {
+  const hosts = sshHosts.value.slice();
+  if (!hosts.length) return;
+  await Promise.all(
+    hosts.map(async (h) => {
+      const r = await api.sshPing(h.id).catch(() => null);
+      if (!r) return;
+      sshStatus.value = {
+        ...sshStatus.value,
+        [h.id]: r.alive ? { state: "online" } : { state: "offline", error: r.error },
+      };
+    }),
+  );
+}
+
+function ensureFallbackPoller(): void {
+  if (fallbackTimer) return;
+  fallbackTimer = setInterval(() => {
+    if (isPushOnline()) return; // 通道正常：推送会覆盖，不发冗余请求
+    void fallbackPingAll();
+  }, FALLBACK_POLL_MS);
 }
 
 /** 把当前主机集合同步给推送通道（增删主机、首次启动都要调）。 */
@@ -156,6 +199,32 @@ export function sshLoginCommandOf(ref: string, shell: "cmd" | "powershell" = "cm
 /** 远端根引用串（`ssh://<hostId>/`）：文件工作台里「远端目录」的唯一身份表示。 */
 export function sshRootRef(hostId: string): string {
   return `ssh://${hostId}/`;
+}
+
+/**
+ * 远端引用 → **ssh 直连终端会话**的目标（hostId + 远端目录 + 展示标签）；非远端或主机未登记返回 null。
+ *
+ * 与 `sshLoginCommandOf` 并列且**优先**：直连由宿主用已存凭据自动登录，不需要本机 ssh 客户端、
+ * 也不弹口令。后者只作为降级预案（直连失败时回退到本机终端敲 ssh 命令）。
+ * 主机列表未加载时会先 `ensureSshHosts()`，否则会把「能直连」误判成「主机没配」。
+ */
+export function sshTerminalTargetOf(ref: string): TermSshInfo | null {
+  const parsed = parseSshRef(ref);
+  if (!parsed) return null;
+  const h = sshHosts.value.find((x) => x.id === parsed.hostId);
+  if (!h) return null;
+  return {
+    hostId: h.id,
+    remote: normalizeSshRemote(parsed.remote),
+    label: h.name || `${h.user}@${h.host}`,
+  };
+}
+
+/** 远端目录规范化：绝对 POSIX 路径、去末尾斜杠（`/` 保留）——与宿主 `normalizeRemote` 同规则。 */
+export function normalizeSshRemote(raw: string | undefined): string {
+  const t = (raw ?? "").trim().replace(/\\/g, "/");
+  if (!t) return "/";
+  return t.startsWith("/") ? t.replace(/\/+$/, "") || "/" : `/${t.replace(/\/+$/, "")}`;
 }
 
 /** 远端引用里的主机 id（`ssh://<hostId>/<remote>` → `<hostId>`）；非远端返回空串。 */

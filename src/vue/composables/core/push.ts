@@ -17,6 +17,7 @@
  * 直接断开，不留空连接。
  */
 import { apiBase } from "./useApi";
+import { wsEndpointUrl } from "./ws-url";
 
 /** 一次文件变更的落盘信息（`null` = 该路径已不存在）。 */
 export interface MtimeItem {
@@ -43,6 +44,8 @@ const sshSources = new Map<string, string[]>();
 
 const mtimeListeners = new Set<MtimeChange>();
 const sshListeners = new Set<SshStatusChange>();
+/** 会话实时流事件回调（sessionSse 消费）。 */
+const sessionListeners = new Set<(ev: Record<string, unknown>) => void>();
 
 /** 显式检查（`checkSshNow`）临时需要关注的主机：不在任何来源集合里也要纳入采样。 */
 const adhocIds = new Set<string>();
@@ -54,6 +57,11 @@ interface SshWaiter {
 }
 const sshWaiters = new Set<SshWaiter>();
 
+/** 当前要挂会话实时流的会话 id（null = 无选中，不挂载）。 */
+let sessionWatchId: string | null = null;
+/** 上次实际发出的会话订阅指纹；重连后必须重置以触发重发。 */
+let sentSessionKey: string | null = "\u0000unset";
+
 let ws: WebSocket | null = null;
 let retryTimer = 0;
 /** 上次实际发出的文件订阅指纹（避免重复发送同一份集合）。 */
@@ -64,6 +72,63 @@ let sentSshKey = "";
 const pendingChecks = new Set<string>();
 /** 是否处于「已停止」态（两类集合都为空）：此时不建连、不重连。 */
 let stopped = true;
+
+/* ------------------------------------------------------------------ *
+ * 跨 bundle 单例槽：关掉「上一份 bundle」遗留的推送 WS
+ *
+ * ⛔ DSH 有可能**重新注入本 bundle**（页面存活期间再插一次 `<script>`，见
+ * `sessionSse.ts` 与 `terminalStore.ts` 里同款坑的注释）。bundle 一换，本模块的 `ws` /
+ * `retryTimer` / `stopped` 全部重置，而**旧实例的 WebSocket 不会因为失去引用就被回收** ——
+ * 它是一条活的连接。没人关它 → 每注入一次就多占一条同源长连接。
+ *
+ * 这条连接平时可能没建（没有文件/SSH 关注集时 `apply()` 会让它保持断开）；但只要**配置了 SSH
+ * 主机**，ssh store 的 `setSshWatchIds` 就会把它连上。于是重新注入几次后，泄漏的旧 push WS
+ * 叠上 mux SSE / session SSE / dsh 客户端自身的连接，把浏览器约 6 条同源配额占满，后续的
+ * `/exec-input` 被浏览器永久排队 —— 表现为「开了 SSH 终端后敲键盘无响应」（SSH 主机让 push WS
+ * 真正上线，把本来逼近上限的连接数顶过线）。故把自己的关闭入口登记到 `globalThis`，新实例
+ * 开工前先关掉旧实例的。
+ * （`sessionSse.ts` 已用同样手法保护了 `/stream/session`，`terminalStore.ts` 保护了 mux 流。）
+ * ------------------------------------------------------------------ */
+const PUSH_WS_SLOT = "__DSH_FW_PUSH_WS__";
+interface PushSlot {
+  dispose: () => void;
+}
+
+/** 关闭上一份 bundle 遗留的推送 WS：停掉重连循环并关连接（含 ws 本身）。 */
+function disposePushWs(): void {
+  // 先置 stopped，旧的 connect()/scheduleRetry() 再被触发时直接放弃，绝不再开新连接。
+  stopped = true;
+  if (retryTimer) {
+    window.clearTimeout(retryTimer);
+    retryTimer = 0;
+  }
+  const sock = ws;
+  ws = null;
+  try {
+    sock?.close();
+  } catch {
+    /* 已关闭：忽略 */
+  }
+}
+
+const selfSlot: PushSlot = { dispose: () => disposePushWs() };
+
+/** 接管全局槽：关掉「上一份 bundle」留下的推送 WS（同 bundle 重新求值同对象，跳过）。 */
+function adoptPushSlot(): void {
+  const g = globalThis as unknown as Record<string, unknown>;
+  const prev = g[PUSH_WS_SLOT] as PushSlot | undefined;
+  if (prev && prev !== selfSlot && typeof prev.dispose === "function") {
+    try {
+      prev.dispose();
+    } catch {
+      /* 旧实例可能已随 DOM 一起失效，忽略 */
+    }
+  }
+  g[PUSH_WS_SLOT] = selfSlot;
+}
+
+// 模块被求值（含 DSH 重新注入 bundle）时立即接管槽：关掉上一份遗留的推送 WS，避免重复注入累积连接。
+adoptPushSlot();
 
 /* ------------------------------------------------------------------ *
  * 订阅集合
@@ -96,11 +161,34 @@ function pruneAdhoc(): void {
  * 连接
  * ------------------------------------------------------------------ */
 
-/** WS 端点（同源，走与 REST 相同的 apiBase）。 */
+/**
+ * 由 REST 基址推导推送通道的 WS 端点（纯函数，便于回归断言）。
+ *
+ * ⛔ 不能写成 `` `${wsScheme}//${location.host}${apiBase}/push` ``：宿主桥接注入的 `apiBase`
+ * 是**绝对 URL**（`src/client/index.tsx` 里 `${window.location.origin}${PREFIX}`），再拼一次
+ * `location.host` 会得到 `ws://127.0.0.1:3080http://127.0.0.1:3080/api/...` 这种畸形地址 ——
+ * `new WebSocket()` 直接失败，连接永不建立（表现为 SSH 指示灯一直「未检测」、外部改动推送静默失效）。
+ * 用 `URL` 统一解析：绝对地址取它自身的 host，相对路径（vite dev 的 `VITE_API_BASE`）按当前页解析。
+ */
+export function pushWsUrl(apiBase: string, href: string): string {
+  return wsEndpointUrl(apiBase, href, "push");
+}
+
+/** 当前页面下的 WS 端点。 */
 function wsUrl(): string {
-  const secure = typeof location !== "undefined" && location.protocol === "https:";
-  const host = typeof location !== "undefined" ? location.host : "127.0.0.1";
-  return `${secure ? "wss:" : "ws:"}//${host}${apiBase}/push`;
+  const href = typeof location !== "undefined" ? location.href : "http://127.0.0.1/";
+  return pushWsUrl(apiBase, href);
+}
+
+/**
+ * 推送通道当前是否可用（WS 已连上）。
+ *
+ * 上层据此决定是否回落 REST 兜底：长连接可能被中间代理 / 网关拦掉（或宿主版本较旧没有
+ * `/push` 路由），此时所有订阅都收不到推送 —— 而症状是**完全静默**（界面永远停在「未检测」），
+ * 不留任何错误痕迹。故必须给调用方一个可查询的通道状态。
+ */
+export function isPushOnline(): boolean {
+  return ws !== null && ws.readyState === WebSocket.OPEN;
 }
 
 function scheduleRetry(): void {
@@ -123,9 +211,10 @@ function connect(): void {
   }
   ws = sock;
   sock.onopen = () => {
-    // 服务端不保留断线前的订阅：重连后必须重发，故清掉两个指纹。
+    // 服务端不保留断线前的订阅：重连后必须重发，故清掉各指纹。
     sentPathsKey = "";
     sentSshKey = "";
+    sentSessionKey = "\u0000unset";
     sendSubscriptions();
   };
   sock.onmessage = (ev) => onMessage(ev.data);
@@ -135,6 +224,7 @@ function connect(): void {
     if (ws === sock) ws = null;
     sentPathsKey = "";
     sentSshKey = "";
+    sentSessionKey = "\u0000unset";
     scheduleRetry();
   };
 }
@@ -162,14 +252,20 @@ function sendSubscriptions(): void {
     pendingChecks.clear();
     ws.send(JSON.stringify({ type: "ssh-check", ids: check }));
   }
+
+  if (sessionWatchId !== sentSessionKey) {
+    sentSessionKey = sessionWatchId;
+    // id 为 null 也要发：连接可能因其他订阅而存活，服务端需要显式停止会话流。
+    ws.send(JSON.stringify({ type: "session-watch", id: sessionWatchId }));
+  }
 }
 
-/** 收到服务端帧：按类型分发给文件 / SSH 订阅者。 */
+/** 收到服务端帧：按类型分发给文件 / SSH / 会话订阅者。 */
 function onMessage(data: unknown): void {
   if (typeof data !== "string") return;
-  let msg: { type?: string; items?: Record<string, unknown> };
+  let msg: { type?: string; items?: Record<string, unknown>; ev?: unknown };
   try {
-    msg = JSON.parse(data) as { type?: string; items?: Record<string, unknown> };
+    msg = JSON.parse(data) as { type?: string; items?: Record<string, unknown>; ev?: unknown };
   } catch {
     return;
   }
@@ -189,16 +285,21 @@ function onMessage(data: unknown): void {
       sshWaiters.delete(w);
       w.resolve(items);
     }
+    return;
+  }
+  if (msg.type === "session-ev" && msg.ev && typeof msg.ev === "object") {
+    for (const cb of sessionListeners) cb(msg.ev as Record<string, unknown>);
   }
 }
 
 /** 集合变化后重新计算：都为空则断开连接，否则确保已连接并同步订阅。 */
 function apply(): void {
-  const hasWork = unionPaths().length > 0 || unionSshIds().length > 0;
+  const hasWork = unionPaths().length > 0 || unionSshIds().length > 0 || sessionWatchId !== null;
   if (!hasWork) {
     stopped = true;
     sentPathsKey = "";
     sentSshKey = "";
+    sentSessionKey = "\u0000unset";
     if (retryTimer) {
       window.clearTimeout(retryTimer);
       retryTimer = 0;
@@ -216,6 +317,7 @@ function apply(): void {
     // 重新启用：需要重发订阅。
     sentPathsKey = "";
     sentSshKey = "";
+    sentSessionKey = "\u0000unset";
   }
   stopped = false;
   connect();
@@ -297,4 +399,24 @@ export function checkSshNow(ids: string[], timeoutMs = 12_000): Promise<Record<s
       for (const id of wanted) pendingChecks.add(id);
     }
   });
+}
+
+/* ------------------------------------------------------------------ *
+ * 会话实时流（并入本连接：原先的 /stream/session SSE 占 HTTP 池配额）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 设置当前要挂会话实时流的会话 id（覆盖式；null = 停止）。
+ *
+ * 只有 sessionSse 一个消费者，故用单槽而不是多来源并集。重连后由 sendSubscriptions 自动重发。
+ */
+export function setSessionWatchId(id: string | null): void {
+  sessionWatchId = id;
+  apply();
+}
+
+/** 订阅会话实时流事件（snapshot / files / status）；返回退订函数。 */
+export function onSessionEvent(cb: (ev: Record<string, unknown>) => void): () => void {
+  sessionListeners.add(cb);
+  return () => sessionListeners.delete(cb);
 }

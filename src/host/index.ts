@@ -9,10 +9,13 @@
 import type { Context } from "@deepseek-ai/cordis";
 import { makeFileWorkbenchRoutes } from "./routes/routes.js";
 import { makePushUpgrade } from "./routes/ws-push.js";
+import { makeExecMuxUpgrade } from "./routes/routes-terminal.js";
+import type { HostCtx } from "./routes/routes-session-stream.js";
 import { autoUpdate } from "./updater.js";
 
 export { makeFileWorkbenchRoutes } from "./routes/routes.js";
 export { makePushUpgrade } from "./routes/ws-push.js";
+export { makeExecMuxUpgrade } from "./routes/routes-terminal.js";
 export { PREFIX } from "./routes/routes.js";
 
 export const name = "dsh-file-workbench";
@@ -38,8 +41,16 @@ export function apply(ctx: Context): void {
       };
     }, "dsh-file-workbench: routes");
     httpCtx.effect(() => {
-      // 工作台推送通道（WebSocket）：文件落盘改动 + SSH 主机连通性，升级路由必须精确路径注册。
-      return httpCtx.webServer.registerUpgrade(makePushUpgrade());
+      // 工作台 WS 通道（升级路由必须精确路径注册）：
+      //  - /push：文件落盘 + SSH 连通性 + 会话实时流（session 流并入后省一条 HTTP 池配额；
+      //    传 ctxProvider 供 session 流按名解析宿主服务）；
+      //  - /exec-mux-ws：终端多路复用输出流（取代 /exec-mux-stream SSE，终端页不再占 HTTP 池）。
+      const disposePush = httpCtx.webServer.registerUpgrade(makePushUpgrade(() => ctx as unknown as HostCtx));
+      const disposeMux = httpCtx.webServer.registerUpgrade(makeExecMuxUpgrade());
+      return () => {
+        disposePush();
+        disposeMux();
+      };
     }, "dsh-file-workbench: push");
   });
 }

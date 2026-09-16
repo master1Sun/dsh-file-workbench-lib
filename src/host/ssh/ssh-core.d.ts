@@ -36,6 +36,28 @@ export declare function appendKnownHost(
   opts?: { hostId?: string },
 ): Promise<{ appended: boolean; path: string }>;
 
+/** known_hosts 解析条目（普通行 = hostPat+key；OpenSSH hashed 行 = hashed* 三件套）。 */
+export interface KnownHostsEntry {
+  hostPat?: string;
+  key?: string;
+  hashed?: boolean;
+  hashedSalt?: string;
+  hashedHash?: string;
+}
+/** 解析 known_hosts 文本为校验条目。 */
+export declare function parseKnownHosts(text: string): KnownHostsEntry[];
+/**
+ * 主机键校验：匹配 → 正常返回；unknown 且 `acceptNew` → 放行；其余抛 SshError
+ * （unknown：stage host-key-unknown + 指纹/rawKey；mismatch：stage verify-host-key 硬拒）。
+ */
+export declare function verifyHostKey(
+  host: string,
+  port: number | undefined,
+  key: Buffer,
+  entries: KnownHostsEntry[],
+  opts?: { knownHostsPath?: string; acceptNew?: boolean; hostId?: string },
+): void;
+
 /* ── 统一远端文件语义（SftpWrapper 与 ExecFs 对齐） ── */
 
 export interface RemoteStat {

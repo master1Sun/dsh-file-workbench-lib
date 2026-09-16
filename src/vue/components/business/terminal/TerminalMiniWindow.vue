@@ -4,13 +4,15 @@
   <div
     class="fw-term-card"
     :class="{ active: tab.id === termActiveId }"
-    :title="tab.cwd || t('terminal')"
+    :title="cardTitle"
     @click="onClick"
   >
     <div class="fw-term-card-head">
       <span class="fw-term-card-ico"><icon name="terminal" :size="12" /></span>
       <span class="fw-term-card-title">{{ title }}</span>
-      <span v-if="termElevated" class="fw-term-card-admin" :title="t('terminalAdminOn')">
+      <!-- 远端会话用 SSH 小标替代「管理员盾」：卡片头位置很挤，一屏两枚徽标会挤掉标题 -->
+      <span v-if="tab.ssh" class="fw-term-card-ssh" :title="t('termSshBadge')">SSH</span>
+      <span v-else-if="termElevated" class="fw-term-card-admin" :title="t('terminalAdminOn')">
         <icon name="shield" :size="10" />
       </span>
       <span
@@ -29,6 +31,7 @@ import { computed } from "vue";
 import type { TermTab } from "../../../composables/domain/terminalStore";
 import {
   closeTermTab,
+  restoreTerminal,
   termActiveId,
   termElevated,
   termPreviewOf,
@@ -42,8 +45,12 @@ const props = defineProps<{
   tab: TermTab;
 }>();
 
-/** 卡片标题：取会话当前目录的末级目录名，缺省回退到「终端」。 */
+/**
+ * 卡片标题：远端会话取主机名（远端目录在悬停提示里给全）；本机取当前目录末级名，
+ * 缺省回退到「终端」。
+ */
 const title = computed(() => {
+  if (props.tab.ssh) return props.tab.ssh.label;
   const cwd = props.tab.cwd?.trim();
   if (cwd) {
     const last = cwd.replace(/[\\/]$/, "").split(/[\\/]/).pop();
@@ -52,24 +59,37 @@ const title = computed(() => {
   return t("terminal");
 });
 
-/** 取末段纯文本预览（最多 5 行）。 */
+/** 悬停提示：远端 → 主机 · 远端目录；本机 → 当前目录。 */
+const cardTitle = computed(() => {
+  const s = props.tab.ssh;
+  if (s) return s.remote && s.remote !== "/" ? `${s.label} · ${s.remote}` : s.label;
+  return props.tab.cwd || t("terminal");
+});
+
+/**
+ * 取末段纯文本预览（最多 5 行）。
+ * ConPTY 输出尾部常是清屏 / 回车留下的空白行，直接取末 5 行会整片空白 ——
+ * 先从尾部剔除空行，再取最后 5 行有内容的。
+ */
 const preview = computed(() => {
   const raw = termPreviewOf(props.tab.id);
   if (!raw) return "";
-  return raw.split(/\r?\n/).slice(-5).join("\n");
+  const lines = raw.replace(/\r/g, "").split("\n");
+  let end = lines.length;
+  while (end > 0 && !lines[end - 1].trim()) end--;
+  return lines.slice(Math.max(0, end - 5), end).join("\n");
 });
 
-/** 点击卡片：还原整窗并激活该会话。 */
+/** 点击卡片：还原**本**窗口（每窗独立最小化/还原）并激活该会话。 */
 function onClick(): void {
   termActiveId.value = props.tab.id;
-  wb.termMinimized = false;
+  restoreTerminal(props.tab.id);
 }
 
 function onClose(): void {
   closeTermTab(props.tab.id);
-  // 关掉最后一个会话后折叠按钮会随之消失（无会话可折叠）：直接还原整窗，
-  // 否则窗口仍处于最小化、而按钮已不存在，用户无从恢复。
-  if (!termTabs.value.length) wb.termMinimized = false;
+  // 关掉最后一个会话后 dock 会随之消失：整窗退出，避免「无窗口却仍显示 dock」。
+  if (!termTabs.value.length) wb.termOpen = false;
 }
 </script>
 
@@ -82,7 +102,6 @@ function onClose(): void {
   /* 走主题面色的半透明版做毛玻璃底：深色 → #161b22，浅色 → #f6f8fa。 */
   background: color-mix(in srgb, var(--dsh-bg2, #161b22) 94%, transparent);
   backdrop-filter: blur(14px);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
   color: var(--dsh-fg, #c9d1d9);
   font-size: 11px;
   overflow: hidden;
@@ -92,10 +111,12 @@ function onClose(): void {
 .fw-term-card:hover {
   border-color: var(--dsh-accent, #238636);
 }
-/* 当前激活的会话：用强调色描边标出，便于在多会话里定位。 */
+/* 当前激活的会话：用强调色描边标出，便于在多会话里定位。
+   ⛔ 最小化卡片整体**不要投影**（含激活态）。激活强调改用 `outline` 叠在 1px 边框外：
+   视觉上仍是 2px 强调边，而 outline 不参与布局，不会挤动相邻卡片。 */
 .fw-term-card.active {
   border-color: var(--dsh-accent, #238636);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45), 0 0 0 1px var(--dsh-accent, #238636);
+  outline: 1px solid var(--dsh-accent, #238636);
 }
 .fw-term-card-head {
   display: flex;
@@ -120,6 +141,18 @@ function onClose(): void {
 .fw-term-card-admin {
   color: var(--dsh-accent, #238636);
   display: inline-flex;
+}
+/* 远端会话标（卡片头部，与管理员盾同位，二选一） */
+.fw-term-card-ssh {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border: 1px solid var(--dsh-border, #30363d);
+  border-radius: 3px;
+  color: var(--dsh-fg-weak, #8b949e);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.5;
 }
 .fw-term-card-close {
   cursor: pointer;

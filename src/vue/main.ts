@@ -16,8 +16,11 @@ import "element-plus/theme-chalk/dark/css-vars.css";
 import AppFileWorkbench from "./App.vue";
 import AppVSCode from "./components/business/vscode/VSCodePane.vue";
 import TerminalHost from "./components/business/terminal/TerminalHost.vue";
+import RepoCloneDialog from "./components/business/repo/RepoCloneDialog.vue";
 import ToastHost from "./components/common/ToastHost.vue";
 import "./styles.css";
+// WebTUI 主题层（仅作用于 #dsh-term-root 子树，见该文件注释）。
+import "./assets/webtui.css";
 import { initPersist } from "./composables/core/settings";
 import { cancelAll } from "./composables/core/useApi";
 // 提示队列的共享存储：宿主是否已挂载也要跨实例判断，故从 core/toast 取（别从 stores/workbench 取，
@@ -121,19 +124,20 @@ export function mountPane(
   // 挂载后异步拉取后端持久化配置（偏好/收藏/布局），用默认值兜底、填充后响应式更新。
   void initPersist();
 
-  // 仅文件工作台建立并维持与会话流的 SSE 连接（connectSessionSse 内部单例守卫）。
-  const sseDispose = pane === "workbench" ? connectSessionSse() : undefined;
+  // 会话实时流（/stream/session）：**只建立、不随面板卸载断开**（首次由文件工作台面板建立）。
+  //
+  // ⛔ 它绑的是**会话**，不是面板：早先这里把注销函数接出来、在 unmount 里调用，于是
+  //    「每切一次右侧面板就断开重连一条 /stream/session」—— 宿主每次重连都要重做全量快照，
+  //    前端 files/running 被清空后又重填（界面闪一下），断开空窗里的推送还会丢。
+  //    终端在 mountGlobalTerminal 里早就用同一个思路解决过（全局常驻、不随面板重建）。
+  //    connectSessionSse 内部有单例守卫：重复调用只做订阅检查，不会重复开流。
+  if (pane === "workbench") connectSessionSse();
 
   // 捕获本实例的 app 引用（instances 是 Map，但防御性保留），确保本实例卸载只影响自己。
   const localApp = app;
   const localStore = store;
   return {
     unmount: () => {
-      try {
-        sseDispose?.();
-      } catch {
-        /* ignore */
-      }
       try {
         localApp.unmount();
       } catch {
@@ -264,6 +268,37 @@ function mountGlobalTerminal(): void {
 // 顺序有意为之：提示宿主先挂（挂载失败也不会连累终端），详见 mountGlobalToastHost 的注释。
 mountGlobalToastHost();
 mountGlobalTerminal();
+mountGlobalCloneDialog();
+
+/**
+ * 全局「克隆 / 检出仓库」弹窗：独立于任一面板常驻挂载一次。
+ *
+ * 切换右侧面板 tab 时两个 Vue 应用会被各自的桥接组件 unmount，若弹窗挂在任一面板内，
+ * 切换即会卸载重建（且克隆可能跑几分钟，中途切面板会让进度「凭空消失」）。提到全局层级即可：
+ * 单一弹窗实例、跨面板存活、且两侧（文件工作台的「新建 ▾」与文件编辑器的「最近项目」）共享同一份状态，
+ * 保证「同时只可能开一个」。状态在模块级（见 composables/core/cloneDialog.ts）。
+ *
+ * 与终端同理：仅当 `#dsh-clone-root` 缺失时挂载（常驻 shell 会话 / 进行中的克隆都不能因重新注入而重建）。
+ */
+function mountGlobalCloneDialog(): void {
+  if (typeof document === "undefined" || !document.body) return;
+  if (document.getElementById("dsh-clone-root")) return;
+  const host = document.createElement("div");
+  host.id = "dsh-clone-root";
+  host.style.position = "fixed";
+  host.style.left = "0";
+  host.style.top = "0";
+  host.style.width = "0";
+  host.style.height = "0";
+  host.style.overflow = "visible";
+  host.style.zIndex = "10000";
+  document.body.appendChild(host);
+  try {
+    createApp(RepoCloneDialog).mount(host);
+  } catch (e) {
+    console.error("[dsh-file-workbench] 全局克隆弹窗挂载失败：", e);
+  }
+}
 
 if (typeof document !== "undefined") {
   const host = document.getElementById("app");

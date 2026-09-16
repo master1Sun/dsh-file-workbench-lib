@@ -58,7 +58,7 @@
       </button>
     </div>
 
-    <div class="vs-body">
+    <div class="vs-body" :class="{ 'right-folded': rightFolded }">
       <!-- 左栏：顶部「文件 / 搜索」tab + 项目目录树 + 底部 Git 提交记录栏（只占左栏） -->
       <div class="vs-left" :style="leftStyle">
         <!-- 左栏 tab：默认「文件」（目录树），可切「搜索」（全局内容搜索，点击命中行跳转） -->
@@ -78,6 +78,11 @@
             <icon name="search" :size="12" />
             <span>{{ t("vsLeftTabSearch") }}</span>
           </button>
+          <!-- 右栏被自动折叠时的手动恢复入口（点击文件也会自动展开编辑区） -->
+          <button v-if="rightFolded" class="vs-left-tab vs-unfold-btn" :title="t('vsUnfoldEditor')" @click="rightFolded = false">
+            <icon name="code" :size="12" />
+            <span>{{ t("vsUnfoldEditor") }}</span>
+          </button>
         </div>
         <ProjectTree
           v-show="leftTab === 'files'"
@@ -87,6 +92,8 @@
           @open-file="openFile"
           @file-removed="onFileRemoved"
           @file-renamed="onFileRenamed"
+          @project-missing="handleProjectMissing"
+          @remove-project="removeProject"
         />
         <!-- 全局内容搜索：按文件分组展示命中行，点击打开文件并跳到对应行 -->
         <VSSearchPanel v-if="leftTab === 'search'" :project-dir="vsState.projectDir || ''" @open="onSearchOpen" />
@@ -233,6 +240,33 @@
   </div>
 </template>
 
+<script lang="ts">
+/**
+ * ⛔ **本块是模块作用域**：每次挂载只执行一次，跨「卸载 → 重建」存活。
+ *
+ * 为什么必须写在这里：`<script setup>` 的顶层代码其实被编译进 `setup()`，**每次挂载都会重跑**
+ * （已用 `vue/compiler-sfc` 实测确认）。凡是「只在页面加载后第一次挂载时做一次」的守卫，
+ * 放进 `<script setup>` 就等于失效 —— 每次切面板都会重跑一遍，正是「切换请求好几遍接口」的成因之一。
+ */
+
+/**
+ * 已自愈过的编辑器实例槽位：自愈只需在**页面加载后首次挂载**时跑一次。
+ *
+ * 自愈会给项目根与每个已打开标签各发一次 `/detail` 探测（`healRestoredState`）；面板切走再切回
+ * 会重新挂载，守卫若随挂载重置，每次切换都要多打 1+N 个探测请求（远端项目尤其明显）。
+ */
+const healedSlots = new Set<string>();
+
+/**
+ * 已预取过文件索引的「槽 + 项目根」集合。
+ *
+ * 预取是一次**全量递归扫描**——全项目最贵的一次读。它只为「首次 Ctrl+P 立刻有结果」，
+ * 因此同一个项目预取一次就够；放在组件里会被「切面板卸载重建」反复触发。
+ * （`api.projectFiles` 本身也有 30s 结果缓存兜底，这里是第二道闸。）
+ */
+const indexPrefetched = new Set<string>();
+</script>
+
 <script setup lang="ts">
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import ProjectTree from "./ProjectTree.vue";
@@ -260,6 +294,7 @@ import { clearPendingEditorProject, floatTab, openNewEditorTab, takePendingEdito
 import { confirmDialog } from "../../../composables/core/dialog";
 import { toast, openNewTerminal } from "../../../stores/workbench";
 import { t } from "../../../composables/core/i18n";
+import { openCloneDialog } from "../../../composables/core/cloneDialog";
 import { clearWatchPaths, onMtimeChange, setWatchPaths } from "../../../composables/core/push";
 import { useTheme } from "../../../composables/core/theme";
 import { prefs } from "../../../composables/core/settings";
@@ -633,7 +668,31 @@ const recentMenuItems = computed<MenuItem[]>(() =>
 /** 固定在菜单底部、始终可见，不随最近项目列表滚动。 */
 const recentFooterItems: MenuItem[] = [
   { label: t("vsOpenFolder"), icon: "folderOpen", onClick: selectProject },
+  { separator: true },
+  // 克隆 / 检出仓库：目标默认「项目目录的父目录」，完成后以 onPickFolder 打开（含未保存确认）。
+  { label: t("menuCloneGit"), icon: "git", onClick: () => void openClone("git") },
+  { label: t("menuCloneSvn"), icon: "svn", onClick: () => void openClone("svn") },
 ];
+
+/**
+ * 打开克隆 / 检出弹窗（文件编辑器入口）。
+ *
+ * 目标父目录默认「项目目录的父目录」——与「选择项目文件夹」弹窗的起始位置一致（停在父目录才能
+ * 看到刚克隆出来的项目本身）。完成后调用 `onPickFolder` 打开新目录；它会先确认未保存改动，
+ * 再 `setRoot` 注册独立根并清空旧标签，等价于「在文件编辑器里打开这个仓库」。
+ */
+function openClone(kind: "git" | "svn"): void {
+  const parent = projectPickerDir.value;
+  const dir = parent ?? vsState.projectDir ?? "";
+  openCloneDialog({
+    kind,
+    dir,
+    key: VS_KEY,
+    onDone: ({ path }) => {
+      void onPickFolder(path);
+    },
+  });
+}
 
 /**
  * 头部「全部清除」：先关掉下拉，再弹确认框；确认才清空全部记录并落盘。
@@ -669,6 +728,45 @@ async function forgetRecent(p: string): Promise<void> {
   }
 }
 
+/**
+ * 项目根目录已被外部删除（由目录树探测到后转发）：从「最近项目」移除该目录并关闭它。
+ * 目录都已不存在，无需确认——提示反而打扰；未保存的改动也随之失效，一并丢弃。
+ */
+async function handleProjectMissing(dir: string): Promise<void> {
+  forgetAndClose(dir);
+  toast("info", t("vsProjectGone"));
+}
+
+/**
+ * 在目录树根节点右键「移出项目」：确认后从「最近项目」移除并关闭该项目。
+ * 当前项目有未保存改动时，先按「切换项目」的口径确认一次，避免静默丢数据。
+ */
+async function removeProject(dir: string): Promise<void> {
+  const hasDirty = vsState.projectDir === dir && dirtyPaths.value.length > 0;
+  const ok = await confirmDialog({
+    title: hasDirty ? t("vsUnsavedTitle") : t("vsRemoveProjectTitle"),
+    message: hasDirty
+      ? t("vsSwitchLoseMsg", { n: String(dirtyPaths.value.length) })
+      : t("vsRemoveProjectConfirm", { name: basename(dir) || dir }),
+  });
+  if (!ok) return;
+  forgetAndClose(dir);
+  toast("ok", t("vsProjectRemoved"));
+}
+
+/**
+ * 从「最近项目」移除并从当前项目关闭：两处事件（目录被删 / 用户主动移出）共用，避免重复逻辑。
+ * 若被移除的正是当前打开的项目，则清掉全部标签并把 projectDir 置空（目录树回到「未选择项目目录」）。
+ */
+function forgetAndClose(dir: string): void {
+  store.forgetProject(dir);
+  if (vsState.projectDir === dir) {
+    closeAllTabs();
+    vsState.projectDir = null;
+    persistVSCode();
+  }
+}
+
 function openRecentMenu(): void {
   const r = recentBtnRef.value?.getBoundingClientRect();
   // 传按钮右缘作 x：ContextMenu 会自行向左收进视口，视觉上等价于右对齐。
@@ -679,7 +777,7 @@ function openRecentMenu(): void {
 
 /* ---------- 快速打开（按文件名搜索项目内文件，Ctrl+P） ---------- */
 
-/** 搜索结果条数上限（够用即可，避免长列表拖慢渲染）。 */
+/** 结果条数上限（够用即可，避免长列表拖慢渲染）。 */
 const SEARCH_LIMIT = 50;
 /** 索引复用窗口：超过此时长再重新拉取（新增/删除文件后不至于一直用旧索引）。 */
 const INDEX_TTL_MS = 30_000;
@@ -978,13 +1076,9 @@ function closeAllTabs(): void {
  *     否则每次恢复都会去 `/read` 一个目录，host 以 400 `not a file` 拒绝，刷新也消不掉。
  *
  * 一律以 `detail` 的真实结果为准；探不到（主机离线 / 引用已失效）时**原样保留**，绝不误删用户数据。
+ *
+ * （去重守卫 `healedSlots` 声明在模块作用域块里 —— 见本文件顶部 `<script lang="ts">`。）
  */
-/**
- * 已自愈过的编辑器实例槽位：自愈只需在**页面加载后首次挂载**时跑一次 —— 面板切走再切回会
- * 重新挂载，若每次都探测一轮会把内容加载拖慢一个 RTT（远端项目尤其明显）。
- */
-const healedSlots = new Set<string>();
-
 async function healRestoredState(): Promise<void> {
   if (healedSlots.has(VS_KEY)) return;
   healedSlots.add(VS_KEY);
@@ -1029,6 +1123,7 @@ async function healRestoredState(): Promise<void> {
 /** 打开一个文件：加入标签并加载内容；opts.line 传入时打开后跳到该行（左栏搜索结果跳转用）。 */
 async function openFile(path: string, opts?: { line?: number }): Promise<void> {
   diffPane.value = null; // 打开文件时关闭提交文件详情
+  rightFolded.value = false; // 右栏被自动折叠时，点文件 = 用户要看内容，手动展开（宽度再次跨越阈值才重新评估）
   if (!vsState.openTabs.includes(path)) vsState.openTabs.push(path);
   vsState.activeTab = path;
   // 已有缓冲区（含跨面板暂存恢复的未保存内容）不再覆盖。
@@ -1094,6 +1189,7 @@ function selectTab(path: string): void {
 const diffPane = ref<{ title: string; lines: string[] } | null>(null);
 
 function showDiffPane(p: { title: string; lines: string[] }): void {
+  rightFolded.value = false; // diff 展示在右栏，折叠中先展开
   diffPane.value = p;
 }
 
@@ -1569,12 +1665,37 @@ function evalTopbarCompact(): void {
   topbarCompact.value = compact;
 }
 
+/* ---------- 右栏自动折叠：面板拖窄收起编辑区（只留项目树），拖宽恢复 ----------
+ * 与顶栏 compact 同一套宽度响应思路，但对象是左右分栏的**右栏**（标签 + 编辑器 + 状态栏）：
+ * 触发源是面板自身宽度（`rootRef`，ResizeObserver）——拖 DSH 右侧面板的宽度分隔条
+ * **不会触发 window resize**（这也是窗口宽度版联动「没有生效」的原因），必须观察面板元素。
+ * 迟滞带（560 折叠 / 680 恢复）防抖动；没开项目时不折叠（右栏「打开文件夹」空态比空树更有用）。
+ * 点击树里的文件 / 打开 diff 会手动展开（用户意图优先，直到宽度再次跨越阈值才重新评估）。 */
+/** 面板宽度 ≤ 此值时折叠右栏（编辑区）。 */
+const RIGHT_FOLD_BELOW = 560;
+/** 面板宽度 ≥ 此值时恢复右栏；与上者之间是迟滞死区。 */
+const RIGHT_UNFOLD_ABOVE = 680;
+const rightFolded = ref(false);
+let foldRO: ResizeObserver | null = null;
+
+function evalRightFold(): void {
+  const w = rootRef.value?.clientWidth ?? 0;
+  if (w <= RIGHT_FOLD_BELOW && vsState.projectDir) rightFolded.value = true;
+  else if (w >= RIGHT_UNFOLD_ABOVE) rightFolded.value = false;
+}
+
 onMounted(async () => {
   // 顶栏宽度监听：内容放不下（会折行）时把文本标签折叠成图标。
   if (topbarRef.value) {
     topbarRO = new ResizeObserver(() => evalTopbarCompact());
     topbarRO.observe(topbarRef.value);
     evalTopbarCompact();
+  }
+  // 面板宽度监听：拖窄到放不下编辑区时收起右栏（只留项目树），拖宽恢复。
+  if (rootRef.value) {
+    foldRO = new ResizeObserver(() => evalRightFold());
+    foldRO.observe(rootRef.value);
+    evalRightFold();
   }
   await initVSCodeState();
   // 恢复本会话内、上次面板卸载时暂存的未保存缓冲区（切面板不丢改动）。
@@ -1584,13 +1705,8 @@ onMounted(async () => {
   }
   // 自愈旧版本留下的坏状态（projectDir 是文件 / 标签里混入目录），必须在 setRoot 与加载内容之前。
   await healRestoredState();
-  if (vsState.projectDir) {
-    try {
-      await api.setRoot(vsState.projectDir, VS_KEY);
-    } catch {
-      /* ignore */
-    }
-  }
+  // 项目根注册（`api.setRoot`）**不在这里做**：`ProjectTree.rebuild()` 在列目录之前会注册一次，
+  // 两边都调等于每次挂载白打一个请求。这里只保证自愈后的目录已被 rebuild 用上（见下方 vsReady）。
   // 暂存里已有内容的文件不重读磁盘，否则会把未保存的改动覆盖掉。
   if (vsState.activeTab && !buffers[vsState.activeTab]) void loadContent(vsState.activeTab);
   // 最后才放行目录树建树（见 vsReady 的说明）：状态与 host 根都就绪，避免首屏空树。
@@ -1606,7 +1722,13 @@ onMounted(async () => {
   // 外部改动改为 push：登记本面板的标签路径集合，由 host 侧 stat 到变化时推过来。
   initExternalWatch();
   // 后台预取一次项目文件索引：让首次 Ctrl+P / 聚焦搜索框立刻有结果。
-  void ensureFileIndex();
+  // ⛔ 必须按「槽 + 项目根」去重（见 indexPrefetched 的说明）：这是一次**全量递归扫描**，
+  //    而切右侧面板 tab 会卸载重建整个面板 —— 不去重就是每切一次重扫一遍整个项目。
+  const idxKey = `${VS_KEY}:${vsState.projectDir ?? ""}`;
+  if (vsState.projectDir && !indexPrefetched.has(idxKey)) {
+    indexPrefetched.add(idxKey);
+    void ensureFileIndex();
+  }
   // 兜底：宿主未下发 tab 信息钩子（拿不到导航参数）时，取用工作台投递的待打开目录。
   const pendingDir = takePendingEditorProject();
   if (pendingDir) store.requestOpenProject(pendingDir);
@@ -1618,6 +1740,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   topbarRO?.disconnect();
   topbarRO = null;
+  foldRO?.disconnect();
+  foldRO = null;
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("beforeunload", onBeforeUnload);
   window.removeEventListener("beforeunload", persistVSCode);
@@ -1832,6 +1956,15 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
 }
+/* 右栏自动折叠：面板拖窄时收起编辑区（含分隔条），项目树占满整栏；拖宽自动恢复。 */
+.vs-body.right-folded .vs-split,
+.vs-body.right-folded .vs-right {
+  display: none;
+}
+.vs-body.right-folded .vs-left {
+  flex: 1 1 100%;
+  border-right: none;
+}
 .vs-left {
   flex: 0 0 auto;
   min-width: 0;
@@ -1853,6 +1986,10 @@ onBeforeUnmount(() => {
   border-radius: 6px;
   background: var(--dsh-bg, #0d1117);
   user-select: none;
+}
+/* 右栏折叠时的「展开编辑器」恢复按钮：推到 tab 条最右。 */
+.vs-unfold-btn {
+  margin-left: auto;
 }
 .vs-left-tab:disabled {
   opacity: 0.38;

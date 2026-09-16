@@ -1,11 +1,13 @@
 /**
  * 工作台推送通道（WebSocket）：把原先的定时轮询改为服务端主动推送。
  *
- * 目前承载两类订阅：
+ * 目前承载三类订阅：
  *  1. **文件落盘改动**（取代每 2.5s 一次的 `/mtimes` 轮询）；
- *  2. **SSH 主机连通性**（取代每 30s 一次的 `/ssh/ping` 轮询）。
+ *  2. **SSH 主机连通性**（取代每 30s 一次的 `/ssh/ping` 轮询）；
+ *  3. **会话实时流**（`session-watch`，取代独立的 `/stream/session` SSE —— 那条 SSE 占
+ *     HTTP/1.1 连接池配额，并入本 WS 后浏览器池里只剩 REST 请求可用）。
  *
- * ⛔ 两者共用同一条连接，而不是各开一条：宿主是 `node:http`（HTTP/1.1），浏览器对同一源只允许
+ * ⛔ 三者共用同一条连接，而不是各开一条：宿主是 `node:http`（HTTP/1.1），浏览器对同一源只允许
  * 约 6 条并发连接，长连接各自占一条 —— 早前终端多开即因连接被占满而排队卡死（见 topics/terminal.md）。
  * 推送通道同理：每加一类订阅就多一条长连接，迟早复现同类故障。
  *
@@ -13,11 +15,14 @@
  *   客户端 → 服务端  `{ type: "watch", paths: string[] }`     覆盖式设置本连接关注的**文件路径**
  *   客户端 → 服务端  `{ type: "ssh-watch", ids: string[] }`   覆盖式设置本连接关注的**SSH 主机**
  *   客户端 → 服务端  `{ type: "ssh-check", ids: string[] }`   请求立刻探测这些主机并**无条件回推**
+ *   客户端 → 服务端  `{ type: "session-watch", id: string | null }` 挂载/切换/停止会话实时流
  *   服务端 → 客户端  `{ type: "ready" }`                      握手完成
  *   服务端 → 客户端  `{ type: "changed", items: { [path]: { mtimeMs, size } | null } }`
  *                    —— 仅在某路径 mtime/size 相对**上次采样**变化时推送；`null` 表示已不存在
  *   服务端 → 客户端  `{ type: "ssh-status", items: { [id]: { alive, error? } } }`
  *                    —— 连通性相对上次探测变化时推送；新订阅 / 显式检查时无条件回推
+ *   服务端 → 客户端  `{ type: "session-ev", ev: SessionStreamEvent }`
+ *                    —— 会话实时流事件（snapshot / files / status，见 routes-session-stream.ts）
  *
  * 收益：浏览器侧不再周期性发请求（省掉往返与路由开销），反应时间从「最多等一个前端轮询周期」
  * 变成「一个服务端采样周期」；多条连接的订阅在此取并集后只探测一次。
@@ -26,7 +31,6 @@
  * 其中（宿主 profile 的 node_modules 里也装不到）。RFC6455 的服务端最小子集——握手 + 文本帧
  * 编码 + ping/pong/close——不到 200 行，独立实现比引入原生依赖链更稳。
  */
-import { createHash } from "node:crypto";
 import { stat } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
@@ -34,182 +38,22 @@ import type { WebUpgradeRoute } from "@deepseek-ai/dsh-host-webserver";
 
 import { connFor } from "../ssh/ssh-hosts.js";
 import { PREFIX } from "./routes-util.js";
+import { createSessionStreamSource, type HostCtx } from "./routes-session-stream.js";
+// RFC6455 最小实现已提取为共享模块：/push 与 /exec-mux-ws 两处升级路由共用。
+import { WsConn, acceptKey } from "./ws-conn.js";
 
-/** WebSocket 握手用的固定 GUID（RFC6455 §1.3）。 */
-const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 /** 文件采样间隔（ms）：本地 stat 很便宜，取 1s 让外部保存几乎即时反映到界面。 */
 const FILE_SAMPLE_MS = 1000;
 /** SSH 探测间隔（ms）：复用连接池里的常驻连接跑一次 echo，代价约一个 RTT，可远密于原 30s 轮询。 */
 const SSH_SAMPLE_MS = 15_000;
 /** SSH 探测超时（ms）：网络挂起时必须能收敛，否则一次探测会卡住整轮采样。 */
 const SSH_PROBE_TIMEOUT_MS = 8_000;
-/** 单帧上限：本协议的消息都很小，超过即视为异常并断开（防内存被撑爆）。 */
-const MAX_FRAME = 1 << 20;
-
-/* ------------------------------------------------------------------ *
- * RFC6455 最小实现（服务端）
- * ------------------------------------------------------------------ */
-
-/** 握手应答值：`base64(sha1(sec-websocket-key + GUID))`。 */
-function acceptKey(key: string): string {
-  return createHash("sha1").update(key + WS_GUID).digest("base64");
-}
-
-/** 编码一个服务端→客户端的帧（服务端帧按规范不加掩码）。 */
-function encodeFrame(payload: Buffer, opcode = 0x1): Buffer {
-  const len = payload.length;
-  const head = Buffer.alloc(len < 126 ? 2 : len < 65536 ? 4 : 10);
-  head[0] = 0x80 | opcode; // FIN + opcode
-  if (len < 126) {
-    head[1] = len;
-  } else if (len < 65536) {
-    head[1] = 126;
-    head.writeUInt16BE(len, 2);
-  } else {
-    head[1] = 127;
-    head.writeBigUInt64BE(BigInt(len), 2);
-  }
-  return Buffer.concat([head, payload]);
-}
-
-/** 解析出的一帧。 */
-interface WsFrame {
-  opcode: number;
-  payload: Buffer;
-}
-
-/** 一条已升级的连接：负责帧的增量解析、发送与关闭。 */
-class WsConn {
-  /** 已收但尚未构成完整帧的字节（TCP 是字节流，帧可能跨多个 data 事件）。 */
-  private buf: Buffer = Buffer.alloc(0);
-  private closed = false;
-
-  constructor(
-    private readonly socket: Duplex,
-    /** 收到文本帧的回调。 */
-    private readonly onMessage: (text: string) => void,
-    /** 连接结束（关闭或出错）的回调。 */
-    private readonly onDone: () => void,
-  ) {
-    socket.on("data", (chunk: Buffer) => this.feed(chunk));
-    socket.on("error", () => this.destroy());
-    socket.on("close", () => this.finish());
-  }
-
-  /** 送入一段收到的字节并尽可能多地解析出完整帧。 */
-  feed(chunk: Buffer): void {
-    if (this.closed) return;
-    this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
-    for (;;) {
-      const frame = this.next();
-      if (!frame) return;
-      if (frame.opcode === 0x8) {
-        // close：回一个 close 帧后断开。
-        this.send(Buffer.alloc(0), 0x8);
-        this.destroy();
-        return;
-      }
-      if (frame.opcode === 0x9) {
-        // ping → pong（原样回传负载）
-        this.send(frame.payload, 0xa);
-        continue;
-      }
-      if (frame.opcode === 0x1) {
-        this.onMessage(frame.payload.toString("utf8"));
-        continue;
-      }
-      // pong（0xa）/ 分片（0x0）/ 二进制：本协议不用，忽略。
-    }
-  }
-
-  /** 取下一帧；不足一帧时返回 null（等待更多字节）。 */
-  private next(): WsFrame | null {
-    const b = this.buf;
-    if (b.length < 2) return null;
-    const opcode = b[0] & 0x0f;
-    const masked = (b[1] & 0x80) !== 0;
-    let len = b[1] & 0x7f;
-    let off = 2;
-    if (len === 126) {
-      if (b.length < 4) return null;
-      len = b.readUInt16BE(2);
-      off = 4;
-    } else if (len === 127) {
-      if (b.length < 10) return null;
-      const big = b.readBigUInt64BE(2);
-      if (big > BigInt(MAX_FRAME)) {
-        this.destroy();
-        return null;
-      }
-      len = Number(big);
-      off = 10;
-    }
-    if (len > MAX_FRAME) {
-      this.destroy();
-      return null;
-    }
-    const maskLen = masked ? 4 : 0;
-    const total = off + maskLen + len;
-    if (b.length < total) return null;
-    let payload = b.subarray(off + maskLen, total);
-    if (masked) {
-      // 客户端帧必须带掩码：按 4 字节循环异或还原。
-      const mask = b.subarray(off, off + 4);
-      const out = Buffer.allocUnsafe(len);
-      for (let i = 0; i < len; i++) out[i] = payload[i] ^ mask[i & 3];
-      payload = out;
-    } else {
-      // 拷贝一份：否则会与后续 concat 复用的内存相互影响。
-      payload = Buffer.from(payload);
-    }
-    this.buf = b.subarray(total);
-    return { opcode, payload };
-  }
-
-  /** 发送一个 JSON 文本帧（连接已关闭时静默忽略）。 */
-  sendJson(value: unknown): void {
-    this.send(Buffer.from(JSON.stringify(value), "utf8"), 0x1);
-  }
-
-  private send(payload: Buffer, opcode: number): void {
-    if (this.closed) return;
-    try {
-      this.socket.write(encodeFrame(payload, opcode));
-    } catch {
-      /* 对端已断开：由 close/error 事件收尾 */
-    }
-  }
-
-  /** 主动关闭（先回 close 帧，再销毁 socket）。 */
-  destroy(): void {
-    if (this.closed) return;
-    this.closed = true;
-    try {
-      this.socket.write(encodeFrame(Buffer.alloc(0), 0x8));
-    } catch {
-      /* ignore */
-    }
-    try {
-      this.socket.destroy();
-    } catch {
-      /* ignore */
-    }
-    this.onDone();
-  }
-
-  /** 对端已关闭：只做清理（不再写 socket）。 */
-  private finish(): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.onDone();
-  }
-}
 
 /* ------------------------------------------------------------------ *
  * 订阅
  * ------------------------------------------------------------------ */
 
-/** 一条连接的订阅：关注的文件路径 + SSH 主机，以及无条件回推的待办集合。 */
+/** 一条连接的订阅：关注的文件路径 + SSH 主机 + 会话流，以及无条件回推的待办集合。 */
 interface PushSub {
   paths: Set<string>;
   sshIds: Set<string>;
@@ -218,6 +62,10 @@ interface PushSub {
    * 否则「基线不推送」的规则会让新接入的界面一直停在「未知」，最多等一个采样周期。
    */
   force: Set<string>;
+  /** 当前挂载的会话实时流 id（null = 未订阅）。 */
+  sessionId: string | null;
+  /** 会话实时流的清理函数（换会话 / 断开时调用；null = 未挂载）。 */
+  sessionCleanup: (() => void) | null;
   send: (value: unknown) => void;
   close: () => void;
 }
@@ -422,6 +270,8 @@ interface PushMessage {
   type?: string;
   paths?: unknown;
   ids?: unknown;
+  /** `session-watch` 的目标会话 id（显式 null = 停止会话流）。 */
+  id?: unknown;
 }
 
 /** 从任意值里取出非空字符串数组。 */
@@ -431,7 +281,7 @@ function stringsOf(value: unknown): string[] {
 }
 
 /** 处理一次升级请求：完成握手并登记订阅。 */
-function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+function handleUpgrade(ctxProvider: (() => HostCtx | undefined) | undefined, req: IncomingMessage, socket: Duplex, head: Buffer): void {
   const key = req.headers["sec-websocket-key"];
   if (typeof key !== "string" || !key) {
     socket.destroy();
@@ -444,7 +294,17 @@ function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void
       `Sec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`,
   );
 
-  const sub: PushSub = { paths: new Set(), sshIds: new Set(), force: new Set(), send: () => {}, close: () => {} };
+  const sub: PushSub = { paths: new Set(), sshIds: new Set(), force: new Set(), sessionId: null, sessionCleanup: null, send: () => {}, close: () => {} };
+  /** 卸载当前会话流（换会话 / 显式停止 / 断开时）。 */
+  const dropSession = (): void => {
+    try {
+      sub.sessionCleanup?.();
+    } catch {
+      /* ignore */
+    }
+    sub.sessionCleanup = null;
+    sub.sessionId = null;
+  };
   const conn = new WsConn(
     socket,
     (text) => {
@@ -459,6 +319,20 @@ function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void
         sub.paths = new Set(stringsOf(msg.paths));
         gcSeen();
         syncTimers();
+        return;
+      }
+      if (msg.type === "session-watch") {
+        // 会话实时流并入本连接（取代独立的 /stream/session SSE，省一条 HTTP 池配额）。
+        dropSession();
+        const id = typeof msg.id === "string" ? msg.id.trim() : "";
+        if (!id) return; // 显式空：只停止
+        sub.sessionId = id;
+        sub.sessionCleanup = createSessionStreamSource({
+          sessionId: id,
+          ctx: ctxProvider?.(),
+          // 会话事件包一层 `session-ev` 再发，避免与会话类型名直接碰撞。
+          send: (ev) => sub.send({ type: "session-ev", ev }),
+        });
         return;
       }
       if (msg.type === "ssh-watch") {
@@ -484,6 +358,7 @@ function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void
       }
     },
     () => {
+      dropSession();
       subs.delete(sub);
       gcSeen();
       gcSsh();
@@ -500,6 +375,6 @@ function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void
 }
 
 /** 升级路由：`/api/dsh-file-workbench/push`（必须是精确路径）。 */
-export function makePushUpgrade(): WebUpgradeRoute {
-  return { path: `${PREFIX}/push`, handler: handleUpgrade };
+export function makePushUpgrade(ctxProvider?: () => HostCtx | undefined): WebUpgradeRoute {
+  return { path: `${PREFIX}/push`, handler: (req, socket, head) => handleUpgrade(ctxProvider, req, socket, head) };
 }

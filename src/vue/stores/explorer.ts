@@ -177,6 +177,10 @@ export async function goSessionDir(): Promise<boolean> {
 }
 
 export function refreshListing(): Promise<void> {
+  // 显式刷新 = 用户要最新数据：先作废相应的读缓存，否则会拿到 30s 内的旧结果（点了像没反应）。
+  // （`browse` 没进缓存，所以文件视图的刷新本来就走真请求。）
+  api.invalidateReadCache("mycomputer");
+  api.invalidateReadCache("drives");
   // 「此电脑」视图刷新即重新读取磁盘列表。
   if (explorer.view === "computer") return loadDrives();
   // 回收站视图的列表由回收站接口提供，不能拿占位「路径」去 browse（否则报“不是绝对路径”）。
