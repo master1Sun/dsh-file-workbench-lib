@@ -16,6 +16,15 @@ import { toast } from "./toast";
 import * as api from "./useApi";
 import { deriveRepoDirName } from "../../../shared/repo";
 import type { RepoCloneKind } from "../../../shared/types";
+import { accounts, accountDialog, openAccountDialog, refreshAccounts } from "../../stores/accounts";
+
+/**
+ * 账号下拉里「新建账号…」的哨兵值（不是真实账号 id）。
+ *
+ * 原生 `<select>` 选中哨兵后必须立刻把 DOM 值改回去：哨兵不会写进 `state.accountId`，
+ * 而 Vue 只在**绑定值变化**时才 patch DOM —— 不手动回滚的话下拉会一直显示「新建账号…」。
+ */
+const NEW_ACCOUNT = "__new__";
 
 export function useCloneForm(kind: RepoCloneKind) {
   const { t } = useI18n();
@@ -26,6 +35,8 @@ export function useCloneForm(kind: RepoCloneKind) {
     name: "",
     shallow: false,
     revision: "",
+    /** 显式选中的账号 id；空串 = 按地址自动匹配。 */
+    accountId: "",
   });
   /** 用户是否手工改过子目录名：改过就不再跟随地址自动覆盖。 */
   const nameTouched = ref(false);
@@ -70,6 +81,78 @@ export function useCloneForm(kind: RepoCloneKind) {
     },
   );
 
+  /* ── 账号（凭据）选择 ──────────────────────────────────────────────────────
+   * 克隆前就能选：默认「自动匹配」（与仓库内同步命令同一套规则），也可指定某条账号。
+   * 关键是把「最终会用哪条」显式摆出来 —— 实测踩过：账号填错会让本该走 svn 缓存 /
+   * wincred 的地址反而失败，所以在下手之前必须看得见。 */
+
+  /** 只列当前类型的账号（Git 弹窗不出现 SVN 账号）。 */
+  const accountOptions = computed(() => accounts.value.filter((a) => a.kind === kind));
+  const selectedAccount = computed(() => accountOptions.value.find((a) => a.id === state.value.accountId) ?? null);
+
+  /** 自动匹配（`/accounts/match`）的结果：host 级默认账号 / URL 前缀最长者。 */
+  const autoAccount = ref<api.AccPublic | null>(null);
+  let matchTimer = 0;
+
+  async function loadAutoAccount(): Promise<void> {
+    const url = state.value.url.trim();
+    if (!url || state.value.accountId) {
+      autoAccount.value = null;
+      return;
+    }
+    const r = await api.accountMatch(kind, url).catch(() => null);
+    autoAccount.value = r?.account ?? null;
+  }
+
+  // 地址是边输边改的，防抖 400ms：不为一串中间态地址连打接口。
+  watch(
+    () => state.value.url,
+    () => {
+      if (matchTimer) window.clearTimeout(matchTimer);
+      matchTimer = window.setTimeout(() => void loadAutoAccount(), 400);
+    },
+  );
+
+  /** 最终会用于克隆的那条账号（显式选中优先；否则是自动匹配结果）。 */
+  const effectiveAccount = computed(() => (state.value.accountId ? selectedAccount.value : autoAccount.value));
+
+  /** 远端（`ssh://`）目标是在服务器上执行 clone，本机账号注入不适用 —— 该行直接隐藏。 */
+  const isRemoteDir = computed(() => state.value.dir.trim().startsWith("ssh://"));
+
+  /** 记录「新建账号」前的 id 集合，用于在对话框关闭后认出刚建的那条并自动选中。 */
+  let knownAccountIds: string[] = [];
+  const pendingNewAccount = ref(false);
+
+  function newAccount(): void {
+    knownAccountIds = accounts.value.map((a) => a.id);
+    pendingNewAccount.value = true;
+    openAccountDialog({ kind, url: state.value.url.trim() });
+  }
+
+  /** 下拉变化：哨兵值改走「新建账号」，其余写进 state（见 NEW_ACCOUNT 的注释）。 */
+  function onAccountChange(e: Event): void {
+    const el = e.target as HTMLSelectElement;
+    const v = el.value;
+    if (v === NEW_ACCOUNT) {
+      el.value = state.value.accountId;
+      newAccount();
+      return;
+    }
+    state.value.accountId = v;
+  }
+
+  // 账号对话框关闭后：刷新列表，并把「刚新建的那条」自动选上（否则用户还得再选一次）。
+  watch(
+    () => accountDialog.open,
+    async (open) => {
+      if (open || !pendingNewAccount.value) return;
+      pendingNewAccount.value = false;
+      await refreshAccounts();
+      const added = accounts.value.find((a) => a.kind === kind && !knownAccountIds.includes(a.id));
+      if (added) state.value.accountId = added.id;
+    },
+  );
+
   // 打开瞬间从模块级状态接管（kind / dir / key 由打开方设定），并清掉上一次的错误与计时。
   // immediate：面板是 v-if 挂上来的，挂载时 open 已经是 true，需要立刻初始化。
   watch(
@@ -82,11 +165,15 @@ export function useCloneForm(kind: RepoCloneKind) {
         name: "",
         shallow: false,
         revision: "",
+        accountId: "",
       };
       nameTouched.value = false;
       error.value = "";
       elapsed.value = 0;
       busy.value = false;
+      autoAccount.value = null;
+      // 列表可能被「账号管理」改过（尤其在另一侧面板里），打开时拉一次最新的。
+      void refreshAccounts();
     },
     { immediate: true },
   );
@@ -120,6 +207,7 @@ export function useCloneForm(kind: RepoCloneKind) {
         name: state.value.name.trim() || undefined,
         depth: kind === "git" && shallow ? 1 : 0,
         revision: kind === "svn" ? revision.trim() || undefined : undefined,
+        accountId: state.value.accountId || undefined,
         key: cloneDialog.key || undefined,
       });
       const done = cloneDialog.onDone;
@@ -144,10 +232,17 @@ export function useCloneForm(kind: RepoCloneKind) {
     }
   }
 
-  /** 面板卸载时清掉秒表，避免空转。 */
+  /** 面板卸载时清掉秒表与防抖，避免空转。 */
   function dispose(): void {
     if (timer) window.clearInterval(timer);
+    if (matchTimer) window.clearTimeout(matchTimer);
     timer = 0;
+    matchTimer = 0;
+  }
+
+  /** 下拉选项文案：显示名 + 生效范围（留空即该主机全部仓库，与账号管理列表同一套说法）。 */
+  function accountLabel(a: api.AccPublic): string {
+    return `${a.name} · ${a.url || t("accAllRepos")}`;
   }
 
   return {
@@ -159,6 +254,12 @@ export function useCloneForm(kind: RepoCloneKind) {
     pickerOpen,
     targetPath,
     canSubmit,
+    accountOptions,
+    effectiveAccount,
+    isRemoteDir,
+    newAccountValue: NEW_ACCOUNT,
+    accountLabel,
+    onAccountChange,
     onDirPicked,
     onModel,
     submit,

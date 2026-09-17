@@ -22,6 +22,12 @@ import {
 import type { MuxTermStreamEvent } from "../../../shared/types";
 import { t } from "../core/i18n";
 import { toast } from "../core/toast";
+import {
+  officialTermApi,
+  officialTermAvailable,
+  type OtDataDetail,
+  type OtStatusDetail,
+} from "./officialTerm";
 
 /** 远端 ssh 会话信息（有值即「该终端登录在远端」）。 */
 export interface TermSshInfo {
@@ -55,6 +61,12 @@ export interface TermTab {
   sshDegraded?: boolean;
   /** ssh 直连失败降级时，本机 shell 里要敲的 ssh 登录命令（仅 ssh 标签用）。 */
   fallbackCmd?: string;
+  /**
+   * 输出后端：`"official"` = 宿主官方终端（`ctx.webTerminals`，**仅本机 shell**，
+   * 工作目录固定为会话工作区；PTY 生命周期/重连/清理全归官方）；缺省 = 插件自建
+   * exec 会话（/exec-open + 复用流）。SSH 标签永远是自建后端（官方没有远端主机概念）。
+   */
+  backend?: "official";
   /** 累积的原始输出（含 ANSI 转义），供 xterm 重放；超过上限从头截断。 */
   output: string;
   /** SSE 输出流是否在线（断开时自动重连）。 */
@@ -335,6 +347,13 @@ async function reopenShell(tab: TermTab): Promise<void> {
   if (!termTabs.value.includes(tab) || tab.connected) return;
   tab.output = "";
   termPreviews.value = { ...termPreviews.value, [tab.id]: "" };
+  if (tab.backend === "official") {
+    // 官方终端重开 = 关掉已退出的旧进程，起新官方终端（同 key 先 close 再 create）。
+    officialTermApi()?.close(tab.id);
+    tab.connected = true;
+    void attachOfficial(tab);
+    return;
+  }
   try {
     const r = await openSessionFor(tab, muxKey || undefined);
     if (r?.cwd) tab.cwd = r.cwd;
@@ -392,7 +411,9 @@ function sendInitCmd(tab: TermTab): void {
   if (!initCmd) return;
   tab.initCmd = undefined;
   window.setTimeout(() => {
-    if (tab.connected) void sendTerminalInput(tab.session, `${initCmd}\r`);
+    if (!tab.connected) return;
+    if (tab.backend === "official") officialTermApi()?.write(tab.id, `${initCmd}\r`);
+    else void sendTerminalInput(tab.session, `${initCmd}\r`);
   }, 800);
 }
 
@@ -421,16 +442,110 @@ function legacyStream(tab: TermTab, key?: string): void {
   void connect();
 }
 
+/* ---------- 官方终端后端（ctx.webTerminals，经 OfficialTerminalBridge）---------- */
+
+/** 官方桥事件是否已挂。window 级监听全模块只挂一份，按 detail.tag 分发到标签。 */
+let otListenersBound = false;
+
+/** 官方后端的标签查找：tag 即 tab.id，且只认 official 后端（防串线）。 */
+function otTabOf(tag: string): TermTab | undefined {
+  return termTabs.value.find((t) => t.id === tag && t.backend === "official");
+}
+
+/** 官方桥输出帧 → 与复用流 output 分支同款的「三写」（缓冲/xterm sink/预览）。 */
+function onOtData(d: OtDataDetail): void {
+  const tab = otTabOf(d.tag);
+  if (!tab) return;
+  // snapshot（首连/重连第一帧）按普通文本写入即可：首连时 xterm 为空，写入即正确；
+  // 重连时官方整机快照含定位重绘序列，追加写入后终端会自我校正。
+  tab.output = capOutput(tab.output + d.text);
+  outputSinks.get(tab.id)?.(d.text);
+  pushPreview(tab.id, d.text);
+}
+
+/** 官方桥状态 → 驱动 tab.connected / cwd / 自动重开。 */
+function onOtStatus(d: OtStatusDetail): void {
+  const tab = otTabOf(d.tag);
+  if (!tab) return;
+  if (d.cwd && d.cwd !== tab.cwd) tab.cwd = d.cwd;
+  if (d.exited) {
+    tab.connected = false;
+    // 与自建后端的本机行为对齐：进程退出后自动重开一个，标签常驻可用。
+    // （官方语义是「退出不重建」，重开 = 新官方终端，见 reopenShell 的 official 分支。）
+    window.setTimeout(() => void reopenShell(tab), 300);
+    return;
+  }
+  if (d.phase === "connected" && !tab.connected) {
+    tab.connected = true;
+    // initCmd（「在终端打开」的自动命令）等 shell 就绪后再敲，与 sendInitCmd 同一节拍。
+    sendInitCmd(tab);
+  } else if (d.phase === "failed" && d.error) {
+    const line = `\r\n\x1b[33m[term] ${d.error}\x1b[0m\r\n`;
+    tab.output = capOutput(tab.output + line);
+    outputSinks.get(tab.id)?.(line);
+  }
+  // disconnected/connecting 不动 connected：官方的 RemoteStream 自己重连并以 snapshot 续传，
+  // 期间把 connected 打假只会让用户这几十毫秒里的按键被队列丢弃。
+}
+
+/** 挂官方桥事件（幂等）。 */
+function ensureOtListeners(): void {
+  if (otListenersBound || typeof window === "undefined") return;
+  otListenersBound = true;
+  window.addEventListener("dshfw-ot-data", (ev) => onOtData((ev as CustomEvent<OtDataDetail>).detail));
+  window.addEventListener("dshfw-ot-status", (ev) => onOtStatus((ev as CustomEvent<OtStatusDetail>).detail));
+}
+
 /**
- * 建立终端标签的输出流：优先「共用一条复用流 + `/exec-open` 显式建会话」，
- * 老 host（无 `/exec-open`）自动回退到「每终端一条 `/exec-stream`」。
+ * 建立官方终端：先挂事件监听再 create（数据从 create 内部的订阅就开始推，顺序反了丢首帧）。
+ * create 中途标签被关时补一个 close，避免留下无主进程占会话终端配额。
+ */
+async function attachOfficial(tab: TermTab): Promise<void> {
+  const api = officialTermApi();
+  if (!api) {
+    // 桥中途消失（bundle 重注入窗口期）：回退插件自建后端。
+    tab.backend = undefined;
+    tab.connected = false;
+    startStream(tab);
+    return;
+  }
+  ensureOtListeners();
+  // 官方终端固定在**会话工作区**开 shell（TerminalCreateRequest 没有 cwd 字段），
+  // tab.cwd 以官方回执为准；tab.cwd 里的旧值只影响 UI 首帧面包屑，一帧即被纠正。
+  const r = await api.create(tab.id, { cols: 80, rows: 24 }).catch(() => null);
+  if (r === null) {
+    tab.backend = undefined;
+    tab.connected = false;
+    startStream(tab);
+    return;
+  }
+  if (!termTabs.value.includes(tab)) {
+    api.close(tab.id);
+    return;
+  }
+  if (r.cwd) tab.cwd = r.cwd;
+}
+
+/**
+ * 建立终端标签的输出流。后端选择（按优先级）：
  *
- * 会话后端（本机 shell / 远端 ssh）的选择在 `openSessionFor` 里；本函数只管「建立 + 挂流」。
+ * 0. **官方终端**（`backend = "official"`）：非 ssh 标签且宿主官方终端服务可用时，
+ *    进程层交给 `ctx.webTerminals`（PTY 创建/重连/清理全归官方，见 OfficialTerminalBridge）。
+ *    SSH 标签不适用——官方只有本地 shell——继续走插件自建通道；
+ * 1. **共用一条复用流 + `/exec-open` 显式建会话**，老 host（无 `/exec-open`）自动回退
+ *    「每终端一条 `/exec-stream`」。会话后端（本机 shell / 远端 ssh）的选择在
+ *    `openSessionFor` 里；本函数只管「建立 + 挂流」。
  */
 export function startStream(tab: TermTab, key?: string): void {
   if (tab.connected) return;
   tab.connected = true;
   if (key) muxKey = key;
+  if (!tab.ssh && officialTermAvailable()) {
+    tab.backend = "official";
+    void attachOfficial(tab);
+    return;
+  }
+  tab.backend = undefined;
   if (muxSupported === false) {
     legacyStream(tab, key);
     return;
@@ -498,7 +613,17 @@ function flushInput(session: string): void {
     window.clearTimeout(q.timer);
     q.timer = 0;
   }
-  if (!q.pending || q.inFlight) return;
+  if (!q.pending) return;
+  // 官方后端：write 是命令式且官方内部已串行化，无 HTTP 在途概念，直接发完清队。
+  const tab = termTabs.value.find((t) => t.session === session);
+  if (tab?.backend === "official") {
+    const data = q.pending;
+    q.pending = "";
+    officialTermApi()?.write(tab.id, data);
+    if (!q.pending && !q.timer) inputQueues.delete(session);
+    return;
+  }
+  if (q.inFlight) return;
   const data = q.pending;
   q.pending = "";
   q.inFlight = true;
@@ -609,12 +734,23 @@ export function dropTerminalInput(session?: string): void {
 /** 断开终端标签的输出流（不杀后端 shell；closeTab/restartShell/closeAll 时调用）。 */
 export function stopStream(tab: TermTab): void {
   tab.connected = false;
+  // 官方后端：只摘输出流，进程保留（同官方 unmount 语义）；杀进程由 killTabBackend 负责。
+  if (tab.backend === "official") officialTermApi()?.detach(tab.id);
   tab.streamAbort?.abort();
   tab.streamAbort = undefined;
   // 流已断、会话即将被 kill：缓冲里未发出的按键不再有意义。
   dropTerminalInput(tab.session);
   // 会话重建后后端 pty 会回到默认尺寸，尺寸记忆必须一并清掉，否则重连后不会再上报。
   termSizes.delete(tab.session);
+}
+
+/** 终止一个标签的后端进程：官方后端走桥的 close，自建后端走 /exec-kill。 */
+function killTabBackend(tab: TermTab): Promise<void> {
+  if (tab.backend === "official") {
+    officialTermApi()?.close(tab.id);
+    return Promise.resolve();
+  }
+  return killExec(tab.session).catch(() => {}) as Promise<void>;
 }
 
 /* ---------- 伪终端尺寸上报 ---------- */
@@ -638,6 +774,12 @@ export function resizeTerminal(session: string, cols: number, rows: number): voi
   const sig = `${cols}x${rows}`;
   if (termSizes.get(session) === sig) return;
   termSizes.set(session, sig);
+  // 官方后端：尺寸走桥的 resize（内部调官方 view.resize）。
+  const tab = termTabs.value.find((t) => t.session === session);
+  if (tab?.backend === "official") {
+    officialTermApi()?.resize(tab.id, cols, rows);
+    return;
+  }
   void resizeTerminalSession(session, cols, rows).catch(() => {
     /* 会话可能刚被关闭（老 host 还可能是 404）：静默失败，下次 fit 再试 */
   });
@@ -645,10 +787,14 @@ export function resizeTerminal(session: string, cols: number, rows: number): voi
 
 /** 重启终端 shell：换 shell 或重置会话时调用，先断开流并终止后端进程，再以新配置重连。 */
 export async function restartShell(tab: TermTab, key?: string): Promise<void> {
+  const wasOfficial = tab.backend === "official";
   stopStream(tab);
   tab.output = "";
   termPreviews.value = { ...termPreviews.value, [tab.id]: "" };
-  await killExec(tab.session).catch(() => {});
+  await killTabBackend(tab);
+  // 官方进程已被 close：换 shell 对官方终端无意义（shell 由官方偏好决定），
+  // 直接按原后端重开一个；自建后端沿用原逻辑。
+  if (wasOfficial) tab.backend = undefined;
   startStream(tab, key);
 }
 
@@ -658,7 +804,7 @@ export function closeTermTab(id: string): void {
   const tab = termTabs.value[idx];
   if (!tab) return;
   stopStream(tab);
-  void killExec(tab.session).catch(() => {});
+  void killTabBackend(tab);
   termTabs.value.splice(idx, 1);
   clearPreview(id);
   // 关掉的窗口若处于最小化态，清掉它的标记，避免残留在 dock 列表里。
@@ -682,7 +828,7 @@ export async function closeAllTerminals(): Promise<void> {
   await Promise.all(
     tabs.map((t) => {
       stopStream(t);
-      return killExec(t.session).catch(() => {});
+      return killTabBackend(t).catch(() => {});
     }),
   );
 }

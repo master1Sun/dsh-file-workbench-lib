@@ -82,12 +82,17 @@
 
     <!-- SSH 远端主机（插件自有分组：已配置主机各占一行，点击进入远端根浏览） -->
     <div class="fw-nav-sec" :class="{ collapsed: !open.ssh }">
-      <button class="fw-sec-h" :aria-expanded="open.ssh" @click="toggle('ssh')">
+      <button
+        class="fw-sec-h"
+        :aria-expanded="open.ssh"
+        @click="toggle('ssh')"
+        @contextmenu.prevent.stop="onSshGroupCtx"
+      >
         <span class="fw-caret">{{ open.ssh ? "▾" : "▸" }}</span>
         <span class="fw-sec-txt">{{ t("sshNavGroup") }}</span>
       </button>
       <div v-if="open.ssh" class="fw-sec-b">
-        <div v-if="sshHosts.length === 0" class="fw-nav-empty">{{ t("sshEmpty") }}</div>
+        <div v-if="sshHosts.length === 0" class="fw-nav-empty" @contextmenu.prevent.stop="onSshGroupCtx">{{ t("sshEmpty") }}</div>
         <button
           v-for="h in sshHosts"
           :key="h.id"
@@ -140,7 +145,7 @@
 import { computed, onMounted, ref } from "vue";
 import { explorer, browseTo, enterRecycle, openThisPc, refreshListing } from "../../../stores/explorer";
 import { openTerminal } from "../../../stores/workbench";
-import { sshHosts, sshRootRef, sshParentOf, sshStateOf, sshErrorOf, refreshSshHosts, refreshSshStatus, pingSshHost, startSshStatusWatch, openSshEditDialog } from "../../../stores/ssh";
+import { sshHosts, sshRootRef, sshParentOf, sshStateOf, sshErrorOf, refreshSshHosts, refreshSshStatus, pingSshHost, startSshStatusWatch, openSshEditDialog, openSshAddDialog } from "../../../stores/ssh";
 import { useI18n } from "../../../composables/core/i18n";
 import { openProjectInEditor } from "../../../composables/core/sidebarRight";
 import { openPreview, toast } from "../../../stores/workbench";
@@ -206,6 +211,31 @@ function onSshCtx(e: MouseEvent, h: api.SshHostPublic): void {
     { separator: true },
     { label: t("menuCopyPath"), icon: "link", onClick: () => void copyPath(sshRootRef(h.id)) },
   ]);
+}
+
+/**
+ * 「SSH 远程」分组标题右键：分组级操作（添加主机 / 展开折叠 / 刷新）。
+ *
+ * 标题常驻可见（折叠时也在），空列表时点不到任何主机行 —— 这是「列表为空又没别的入口」
+ * 场景下唯一的就近新建入口，故放在首位。
+ */
+function onSshGroupCtx(e: MouseEvent): void {
+  openMenu(e, [
+    { label: t("sshNewHost"), icon: "plus", onClick: () => openSshAddDialog() },
+    { separator: true },
+    {
+      label: open.ssh ? t("navCollapse") : t("navExpand"),
+      icon: open.ssh ? "chevronDown" : "chevronRight",
+      onClick: () => toggle("ssh"),
+    },
+    { label: t("menuRefresh"), icon: "refresh", onClick: () => void refreshSshAll() },
+  ]);
+}
+
+/** 重新拉取主机列表并重探所有连接状态（右键「刷新」）。 */
+async function refreshSshAll(): Promise<void> {
+  await refreshSshHosts();
+  await refreshSshStatus();
 }
 
 /** 测试连接并让指示灯立刻反映结果。 */

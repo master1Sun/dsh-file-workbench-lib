@@ -153,6 +153,22 @@
   cursor: pointer;
   user-select: none;
 }
+
+/* 账号下拉：尺寸/配色全部复用 .fw-clone-input，这里只补原生控件特有的部分。
+   箭头与弹出列表跟随 `html[data-theme]` 上的 color-scheme（theme.ts 写在 documentElement 上），
+   故不必自己画箭头 —— 画了反而要硬编码一个颜色，白天/黑夜必错一边。 */
+.fw-clone-select {
+  cursor: pointer;
+  /* 原生箭头自带左侧留白，抵掉输入框那 12px 的右内边距，文字才不会缩进过大 */
+  padding-right: 6px;
+}
+.fw-clone-select:disabled {
+  cursor: not-allowed;
+}
+.fw-clone-select option {
+  background: var(--dsh-bg2, #161b22);
+  color: var(--dsh-fg, #c9d1d9);
+}
 /* 与 .fw-clone-input 同高的槽位：让 Git 的复选框行与 SVN 的「版本」输入框行占位一致，
    两个弹窗切换时总高度与各行位置完全对齐。 */
 .fw-clone-slot {

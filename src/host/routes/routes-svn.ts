@@ -15,6 +15,7 @@ import { mkdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { deriveRepoDirName, sanitizeRepoDirName } from "../../shared/repo.js";
+import { getAccount, matchAccount, withSvnAuth } from "../accounts/accounts.js";
 import { FsError, isProtectedPath } from "../fs/fs-tree.js";
 import { guardWriteTarget, json, readBody, remotePathExists, remoteRmRf, remoteRun, requireAbsolute, splitSshDir, type RouteMatcher } from "./routes-util.js";
 import { shellQuoteSingle } from "../ssh/ssh-core.js";
@@ -22,20 +23,49 @@ import { shellQuoteSingle } from "../ssh/ssh-core.js";
 const execFileP = promisify(execFile);
 
 /**
- * 解码 svn 输出：中文 Windows 下 svn 重定向输出按系统 ANSI 代码页（GBK）编码，
- * 而 `svn log --xml` 等按 UTF-8 输出。先按 UTF-8 严格解码（含非法序列即失败），
- * 失败则回退 GBK；宿主 Node 无 gbk 支持时再回退 UTF-8 宽松解码。
+ * 解码 svn 输出——**逐行**解码，以兼容「同一段缓冲区混合编码」这一 svn 在中文 Windows
+ * （zh_CN 区域）下的特殊行为：
+ *
+ *   - `svn log --xml` 与 diff 的**文件内容**始终按 UTF-8 输出；
+ *   - `svn diff` / `svn info` 的**生成式标签**（如 `+++ 文件 (版本 N)`、
+ *     `Cannot display: file marked as a binary type`）按当前区域默认 ANSI 代码页
+ *     （GBK）输出。
+ *
+ * 若对整个缓冲区只做一次单编码解码，UTF-8 严格解码会因 GBK 标签字节整体失败，退回 GBK
+ * 后又把 UTF-8 内容解成乱码（如 `閰嶇疆璇存槑…`）。改为逐行解码后：内容行按 UTF-8 严格命中，
+ * 标签行失败再退回 gb18030（GBK 超集，项目统一的中文回退编码，见 `fs/text-codec.ts`），
+ * 两端互不干扰。行内不会同时含两种编码（标签与内容分属不同行），`\n` 在 GBK/UTF-8 下均为
+ * 0x0A，可作为安全切分点。
  */
-function decodeSvnOutput(buf: Buffer): string {
+export function decodeSvnOutput(buf: Buffer): string {
+  if (buf.length === 0) return "";
+  const lines: string[] = [];
+  let start = 0;
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 0x0a) {
+      lines.push(decodeSvnLine(buf.subarray(start, i)));
+      start = i + 1;
+    }
+  }
+  if (start < buf.length) lines.push(decodeSvnLine(buf.subarray(start)));
+  return lines.join("\n");
+}
+
+const svnUtf8Strict = new TextDecoder("utf-8", { fatal: true });
+const svnGbk = new TextDecoder("gb18030"); // GBK 超集，项目统一中文回退编码（见 fs/text-codec.ts）
+
+/** 单行解码：优先 UTF-8（保住文件内容），失败再退回 gb18030（保住 GBK 标签）。 */
+function decodeSvnLine(line: Buffer): string {
+  if (line.length && line[line.length - 1] === 0x0d) line = line.subarray(0, -1); // 去尾随 \r
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(buf);
+    return svnUtf8Strict.decode(line);
   } catch {
-    /* 非 UTF-8，尝试 GBK */
+    /* 含非 UTF-8 字节（通常是 GBK 标签），回退 gb18030 */
   }
   try {
-    return new TextDecoder("gbk").decode(buf);
+    return svnGbk.decode(line);
   } catch {
-    return buf.toString("utf8");
+    return line.toString("utf8"); // 兜底：宽松 UTF-8（极少触发）
   }
 }
 
@@ -56,7 +86,7 @@ const SVN_CANDIDATES = [
   "C:\\Program Files\\TortoiseSVN\\bin\\svn.exe",
   "C:\\Program Files (x86)\\TortoiseSVN\\bin\\svn.exe",
 ];
-async function resolveSvnExe(): Promise<string | null> {
+export async function resolveSvnExe(): Promise<string | null> {
   if (svnExeCache !== undefined) return svnExeCache;
   for (const exe of SVN_CANDIDATES) {
     if (exe !== "svn" && !existsSync(exe)) continue;
@@ -113,6 +143,42 @@ async function svnRun(args: string[], cwd: string): Promise<{ code: number; stdo
       stderr: (e.killed ? `svn 命令超时（${Math.round(SVN_TIMEOUT_MS / 1000)}s，已终止）` : e.stderr ? decodeSvnOutput(e.stderr as Buffer) : e.message ?? String(error)).trim(),
     };
   }
+}
+
+/* ── 账号注入 ──────────────────────────────────────────────────────────────
+ * 命中插件里配置的账号时，为 svn 命令追加认证参数（凭据只存本机插件配置，
+ * 且加 `--no-auth-cache`，不写 svn 全局认证缓存）。
+ * 未命中则原样执行 —— svn 自身的认证缓存 / 匿名访问照旧，行为向后兼容。
+ */
+
+/** 工作副本 URL 缓存：避免每条 svn 命令都额外跑一次 `svn info`。 */
+const wcUrlCache = new Map<string, { url: string; at: number }>();
+const WC_URL_TTL_MS = 60_000;
+
+/** 取工作副本对应的仓库 URL；读不到（非工作副本 / 失败）缓存空串，避免反复重试。 */
+async function wcUrlOf(root: string): Promise<string> {
+  const hit = wcUrlCache.get(root);
+  if (hit && Date.now() - hit.at < WC_URL_TTL_MS) return hit.url;
+  let url = "";
+  try {
+    url = parseSvnInfoFields(await svn(["info"], root, "无法读取仓库信息")).url ?? "";
+  } catch {
+    /* 非工作副本 / 读取失败：按「无账号可匹配」处理 */
+  }
+  wcUrlCache.set(root, { url, at: Date.now() });
+  return url;
+}
+
+/**
+ * 目标 URL 有账号命中时追加认证参数；否则原样返回。
+ *
+ * `accountId` 为弹窗里**显式选中**的账号：给了就以它为准，不再按地址自动匹配 ——
+ * 用户刚在克隆弹窗里挑好账号，不该因为「前缀没匹配上」而被忽略；未知 id 抛 404。
+ */
+async function authArgs(args: string[], target: string, accountId?: string): Promise<string[]> {
+  const wanted = (accountId ?? "").trim();
+  const acct = wanted ? await getAccount(wanted) : await matchAccount("svn", target);
+  return acct ? withSvnAuth(args, acct) : args;
 }
 
 /** 目标路径是否已存在（用于「已存在即 409」前置拦截）。 */
@@ -213,13 +279,28 @@ export const svnResource: RouteMatcher = async (req, res, seg, q, method, host) 
   const op = seg[1];
 
   // 远端（ssh）引用：info 与 run 改为在远端执行 svn CLI（与远端 git 同一套 SSH exec 通道）。
-  const rawPath = (q.get("path") ?? "").trim();
+  // ⛔ 引用来源按方法而异：GET 在 query、POST 在 body —— 只查 query 会让远端 run
+  // 漏判并被下面的 requireAbsolute 判成「不是绝对路径」400（同 routes-git.ts 的坑）。
+  const isPost = method === "POST" && seg.length === 2;
+  const postBody = isPost
+    ? ((await readBody(req)) as {
+        path?: string;
+        args?: unknown[];
+        url?: string;
+        dir?: string;
+        name?: string;
+        revision?: string;
+        accountId?: string;
+        key?: string;
+      } | null)
+    : null;
+  const rawPath = (isPost ? (postBody?.path ?? "") : (q.get("path") ?? "")).trim();
   if (rawPath.startsWith("ssh://")) {
     if (method === "GET" && op === "info") {
       return (json(res, 200, { ok: true, data: await remoteSvnInfo(rawPath) }), true);
     }
     if (method === "POST" && op === "run") {
-      const body = (await readBody(req)) as { path?: string; args?: unknown[] } | null;
+      const body = postBody;
       const path = (body?.path ?? "").trim();
       if (!path.startsWith("ssh://")) return (json(res, 400, { ok: false, error: "ssh reference required" }), true);
       const args = (Array.isArray(body?.args) ? body.args : []).map((a: unknown) => String(a)).filter(Boolean);
@@ -259,13 +340,7 @@ export const svnResource: RouteMatcher = async (req, res, seg, q, method, host) 
 
   // —— 检出工作副本（POST /svn/checkout）：把远端仓库拉到本地/远端**新目录** ——
   if (op === "checkout" && method === "POST" && seg.length === 2) {
-    const body = (await readBody(req)) as {
-      url?: string;
-      dir?: string;
-      name?: string;
-      revision?: string;
-      key?: string;
-    } | null;
+    const body = postBody;
     const rawUrl = (body?.url ?? "").trim();
     if (!rawUrl) return (json(res, 400, { ok: false, error: "url required" }), true);
     const rawDir = (body?.dir ?? "").trim();
@@ -317,12 +392,14 @@ export const svnResource: RouteMatcher = async (req, res, seg, q, method, host) 
     }
     await mkdir(dir, { recursive: true });
     // `--non-interactive`：无 tty 时可交互的凭据询问会挂住，必须显式关掉（同 git 的
-    // GIT_TERMINAL_PROMPT=0）。私有仓库请用带凭据的 URL 或在 svn 配置里存好。
+    // GIT_TERMINAL_PROMPT=0）。凭据来源：命中「账号管理」里配置的账号则自动注入，
+    // 否则仍可依赖 svn 自身的认证缓存 / 带凭据的 URL。
     const args = ["checkout", "--non-interactive"];
     const rev = (body?.revision ?? "").trim();
     if (/^-?\d+$/.test(rev)) args.push("-r", rev);
     args.push("--", rawUrl, target);
-    const r = await svnRun(args, dir);
+    // 凭据：弹窗里显式选中的账号优先，否则按地址自动匹配（两者都未命中则原样执行）。
+    const r = await svnRun(await authArgs(args, rawUrl, body?.accountId), dir);
     if (r.code !== 0) {
       await rm(target, { recursive: true, force: true }).catch(() => {});
       throw new FsError("fs-error", `svn checkout 失败: ${r.stderr || r.stdout || `exit ${r.code}`}`, 400);
@@ -332,7 +409,7 @@ export const svnResource: RouteMatcher = async (req, res, seg, q, method, host) 
 
   // —— 通用命令执行（POST /svn/run）：复用前端 GUI 发起的任意 svn 子命令 ——
   if (op === "run" && method === "POST" && seg.length === 2) {
-    const body = (await readBody(req)) as { path?: string; args?: unknown[] } | null;
+    const body = postBody;
     const dir = requireAbsolute(body?.path?.trim() ?? "");
     const args = (Array.isArray(body?.args) ? body.args : []).map((a: unknown) => String(a)).filter(Boolean);
     if (!args.length) return (json(res, 400, { ok: false, error: "no command" }), true);
@@ -340,7 +417,7 @@ export const svnResource: RouteMatcher = async (req, res, seg, q, method, host) 
       return (json(res, 403, { ok: false, error: "protected path" }), true);
     }
     const root = findSvnRoot(dir) ?? dir;
-    const data = await svnRun(args, root);
+    const data = await svnRun(await authArgs(args, await wcUrlOf(root)), root);
     return (json(res, 200, { ok: true, data }), true);
   }
 

@@ -47,6 +47,7 @@
           <el-button size="small" :loading="busy.sync === 'push'" @click="sync('push')">Push</el-button>
           <el-button size="small" :disabled="busy.refresh" :title="t('gitRefresh')" @click="reload()"><span class="fw-gp-refresh-ic" :class="{ spin: busy.refresh }"><icon name="refresh" :size="13" /></span></el-button>
           <el-button size="small" :title="t('gitConfig')" @click="openConfig"><icon name="gear" :size="13" /></el-button>
+          <el-button size="small" :title="t('accTitle')" @click="openAccounts"><icon name="shield" :size="13" /></el-button>
         </span>
       </div>
 
@@ -619,6 +620,9 @@
         >{{ t("gitReleasePublish") }}</el-button>
       </template>
     </el-dialog>
+
+    <!-- 账号管理对话框已在 main.ts 全局挂载（面板内挂会在切 tab 时被卸载重建，
+         且全局克隆弹窗里的「新建账号…」在面板未挂载时无人渲染），此处不再重复挂载。 -->
   </el-dialog>
 </template>
 
@@ -648,6 +652,7 @@ import * as api from "../../../composables/core/useApi";
 import Icon from "../../common/Icon.vue";
 import GitDiffView from "./GitDiffView.vue";
 import GitGraphList from "./GitGraphList.vue";
+import { openAccountDialog } from "../../../stores/accounts";
 
 const props = defineProps<{ modelValue: boolean; dir: string }>();
 const { t } = useI18n();
@@ -1612,6 +1617,22 @@ async function sync(action: "fetch" | "pull" | "push"): Promise<void> {
   } finally {
     busy.sync = "";
   }
+}
+
+/**
+ * 打开账号管理（Git 类型）。
+ *
+ * 预填当前仓库的 origin 地址作为「仓库地址」——它就是匹配账号的键，用户不必手抄；
+ * 取不到（无 origin / 命令失败）时只预填类型，账号仍可只按主机生效。
+ */
+async function openAccounts(): Promise<void> {
+  const repo = panel.value?.repo ?? "";
+  let url = "";
+  if (repo) {
+    const r = await api.gitRun(repo, ["remote", "get-url", "origin"]).catch(() => null);
+    if (r && r.code === 0) url = (r.stdout.split(/\r?\n/)[0] ?? "").trim();
+  }
+  openAccountDialog({ kind: "git", url });
 }
 
 async function openConfig(): Promise<void> {

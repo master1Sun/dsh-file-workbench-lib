@@ -271,14 +271,23 @@ function createView(): void {
   void loadLanguage();
 }
 
-/** 切到新路径：复用/构建该路径状态，setState 就地替换（不销毁视图，无闪动）。 */
-function swapTo(path: string): void {
+/**
+ * 切到新路径：复用/构建该路径状态，setState 就地替换（不销毁视图，无闪动）。
+ *
+ * ⚠️ 必须把「切换前」那一路的状态写回**旧路径**的缓存键，绝不能写 `props.path`：
+ * 本函数由 `props.path` 的 watcher 触发，回调里 `props.path` 已是新路径。
+ * 若误写成 `docCache.set(props.path, …)`，会把旧文件状态塞进新路径键，
+ * 紧接着 `stateFor(newPath)` 又把这个被污染的键读出来 setState —— 于是编辑器
+ * 永远显示「上一文件」的内容（切 Tab 不换内容，且污染随每次切换累积、越切越乱）。
+ * 旧路径由 watcher 以 `op` 形式传入，这里用它做缓存键。
+ */
+function swapTo(oldPath: string, newPath: string): void {
   const v = view.value;
   if (!v) return;
-  // 先把当前路径的最新状态写回缓存（含用户编辑后的文档与选区）。
-  if (props.path) docCache.set(props.path, v.state);
+  // 把「切换前」那一路的最新状态写回缓存（含用户编辑后的文档与选区），键 = 旧路径。
+  if (oldPath && oldPath !== newPath) docCache.set(oldPath, v.state);
   gen++;
-  v.setState(stateFor(path));
+  v.setState(stateFor(newPath));
   applyEnv(v);
   restoreScroll(v);
   void loadLanguage();
@@ -383,11 +392,13 @@ onBeforeUnmount(() => {
 });
 
 // 切换文件：复用/构建该路径状态并就地 setState（不销毁重建），避免「重新展开」。
+// 注意：把「旧路径」(op) 一并交给 swapTo 做缓存键 —— 切文件瞬间 props.path 已是新值，
+// 直接用 props.path 当键会把旧文件状态误写进新路径键（详见 swapTo 注释）。
 watch(
   () => props.path,
   (np, op) => {
     if (!np) return;
-    if (op && op !== np) swapTo(np);
+    if (op && op !== np) swapTo(op, np);
     else if (!op) createView();
   },
 );

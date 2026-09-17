@@ -32,6 +32,31 @@
         />
       </label>
 
+      <!-- 账号（凭据）：默认按地址自动匹配，也可直接指定或现场新建 —— 检出前就把凭据定下来。
+           SVN 1.8 只能把口令放进 `--username/--password`（无 --password-from-stdin），
+           命中账号时由 host 侧统一注入（见 topics/accounts.md）。远端 ssh:// 目标隐藏该行。 -->
+      <label v-if="!isRemoteDir" class="fw-clone-field">
+        <span class="fw-clone-label">{{ t("repoCloneAccount") }}</span>
+        <select
+          class="fw-clone-input fw-clone-select"
+          :value="state.accountId"
+          :disabled="busy"
+          @change="onAccountChange"
+        >
+          <option value="">{{ t("repoCloneAccountAuto") }}</option>
+          <option v-for="a in accountOptions" :key="a.id" :value="a.id">{{ accountLabel(a) }}</option>
+          <option :value="newAccountValue">{{ t("repoCloneAccountNew") }}</option>
+        </select>
+        <span v-if="state.url.trim() || state.accountId" class="fw-clone-tip">
+          <template v-if="effectiveAccount">
+            {{ t("accEffective") }} {{ effectiveAccount.name }}（{{ effectiveAccount.username }}@{{
+              effectiveAccount.host
+            }}）
+          </template>
+          <template v-else>{{ t("accEffectiveNone") }}</template>
+        </span>
+      </label>
+
       <label class="fw-clone-field">
         <span class="fw-clone-label">{{ t("repoCloneDir") }}</span>
         <div class="fw-clone-row">
@@ -105,8 +130,26 @@ import PathPickerDialog from "../vscode/PathPickerDialog.vue";
 import { cloneDialog } from "../../../composables/core/cloneDialog";
 import { useCloneForm } from "../../../composables/core/useCloneForm";
 
-const { t, state, busy, error, elapsed, pickerOpen, targetPath, canSubmit, onDirPicked, onModel, submit, dispose } =
-  useCloneForm("svn");
+const {
+  t,
+  state,
+  busy,
+  error,
+  elapsed,
+  pickerOpen,
+  targetPath,
+  canSubmit,
+  accountOptions,
+  effectiveAccount,
+  isRemoteDir,
+  newAccountValue,
+  accountLabel,
+  onAccountChange,
+  onDirPicked,
+  onModel,
+  submit,
+  dispose,
+} = useCloneForm("svn");
 
 onBeforeUnmount(dispose);
 </script>

@@ -63,7 +63,7 @@
               <span class="fw-n">
                 <span class="fw-ico"><icon :name="e.isDir ? 'folder' : 'file'" :size="13" /></span>
                 <span class="fw-label">{{ dispName(e) }}</span>
-                <span v-if="gitBadge(e)" class="fw-git-badge" :class="'st-' + gitBadge(e)" :title="gitBadgeTitle(e)"><icon name="git" :size="10" />{{ gitBadgeLabel(e) }}</span>
+                <span v-if="gitBadge(e)" class="fw-git-badge" :class="'st-' + gitBadge(e)" :title="gitBadgeTitle(e)"><icon name="git" :size="10" />{{ gitBadgeLabel(e) }}</span><span v-else-if="svnBadge(e)" class="fw-git-badge" :class="'st-' + svnBadge(e)" :title="svnBadgeTitle(e)"><icon name="svn" :size="10" />{{ svnBadgeLabel(e) }}</span>
                 <span v-if="e.hidden" class="fw-weak">●</span>
                 <span v-if="e.broken" class="fw-broken-tag" :title="t('brokenLink')">broken</span>
               </span>
@@ -103,7 +103,7 @@
         >
           <span class="fw-ico"><icon :name="e.isDir ? 'folder' : 'file'" :size="14" /></span>
           <span class="fw-list-name">{{ dispName(e) }}</span>
-          <span v-if="gitBadge(e)" class="fw-git-badge" :class="'st-' + gitBadge(e)" :title="gitBadgeTitle(e)"><icon name="git" :size="10" />{{ gitBadgeLabel(e) }}</span>
+          <span v-if="gitBadge(e)" class="fw-git-badge" :class="'st-' + gitBadge(e)" :title="gitBadgeTitle(e)"><icon name="git" :size="10" />{{ gitBadgeLabel(e) }}</span><span v-else-if="svnBadge(e)" class="fw-git-badge" :class="'st-' + svnBadge(e)" :title="svnBadgeTitle(e)"><icon name="svn" :size="10" />{{ svnBadgeLabel(e) }}</span>
           <span v-if="e.broken" class="fw-broken-tag" :title="t('brokenLink')">broken</span>
         </div>
         <div v-if="explorer.listing.inaccessible || !filteredRows.length" class="fw-empty-cell" :class="{ 'fw-inaccessible': !!explorer.listing.inaccessible }">
@@ -136,7 +136,7 @@
             </span>
           </template>
           <span v-else class="fw-tile-ico"><icon :name="e.isDir ? 'folder' : 'file'" :size="gridIcon" /></span>
-          <span class="fw-tile-name">{{ dispName(e) }}<span v-if="gitBadge(e)" class="fw-git-badge" :class="'st-' + gitBadge(e)" :title="gitBadgeTitle(e)"><icon name="git" :size="10" />{{ gitBadgeLabel(e) }}</span></span>
+          <span class="fw-tile-name">{{ dispName(e) }}<span v-if="gitBadge(e)" class="fw-git-badge" :class="'st-' + gitBadge(e)" :title="gitBadgeTitle(e)"><icon name="git" :size="10" />{{ gitBadgeLabel(e) }}</span><span v-else-if="svnBadge(e)" class="fw-git-badge" :class="'st-' + svnBadge(e)" :title="svnBadgeTitle(e)"><icon name="svn" :size="10" />{{ svnBadgeLabel(e) }}</span></span>
         </div>
         <div v-if="explorer.listing.inaccessible || !filteredRows.length" class="fw-empty-cell" :class="{ 'fw-inaccessible': !!explorer.listing.inaccessible }">
           {{ emptyMsg }}
@@ -297,7 +297,7 @@ import {
   activeView,
 } from "../../../composables/core/settings";
 import { gitInRepo, gitStatusOf, refreshGitStatus } from "../../../composables/domain/git";
-import { refreshSvnStatus } from "../../../composables/domain/svn";
+import { refreshSvnStatus, svnStatusOf } from "../../../composables/domain/svn";
 import {
   gitMenuFor as gitMenuForShared,
   svnMenuFor as svnMenuForShared,
@@ -516,6 +516,27 @@ function gitBadgeLabel(e: FsEntry): string {
 }
 function gitBadgeTitle(e: FsEntry): string {
   const st = gitBadge(e);
+  return st === "untracked"
+    ? t("gitBadgeUntracked")
+    : st === "added"
+      ? t("gitBadgeAdded")
+      : st === "deleted"
+        ? t("gitBadgeDeleted")
+        : st === "modified"
+          ? t("gitBadgeModified")
+          : "";
+}
+
+/** SVN 状态徽标：与 git 同款，仅在非 git 工作副本时显示（git 优先）。 */
+function svnBadge(e: FsEntry): GitFileStatus {
+  return svnStatusOf(explorer.listing?.path ?? "", e.name);
+}
+function svnBadgeLabel(e: FsEntry): string {
+  return GIT_LABEL[svnBadge(e)];
+}
+function svnBadgeTitle(e: FsEntry): string {
+  const st = svnBadge(e);
+  // 语义与 git 完全一致（新增/修改/删除/未跟踪），复用同一套文案。
   return st === "untracked"
     ? t("gitBadgeUntracked")
     : st === "added"

@@ -23,6 +23,13 @@
           :title="gitBadgeTitleOf(n)"
           >{{ gitBadgeLabelOf(n) }}</span
         >
+        <span
+          v-else-if="svnBadgeOf(n)"
+          class="vs-git-badge"
+          :class="'st-' + svnBadgeOf(n)"
+          :title="svnBadgeTitleOf(n)"
+          >{{ svnBadgeLabelOf(n) }}</span
+        >
         <span v-if="n.loading" class="vs-loading">…</span>
       </div>
     </template>
@@ -161,7 +168,7 @@ import { t } from "../../../composables/core/i18n";
 import type { FsEntry, GitFileStatus, MenuItem } from "../../../../shared/types";
 import { VS_STORE_KEY, defaultVSCodeStore, type VSCodeStore } from "../../../stores/vscode";
 import { gitState, gitStatusOf, refreshGitStatus } from "../../../composables/domain/git";
-import { refreshSvnStatus, svnState } from "../../../composables/domain/svn";
+import { refreshSvnStatus, svnState, svnStatusOf } from "../../../composables/domain/svn";
 import { gitMenuFor, svnMenuFor, type RepoMenuActions } from "../../../composables/domain/repoMenu";
 import ContextMenu from "../../common/ContextMenu.vue";
 import QuickCommit from "../git/QuickCommit.vue";
@@ -613,6 +620,26 @@ function gitBadgeLabelOf(node: TreeEntry): string {
 }
 function gitBadgeTitleOf(node: TreeEntry): string {
   const st = gitBadgeOf(node);
+  if (st === "untracked") return t("gitBadgeUntracked");
+  if (st === "added") return t("gitBadgeAdded");
+  if (st === "modified") return t("gitBadgeModified");
+  if (st === "deleted") return t("gitBadgeDeleted");
+  return "";
+}
+
+/* ---------- SVN 状态徽标（与 Git 同款，仅在非 git 工作副本时显示） ---------- */
+
+/** 节点的 svn 状态：按 owner 目录查询、以节点名取键；根节点不显示徽标。 */
+function svnBadgeOf(node: TreeEntry): GitFileStatus {
+  if (node.depth === 0) return "";
+  return svnStatusOf(node.owner, node.name);
+}
+function svnBadgeLabelOf(node: TreeEntry): string {
+  return GIT_LABEL[svnBadgeOf(node)];
+}
+function svnBadgeTitleOf(node: TreeEntry): string {
+  const st = svnBadgeOf(node);
+  // 语义与 git 完全一致（新增/修改/删除/未跟踪），复用同一套文案。
   if (st === "untracked") return t("gitBadgeUntracked");
   if (st === "added") return t("gitBadgeAdded");
   if (st === "modified") return t("gitBadgeModified");

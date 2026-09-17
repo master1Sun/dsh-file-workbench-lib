@@ -10,6 +10,7 @@
  *   - routes-session-stream.ts  会话触碰文件/运行态 SSE
  *   - routes-persist.ts    界面偏好/收藏/布局持久化
  *   - routes-ssh.ts        SSH 远端主机管理（列表/新增/删除/测试/TOFU 信任）
+ *   - routes-accounts.ts   Git / SVN 账号（凭据）管理（列表/增删改/测试连通/写入系统）
  *
  * 本文件只做：解析 method / path / query，把请求交给对应资源 matcher，
  * 未命中返回 404，异常统一经 fail 转 JSON 错误。
@@ -31,6 +32,7 @@ import { recycleResource } from "./routes-recycle.js";
 import { persistResource } from "./routes-persist.js";
 import { taskArchiveResource } from "./routes-task-archives.js";
 import { sshResource } from "./routes-ssh.js";
+import { accountsResource } from "./routes-accounts.js";
 
 export function makeFileWorkbenchRoutes(ctxProvider?: () => Context): WebRoute[] {
   const host: RouteHost = { ctxProvider };
@@ -53,6 +55,7 @@ export function makeFileWorkbenchRoutes(ctxProvider?: () => Context): WebRoute[]
       if (await persistResource(req, res, seg, q, method, host)) return;
       if (await taskArchiveResource(req, res, seg, q, method, host)) return;
       if (await sshResource(req, res, seg, q, method, host)) return;
+      if (await accountsResource(req, res, seg, q, method, host)) return;
       // 未命中：**必须是 404**。不能抛裸 Error —— fail() 只把 FsError 映射成它的 status，
       // 其余一律 500，会让「路径不存在」这种最常规的情况被前端报成「服务端处理失败」。
       return fail(res, new FsError("not-found", `no route ${method} ${pathname}`, 404));

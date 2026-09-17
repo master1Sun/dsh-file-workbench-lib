@@ -9,6 +9,8 @@ import type { ReactNode } from "react";
 import { RightPaneBridge, VSCodePaneBridge, vsKindInUse, vsKindTabId, vsOpenKindCount } from "./RightPaneBridge.js";
 import { ComposerBridge } from "./ComposerBridge.js";
 import { createTabMenuItems } from "./TabMenuBridge.js";
+import { createGuideCard } from "./GuideCardBridge.js";
+import { installOfficialTerminal, type OfficialTermApi } from "./OfficialTerminalBridge.js";
 import { setSidebarRight } from "./api.js";
 
 /** 前端资源基址（host REST + 静态资源前缀）。 */
@@ -99,7 +101,7 @@ function WorkbenchGlyph({ size = 16, className }: { size?: number; className?: s
 }
 
 /**
- * VS Code 编辑器图标（guide 入口胶囊 / tab 标题处绘制）。
+ * VS Code 编辑器图标（合并 guide 卡片切到「文件编辑器」默认目标时绘制）。
  *
  * 造型 = 代码编辑器窗口：圆角外框 + 左侧窄活动栏 + 编辑区代码刻度行，
  * 直线描边、圆角端点，落在 `currentColor` 上（与宿主 CubeGlyph 同一绘制约定）。
@@ -138,6 +140,8 @@ interface WorkbenchBridge {
    * @returns 是否成功追加（输入框座位未挂载时为 false）。
    */
   appendSessionReference?: (path: string, isDir?: boolean) => boolean;
+  /** 官方终端桥（本机终端走宿主 ctx.webTerminals；见 OfficialTerminalBridge.ts）。 */
+  officialTerminal?: OfficialTermApi;
 }
 
 /** ctx.sessions.list 快照的最小形状（current=当前选中 id；byId=各会话元信息）。 */
@@ -375,6 +379,8 @@ export function apply(ctx: ClientCtx): void {
     subscribeCurrentSessionId,
     locale: ctx.locale,
   });
+  // 官方终端桥：本机终端的进程层交给宿主 ctx.webTerminals（缺服务/缺会话时 Vue 回退自建后端）。
+  installOfficialTerminal(ctx as unknown as Parameters<typeof installOfficialTerminal>[0], bridge);
 
   // 宿主官方目录浏览/创建能力（`ctx.uiWorkspace`）：以**惰性取值器**透传给 Vue「选择文件夹」弹窗。
   // 惰性有两个好处：① 不把 uiWorkspace 写进 required inject，避免旧版 DSH 缺该服务时整个插件不激活；
@@ -545,6 +551,8 @@ export function apply(ctx: ClientCtx): void {
 
     // ① 类型 + guide 入口（在右侧栏 guide 区提供可点击的开卡项）。
     //    title 由注册表在打开 tab 时捕获，作为 chip 文案（随 DSH 语言取词）。
+    //    guide 只挂工作台一个入口（id 与 ⑥ 的卡片注册 key 对应）；编辑器入口合并进
+    //    卡片的下拉菜单，不再单独出胶囊。
     ctx.effect(
       () =>
         ctx.sidebarRightTabs?.register({
@@ -553,6 +561,7 @@ export function apply(ctx: ClientCtx): void {
           title: () => tr("tabFileWorkbench"),
           guide: [
             {
+              id: "workbench",
               order: 100,
               title: () => tr("tabFileWorkbench"),
               description: () => tr("tabFileWorkbenchDesc"),
@@ -580,7 +589,7 @@ export function apply(ctx: ClientCtx): void {
 
     // ③ 编辑器 tab **类型池**（kind = vscode / vscode-2 / … / vscode-8）。
     //    宿主对页 tab 的唯一性是「每分栏每 kind 至多一个」，所以「平级多开编辑器」必须让每个
-    //    tab 各占一个 kind。只有第 1 个带 guide 入口 —— 其余若都挂 guide，胶囊会重复堆一串。
+    //    tab 各占一个 kind。编辑器不再单独挂 guide 胶囊 —— 入口合并进工作台卡片的下拉。
     ctx.effect(() => {
       const offs: Array<() => void> = [];
       for (let n = 1; n <= VS_KIND_POOL; n++) {
@@ -589,18 +598,6 @@ export function apply(ctx: ClientCtx): void {
             id: vsIdAt(n),
             kind: vsKindAt(n),
             title: () => (n === 1 ? tr("tabVSCode") : `${tr("tabVSCode")} ${n}`),
-            ...(n === 1
-              ? {
-                  guide: [
-                    {
-                      order: 101,
-                      title: () => tr("tabVSCode"),
-                      description: () => tr("tabVSCodeDesc"),
-                      icon: VSCodeGlyph,
-                    },
-                  ],
-                }
-              : {}),
           });
           if (off) offs.push(off);
         } catch (e) {
@@ -650,12 +647,34 @@ export function apply(ctx: ClientCtx): void {
             tr,
             getSessionDir,
             openEditor: (params) => openNextEditorTab(params),
+            floatTab: (tabId) => ctx.sidebarRight?.float(tabId),
           }) as (props: unknown) => ReactNode,
         ),
       );
       console.info("[dsh-file-workbench] tab menu items registered (sidebar.right.tab.menu.item)");
       return off;
     }, "dsh-file-workbench: tab menu items");
+
+    // ⑥ guide 入口卡片（sidebar.right.tab.guide.entry，keyed 插槽）：把「文件工作台」「文件
+    //    编辑器」两个入口合并成一张卡片 —— 主体进工作台，右侧箭头下拉出编辑器相关入口。
+    //    dispatch key = tab 类型注册的 id（GuideBody 以 providerId 查找）；卡片缺席时宿主
+    //    回退标准胶囊，旧版宿主天然兼容。
+    ctx.effect(() => {
+      const slots = ctx.slots;
+      if (!slots) return;
+      return slots.inject("sidebar.right.tab.guide.entry", () =>
+        slots.register(
+          { name: "sidebar.right.tab.guide.entry", key: ID, locale: LOCALE_NS },
+          createGuideCard({
+            tr,
+            getSessionDir,
+            openEditor: (params) => openNextEditorTab(params),
+            floatTab: (tabId) => ctx.sidebarRight?.float(tabId),
+            icons: { workbench: WorkbenchGlyph, vscode: VSCodeGlyph },
+          }) as (props: unknown) => ReactNode,
+        ),
+      );
+    }, "dsh-file-workbench: guide card");
   } catch (e) {
     console.warn("[dsh-file-workbench] 右侧面板注册失败（已降级）：", e);
   }

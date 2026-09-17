@@ -1,6 +1,6 @@
 {
   "name": "@sunjuntao/dsh-file-workbench",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "DSH web plugin: a Vue 3 + Vite Win11-style file explorer (navigation tree / file list / search / CRUD) docked in the DSH right sidebar; file viewing is delegated to the DSH native viewer",
   "type": "module",
   "main": "./lib/index.js",
@@ -53,6 +53,8 @@
     "build": "node scripts/build.mjs",
     "build:dev": "node scripts/build.mjs --dev",
     "sync": "node scripts/sync-to-profile.mjs",
+    "clean:artifacts": "node scripts/clean-artifacts.mjs",
+    "clean:artifacts:apply": "node scripts/clean-artifacts.mjs --yes",
     "deploy": "node scripts/build.mjs --dev && node scripts/sync-to-profile.mjs",
     "prepublishOnly": "node scripts/build.mjs"
   },

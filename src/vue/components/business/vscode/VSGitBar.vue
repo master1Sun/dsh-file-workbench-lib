@@ -223,41 +223,16 @@ async function openFileDetail(c: GitCommit, f: StatusEntry): Promise<void> {
   emit("open-diff", { title: `${basename(f.path)} · ${c.short}`, lines });
 }
 
-/** svn 的 `diff -c` 是整个版本的补丁；按 `diff --git` 头切分成每文件的段落并缓存（键 = 版本号）。 */
-const svnDiffs = reactive<Record<string, { files: Record<string, string[]>; whole: string[] }>>({});
-
-/** 取 svn 某版本某文件（仓库绝对路径）的 diff。 */
+/**
+ * 取 svn 某版本某文件（仓库绝对路径，如 /trunk/src/a.ts）的 diff。
+ * 复用 SvnPanel 的成熟方案：`svn diff -c N -- ^/path`（peg 语法，与检出深度无关）。
+ * 新增文件的 diff 显示整文件为新增；删除文件在该 revision 已不可见，diff 为空
+ * （与 SvnPanel 行为一致）。
+ */
 async function svnFileDiff(rev: string, path: string): Promise<string[]> {
   const num = rev.replace(/^r/, "");
-  let entry = svnDiffs[num];
-  if (!entry) {
-    const r = await api.svnRun(repoRoot.value, ["diff", "--git", "-c", num]);
-    if (r.code !== 0) return [];
-    entry = parseSvnDiffSections(r.stdout);
-    svnDiffs[num] = entry;
-  }
-  // 日志里的路径是仓库绝对路径（如 /trunk/src/a.ts），diff 段是相对路径 —— 按后缀匹配。
-  const norm = path.replace(/^[\\/]+/, "");
-  for (const [p, ls] of Object.entries(entry.files)) {
-    if (p === norm || norm.endsWith("/" + p) || p.endsWith("/" + norm)) return ls;
-  }
-  return entry.whole; // 匹配不上退化为整版 diff
-}
-
-/** 把 `svn diff --git` 输出按 `diff --git a/<path> b/` 头切分成每文件段落。 */
-function parseSvnDiffSections(text: string): { files: Record<string, string[]>; whole: string[] } {
-  const whole = text ? text.split("\n") : [];
-  const files: Record<string, string[]> = {};
-  let cur: string[] | null = null;
-  for (const line of whole) {
-    const m = line.match(/^diff --git a\/(.*) b\//);
-    if (m) {
-      cur = [];
-      files[m[1]] = cur;
-    }
-    if (cur) cur.push(line);
-  }
-  return { files, whole };
+  const r = await api.svnRun(repoRoot.value, ["diff", "-c", num, "--", "^" + path]);
+  return r.code === 0 && r.stdout.trim() ? r.stdout.split("\n") : [];
 }
 
 /** 拉取一条 git 提交的变更文件（`diff-tree --name-status`），结果缓存。 */
@@ -287,40 +262,44 @@ function parseNameStatus(out: string): StatusEntry[] {
 }
 
 /**
- * 解析 `svn log -v` 输出。块结构：
- *   rN | author | date | n lines
- *   Changed paths:
- *      M /path/a.ts
- *   （空行）
- *   提交描述（可多行）
- *   ----（72 个减号分隔线）
- * 解析时把变更路径直接写入 statuses 缓存（svn 无需再按版本二次请求）。
+ * 解析 `svn log --xml -v` 输出（语言无关），并把变更路径直接写入 statuses 缓存
+ * （svn 无需再按版本二次请求）。与 SvnPanel 的 `parseLogXml` 同款算法。
+ *
+ * 旧版用 `svn log -v` 纯文本按形状解析，在 zh_CN 下因「改变的路径:」头与分隔线
+ * 形态不稳而经常漏解析，导致展开提交后显示「无文件变更」、点击文件 diff 空白。
+ * 改用 XML 后彻底消除语言/格式依赖。
  */
-function parseSvnLog(text: string): GitCommit[] {
+function parseSvnLogXml(xml: string): GitCommit[] {
   const list: GitCommit[] = [];
-  for (const block of text.split(/^-{72}\s*$/m)) {
-    const lines = block.split(/\r?\n/);
-    while (lines.length && !lines[0].trim()) lines.shift();
-    while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
-    if (!lines.length) continue;
-    const head = (lines[0] ?? "").match(/^r(\d+)\s*\|\s*(.*?)\s*\|\s*([^|]+)\s*\|\s*(\d+)/);
-    if (!head) continue;
-    const rev = "r" + head[1];
-    const author = head[2] || "—";
-    let i = 1;
-    const files: StatusEntry[] = [];
-    if (/^Changed paths:/i.test(lines[i] ?? "")) {
-      i++;
-      while (i < lines.length && /^\s+[A-Z]\s+\S/.test(lines[i] ?? "")) {
-        const m = (lines[i] ?? "").trim().match(/^([A-Z])\s+(.*)$/);
-        if (m && m[2]) files.push({ status: m[1], path: m[2] });
-        i++;
-      }
-    }
-    while (i < lines.length && !lines[i].trim()) i++;
-    const subject = (lines[i] ?? "").trim() || rev;
-    statuses[rev] = files;
-    list.push({ hash: rev, short: rev, author, email: "", ts: 0, date: (head[3] ?? "").trim(), subject, parents: [], refs: [] });
+  try {
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    doc.querySelectorAll("logentry").forEach((e) => {
+      const paths: StatusEntry[] = [];
+      e.querySelectorAll("paths > path").forEach((p) => {
+        const action = p.getAttribute("action");
+        const text = p.textContent;
+        if (text) paths.push({ status: action ?? "", path: text });
+      });
+      const rev = "r" + (e.getAttribute("revision") ?? "");
+      const author = e.querySelector("author")?.textContent ?? "—";
+      const date = e.querySelector("date")?.textContent ?? "";
+      const msg = e.querySelector("msg")?.textContent ?? "";
+      // 顺带填 statuses 缓存（svn 的变更路径随日志一次给出）。
+      statuses[rev] = paths;
+      list.push({
+        hash: rev,
+        short: rev,
+        author,
+        email: "",
+        ts: date ? Math.floor(new Date(date).getTime() / 1000) : 0,
+        date: date ? new Date(date).toLocaleString() : "",
+        subject: (msg.split("\n")[0] ?? "").trim() || rev,
+        parents: [],
+        refs: [],
+      });
+    });
+  } catch {
+    /* 解析失败返回空（与 git 分支同处理） */
   }
   return list;
 }
@@ -341,10 +320,10 @@ async function loadCommits(): Promise<void> {
       if (seq !== loadSeq) return;
       commits.value = r.code === 0 ? parseLog(r.stdout) : [];
     } else {
-      // svn log -v 一条命令同时给出提交与变更路径（parseSvnLog 顺带填 statuses 缓存）。
-      const r = await api.svnRun(root, ["log", "-l", "30", "-v"]);
+      // svn log --xml -v 一条命令同时给出提交与变更路径（parseSvnLogXml 顺带填 statuses 缓存）。
+      const r = await api.svnRun(root, ["log", "--xml", "-v", "-l", "30"]);
       if (seq !== loadSeq) return;
-      commits.value = r.code === 0 ? parseSvnLog(r.stdout) : [];
+      commits.value = r.code === 0 ? parseSvnLogXml(r.stdout) : [];
     }
   } catch {
     if (seq !== loadSeq) return;
@@ -403,7 +382,6 @@ async function reload(): Promise<void> {
   // 切换仓库：旧提交列表与缓存立即失效，避免展示上个项目的提交 / 错配的变更文件。
   commits.value = [];
   for (const k of Object.keys(statuses)) delete statuses[k];
-  for (const k of Object.keys(svnDiffs)) delete svnDiffs[k];
   try {
     // ① git 优先
     const p = await api.gitPanel(dir);
@@ -440,7 +418,7 @@ async function reload(): Promise<void> {
 /** 按后端类型拉取变更文件（git 按需请求；svn 已在解析时缓存）。 */
 async function loadStatus(c: GitCommit): Promise<void> {
   if (kind.value === "git") return loadGitStatus(c);
-  // svn：statuses 已在 parseSvnLog 填好，无需请求。
+  // svn：statuses 已在 parseSvnLogXml 填好，无需请求。
 }
 
 // 项目目录变化（切换项目 / 首次就绪）→ 重新探测，列表**回到默认折叠**。projectDir 为 null（空白窗口）时同样隐藏。

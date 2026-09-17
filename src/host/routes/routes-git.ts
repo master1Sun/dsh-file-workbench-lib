@@ -36,6 +36,7 @@ import {
 } from "./routes-util.js";
 import { shellQuoteSingle } from "../ssh/ssh-core.js";
 import { connFor } from "../ssh/ssh-hosts.js";
+import { gitAuthInject, gitInjectFor, getAccount } from "../accounts/accounts.js";
 
 const execFileP = promisify(execFile);
 
@@ -51,14 +52,73 @@ async function git(args: string[], cwd: string, hint = "git 命令执行失败")
 }
 
 /** 执行 git 命令并返回退出码/输出（命令台与外部同步使用，失败不抛错）。 */
-async function gitRun(args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }> {
+async function gitRun(
+  args: string[],
+  cwd: string,
+  extraEnv?: NodeJS.ProcessEnv,
+): Promise<{ code: number; stdout: string; stderr: string }> {
   try {
-    const { stdout, stderr } = await execFileP("git", args, { cwd, windowsHide: true, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+    const { stdout, stderr } = await execFileP("git", args, {
+      cwd,
+      windowsHide: true,
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+      env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
+    });
     return { code: 0, stdout: stdout.trim(), stderr: stderr.trim() };
   } catch (error) {
     const e = error as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
     return { code: typeof e.code === "number" ? Number(e.code) : 1, stdout: (e.stdout ?? "").trim(), stderr: (e.stderr ?? e.message ?? String(error)).trim() };
   }
+}
+
+/* ── 账号注入（Git） ────────────────────────────────────────────────────────
+ * 命中「账号管理」里配置的账号时，把凭据注入子进程：用户名走 `-c credential.username`
+ * （非机密），口令走 GIT_ASKPASS 外壳 + 环境变量（不落 argv、不落盘）。
+ * 未命中则完全走 git 原生流程（系统凭据管理器 / SSH 密钥），行为向后兼容。
+ */
+
+/** 命中账号的远程地址时执行 git（注入凭据）；url 为空或无匹配 → 走原生流程。 */
+async function gitRunAuth(
+  args: string[],
+  cwd: string,
+  url: string,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const inject = url ? await gitAuthInject(url) : null;
+  if (!inject) return gitRun(args, cwd);
+  return gitRun([...inject.args, ...args], cwd, inject.env);
+}
+
+/** 当前分支上游的远端名（无上游时回落 origin —— 与 git 自身的默认行为一致）。 */
+async function upstreamRemote(root: string): Promise<string> {
+  const r = await gitRun(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], root);
+  const name = r.code === 0 && r.stdout.includes("/") ? r.stdout.split("/")[0] : "";
+  return name || "origin";
+}
+
+/** 取某远端在指定方向上的 URL（取不到返回空串 → 不注入）。 */
+async function remoteUrlOf(root: string, remote: string, direction: "fetch" | "push"): Promise<string> {
+  const args = direction === "push" ? ["remote", "get-url", "--push", remote] : ["remote", "get-url", remote];
+  const r = await gitRun(args, root);
+  return r.code === 0 ? (r.stdout.split(/\r?\n/)[0] ?? "").trim() : "";
+}
+
+/**
+ * 从命令台参数里推断要访问的远程地址。
+ *
+ * 只对**会联网**的子命令做推断（push/pull/fetch/ls-remote 等）——`git status` 这类
+ * 本地命令不该因为我们多跑两条 `git remote` 而变慢。
+ * 优先级：参数里直接写的 URL > 参数里写的远端名 > 上游远端名。
+ */
+async function remoteUrlFromArgv(root: string, args: string[]): Promise<string> {
+  const NET_COMMANDS = new Set(["push", "pull", "fetch", "ls-remote"]);
+  const sub = args.find((a) => !a.startsWith("-"));
+  if (!sub || !NET_COMMANDS.has(sub)) return "";
+  const rest = args.slice(args.indexOf(sub) + 1).filter((a) => !a.startsWith("-"));
+  const first = rest[0] ?? "";
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(first) || /^[^/@\s]+@[^/:\s]+:/.test(first)) return first;
+  const remote = first || (await upstreamRemote(root));
+  return remoteUrlOf(root, remote, sub === "push" ? "push" : "fetch");
 }
 
 /** 禁止对受保护只读目录（如 C:\Windows 整棵）内的仓库做任何 git 写操作。 */
@@ -83,6 +143,7 @@ const CLONE_TIMEOUT_MS = 10 * 60 * 1000;
 function gitCloneExec(
   args: string[],
   cwd: string,
+  extraEnv?: NodeJS.ProcessEnv,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolvePromise) => {
     let child: ReturnType<typeof spawn>;
@@ -90,7 +151,7 @@ function gitCloneExec(
       child = spawn("git", args, {
         cwd,
         windowsHide: true,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat" },
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", ...extraEnv },
       });
     } catch (error) {
       resolvePromise({ code: 127, stdout: "", stderr: error instanceof Error ? error.message : String(error) });
@@ -341,7 +402,8 @@ async function gitRunCmd(dir: string, args: string[]): Promise<GitRunResult> {
   if (isProtectedPath(root)) {
     throw new FsError("forbidden", `受保护目录内禁止执行 git 命令: ${root}`, 403);
   }
-  return gitRun(args, root);
+  // 联网子命令按参数推断远程地址，命中账号则注入凭据（本地命令不额外跑 git remote）。
+  return gitRunAuth(args, root, await remoteUrlFromArgv(root, args));
 }
 
 /** Git 面板仓库级快照（未暂存 / 已暂存 / 未跟踪）。 */
@@ -404,7 +466,9 @@ async function gitSetUserConfig(name: string, email: string): Promise<GitAction>
 async function gitSync(dir: string, action: "fetch" | "pull" | "push"): Promise<GitAction> {
   guardGitWritable(dir);
   const root = await repoOf(dir);
-  const r = await gitRun([action], root);
+  // push 走 pushurl、fetch/pull 走 fetchurl（两者可不同，不能混用同一条）。
+  const url = await remoteUrlOf(root, await upstreamRemote(root), action === "push" ? "push" : "fetch");
+  const r = await gitRunAuth([action], root, url);
   return { ok: r.code === 0, repo: root, output: r.stderr || r.stdout || `${action} 完成` };
 }
 
@@ -706,7 +770,28 @@ export const gitResource: RouteMatcher = async (req, res, seg, q, method, host) 
    * requireAbsolute，远端引用会被报成 400「不是绝对路径」，语义完全不对。
    * 仅 gh-release（依赖本机 GitHub 凭据）等少数能力在远端保持 skipped/501。
    */
-  const rawPath = (q.get("path") ?? "").trim();
+  const isPost = method === "POST" && seg.length === 2;
+  // ⛔ 远端引用的「真实来源」按方法而异：GET 在 query、POST 在 body。
+  // 只查 query 会让所有远端**写操作**漏判 → 落到下面的本地分支被 requireAbsolute
+  // 报 400「不是绝对路径」，症状是「ssh 目录内 fetch/pull/push/暂存/提交全都用不了」。
+  const postBody = isPost
+    ? ((await readBody(req)) as {
+        path?: string;
+        message?: string;
+        action?: string;
+        name?: string;
+        email?: string;
+        tag?: string;
+        body?: string;
+        args?: unknown[];
+        url?: string;
+        dir?: string;
+        depth?: number;
+        accountId?: string;
+        key?: string;
+      } | null)
+    : null;
+  const rawPath = (isPost ? (postBody?.path ?? "") : (q.get("path") ?? "")).trim();
   if (rawPath.startsWith("ssh://")) {
     if (method === "GET") {
       if (op === "status") {
@@ -725,8 +810,8 @@ export const gitResource: RouteMatcher = async (req, res, seg, q, method, host) 
       if (op === "gh-releases") return (json(res, 200, { ok: true, data: { list: [], skipped: "remote" } }), true);
       return (json(res, 200, { ok: true, data: { inRepo: false } }), true);
     }
-    if (method === "POST" && seg.length === 2) {
-      const body = (await readBody(req)) as { path?: string; message?: string; action?: string; name?: string; tag?: string; body?: string; args?: unknown[] } | null;
+    if (isPost) {
+      const body = postBody;
       const path = (body?.path ?? "").trim();
       if (!path.startsWith("ssh://")) return (json(res, 400, { ok: false, error: "ssh reference required" }), true);
       if (op === "add") return (json(res, 200, { ok: true, data: await remoteGitAdd(path) }), true);
@@ -794,7 +879,7 @@ export const gitResource: RouteMatcher = async (req, res, seg, q, method, host) 
       return (json(res, 200, { ok: true, data }), true);
     }
     if (method === "POST") {
-      const body = (await readBody(req)) as { name?: string; email?: string } | null;
+      const body = postBody;
       const data = await gitSetUserConfig(body?.name ?? "", body?.email ?? "");
       return (json(res, 200, { ok: true, data }), true);
     }
@@ -818,13 +903,7 @@ export const gitResource: RouteMatcher = async (req, res, seg, q, method, host) 
   // 与下面的「写操作」块分开：那块的 `path` 语义是「已有的仓库/文件」，而这里的目标
   // 目录还不存在（也正因如此才有「已存在即 409」这条前置检查）。
   if (op === "clone" && method === "POST" && seg.length === 2) {
-    const body = (await readBody(req)) as {
-      url?: string;
-      dir?: string;
-      name?: string;
-      depth?: number;
-      key?: string;
-    } | null;
+    const body = postBody;
     const url = (body?.url ?? "").trim();
     if (!url) return (json(res, 400, { ok: false, error: "url required" }), true);
     const rawDir = (body?.dir ?? "").trim();
@@ -876,12 +955,16 @@ export const gitResource: RouteMatcher = async (req, res, seg, q, method, host) 
       return (json(res, 409, { ok: false, error: `target already exists: ${target}` }), true);
     }
     await mkdir(dir, { recursive: true });
-    const args = ["clone", "--progress"];
+    // 命中账号则注入凭据；`-c ...` 必须排在子命令**之前**，故先拼注入参数再拼 clone。
+    // 弹窗里显式选过的账号优先于按地址自动匹配（克隆前就能选/新建）；未知 id 由 getAccount 抛 404。
+    const wanted = (body?.accountId ?? "").trim();
+    const inject = wanted ? await gitInjectFor(await getAccount(wanted)) : await gitAuthInject(url);
+    const args = [...(inject?.args ?? []), "clone", "--progress"];
     const depth = Number(body?.depth ?? 0);
     if (Number.isFinite(depth) && depth > 0) args.push("--depth", String(Math.floor(depth)));
     // `--` 之后才是位置参数：URL 以 `-` 开头也不会被 git 当成选项。
     args.push("--", url, target);
-    const r = await gitCloneExec(args, dir);
+    const r = await gitCloneExec(args, dir, inject?.env);
     if (r.code !== 0) {
       // 失败清理：git 多数情况会自己删掉半成品目录，但**超时被 kill 时不会** ——
       // 残骸会让用户重试直接撞上 409，且看不出原因。force 只删我们刚确认不存在的目标。
@@ -897,7 +980,7 @@ export const gitResource: RouteMatcher = async (req, res, seg, q, method, host) 
 
   // —— 写操作：解析请求体 ——
   if (method === "POST" && seg.length === 2) {
-    const body = (await readBody(req)) as { path?: string; message?: string; action?: string; name?: string; tag?: string; body?: string; args?: unknown[] } | null;
+    const body = postBody;
     const path = requireAbsolute(body?.path?.trim() ?? "");
     if (op === "add") {
       const data = await gitAdd(path);

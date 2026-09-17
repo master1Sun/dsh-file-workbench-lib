@@ -37,6 +37,7 @@
           <el-button size="small" :loading="refreshing" @click="refreshAll" :title="t('svnRefresh')">
             <icon name="refresh" :size="13" />
           </el-button>
+          <el-button size="small" :title="t('accTitle')" @click="openAccounts"><icon name="shield" :size="13" /></el-button>
         </span>
       </div>
 
@@ -118,24 +119,37 @@
             </div>
           </div>
 
-          <!-- ══ 提交日志 ══ -->
+          <!-- ══ 提交日志（对齐 Git 历史：默认折叠，展开看完整说明 + 变更文件，点文件看该次提交 diff） ══ -->
           <div v-else-if="sec === 'log'" class="fw-svn-loglist">
             <div v-if="!logItems.length" class="fw-svn-empty">{{ logLoading ? t("svnLoading") : t("svnLogEmpty") }}</div>
-            <div v-for="e in logItems" :key="e.revision" class="fw-svn-logitem">
-              <div class="fw-svn-log-h">
+            <div v-for="e in logItems" :key="e.revision" class="fw-svn-logitem" :class="{ open: logOpen.has(e.revision) }">
+              <div class="fw-svn-log-h" :title="t('svnLogToggle')" @click="toggleLog(e.revision)">
+                <span class="fw-svn-caret">{{ logOpen.has(e.revision) ? "▾" : "▸" }}</span>
                 <span class="fw-svn-log-r">r{{ e.revision }}</span>
                 <span class="fw-svn-log-msg1" :title="e.msg">{{ firstLine(e.msg) }}</span>
-              </div>
-              <div class="fw-svn-log-meta">
-                <span>{{ e.author }}</span>
-                <span>{{ fmtDate(e.date) }}</span>
-              </div>
-              <pre v-if="e.msg && e.msg.includes('\n')" class="fw-svn-log-msg">{{ e.msg }}</pre>
-              <div v-if="e.paths.length" class="fw-svn-log-paths">
-                <span v-for="(p, i) in e.paths" :key="i" class="fw-svn-log-p" :class="'pa-' + (p.action ?? '')">
-                  <b>{{ p.action }}</b> {{ p.text }}
+                <span class="fw-svn-log-meta">
+                  <span>{{ e.author }}</span>
+                  <span>{{ fmtDate(e.date) }}</span>
                 </span>
               </div>
+              <template v-if="logOpen.has(e.revision)">
+                <pre v-if="e.msg" class="fw-svn-log-msg">{{ e.msg }}</pre>
+                <div class="fw-svn-log-cfiles">
+                  <span v-if="!e.paths.length" class="fw-svn-empty">{{ t("svnLogNoPaths") }}</span>
+                  <div
+                    v-for="(p, i) in e.paths"
+                    :key="i"
+                    class="fw-svn-cfile"
+                    :title="t('svnLogOpenDiff')"
+                    @click="openRevDiff(e.revision, p)"
+                  >
+                    <span class="fw-svn-cfile-act" :class="'pa-' + (p.action ?? '')">{{ p.action }}</span>
+                    <span class="fw-svn-cfile-path">
+                      <span v-if="dirOfLogPath(p.text)" class="fw-svn-cfile-dir">{{ dirOfLogPath(p.text) }}</span>{{ baseOfLogPath(p.text) }}
+                    </span>
+                  </div>
+                </div>
+              </template>
             </div>
           </div>
 
@@ -192,6 +206,8 @@
         <el-button type="primary" :disabled="running || !coUrl.trim() || !coTarget.trim()" @click="doCheckout">{{ t("svnCheckout") }}</el-button>
       </template>
     </el-dialog>
+
+    <!-- 账号管理对话框已在 main.ts 全局挂载（理由同 GitPanel，避免面板卸载 / 重复实例） -->
   </el-dialog>
 </template>
 
@@ -204,6 +220,7 @@ import * as api from "../../../composables/core/useApi";
 import { countSvnUpdateEntries, svnRevisionFromUpdate } from "../../../composables/domain/svn";
 import Icon from "../../common/Icon.vue";
 import GitDiffView from "./GitDiffView.vue";
+import { openAccountDialog } from "../../../stores/accounts";
 
 const props = defineProps<{ modelValue: boolean; dir: string }>();
 const { t } = useI18n();
@@ -350,6 +367,16 @@ function toggleAll(e: Event): void {
 }
 
 /** 刷新：重读工作副本信息与状态（不切页签、不写输出区）。 */
+/**
+ * 打开账号管理（SVN 类型）。
+ *
+ * 预填当前工作副本的 URL —— 它（或其前缀）就是匹配账号的键，用户不必手抄；
+ * 未探测到 URL 时只预填类型，账号仍可只按主机生效。
+ */
+function openAccounts(): void {
+  openAccountDialog({ kind: "svn", url: info.value?.url ?? "" });
+}
+
 async function refreshAll(): Promise<void> {
   refreshing.value = true;
   try {
@@ -445,6 +472,7 @@ async function loadLog(): Promise<void> {
   try {
     const r = await api.svnRun(props.dir, ["log", "--xml", "-v", "-l", "50"]);
     logItems.value = parseLogXml(r.stdout);
+    logOpen.value = new Set(); // 刷新后展开态不保留（revision 可能已不在列表里）
   } catch (err) {
     toast("error", (err as Error).message);
   } finally {
@@ -482,6 +510,51 @@ async function openDiff(path: string): Promise<void> {
   diffFile.value = " · " + path;
   try {
     const r = await api.svnRun(props.dir, ["diff", path]);
+    diffLines.value = (r.stdout || "").split("\n");
+  } catch (err) {
+    diffLines.value = [(err as Error).message];
+  }
+}
+
+/* ── 提交日志：折叠展开 + 单文件提交对比（对齐 Git 历史的交互） ── */
+
+/** 展开状态的提交（revision 集合，不可变替换以驱动响应式）。 */
+const logOpen = ref<Set<string>>(new Set());
+
+function toggleLog(rev: string): void {
+  const next = new Set(logOpen.value);
+  if (next.has(rev)) next.delete(rev);
+  else next.add(rev);
+  logOpen.value = next;
+}
+
+/** 日志路径是仓库根相对的 POSIX 路径（`/trunk/src/a.txt`）：目录段（含尾斜杠）。 */
+function dirOfLogPath(p: string | null): string {
+  if (!p) return "";
+  const s = p.replace(/^\//, "");
+  const i = s.lastIndexOf("/");
+  return i < 0 ? "" : s.slice(0, i + 1);
+}
+
+/** 日志路径的文件名段。 */
+function baseOfLogPath(p: string | null): string {
+  if (!p) return "";
+  const s = p.replace(/^\//, "");
+  return s.slice(s.lastIndexOf("/") + 1) || s;
+}
+
+/**
+ * 查看某次提交里某个文件的变化：`svn diff -c <rev>`（等价 r(N-1):r(N)）。
+ * 路径用 `^/` 仓库根相对写法（log -v 回的 path 本就是仓库根相对），与工作副本
+ * 的检出深度 / 子目录位置无关；A / D 等动作下 diff 可能为空或报错，原样展示输出。
+ */
+async function openRevDiff(rev: string, p: { action: string | null; text: string | null }): Promise<void> {
+  if (!p.text) return;
+  showDiff.value = true;
+  diffFile.value = ` · r${rev} ${p.text}`;
+  diffLines.value = [];
+  try {
+    const r = await api.svnRun(props.dir, ["diff", "-c", rev, "--", "^" + p.text]);
     diffLines.value = (r.stdout || "").split("\n");
   } catch (err) {
     diffLines.value = [(err as Error).message];
@@ -774,19 +847,29 @@ async function doCheckout(): Promise<void> {
 .fw-svn-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .fw-svn-btn.primary { background: var(--dsh-accent, #238636); border-color: var(--dsh-accent, #238636); color: #fff; }
 
-/* ── 提交日志（内嵌列表，对齐历史列表风格） ───────────────────── */
+/* ── 提交日志（内嵌列表；默认折叠，对齐 Git 历史交互） ─────────── */
 .fw-svn-loglist { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-bottom: 6px; }
 .fw-svn-logitem { padding: 6px 10px; border-bottom: 1px solid var(--dsh-border, #30363d); }
 .fw-svn-logitem:hover { background: var(--dsh-hover, rgba(48, 54, 61, 0.3)); }
-.fw-svn-log-h { display: flex; gap: 10px; align-items: baseline; min-width: 0; }
+.fw-svn-log-h { display: flex; gap: 8px; align-items: baseline; min-width: 0; cursor: pointer; user-select: none; }
+.fw-svn-caret { flex: 0 0 auto; width: 12px; color: var(--dsh-fg-weak, #8b949e); font-size: calc(10px * var(--dsh-fs-scale, 1)); }
+.fw-svn-logitem:hover .fw-svn-caret { color: var(--dsh-accent, #238636); }
 .fw-svn-log-r { flex: 0 0 auto; color: var(--dsh-accent, #238636); font-weight: 600; font-family: var(--dsh-mono, monospace); font-size: calc(11px * var(--dsh-fs-scale, 1)); }
 .fw-svn-log-msg1 { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: calc(12px * var(--dsh-fs-scale, 1)); }
-.fw-svn-log-meta { display: flex; gap: 10px; color: var(--dsh-fg-weak, #8b949e); font-size: calc(11px * var(--dsh-fs-scale, 1)); margin-top: 2px; }
-.fw-svn-log-msg { margin: 4px 0 0; white-space: pre-wrap; font-size: calc(12px * var(--dsh-fs-scale, 1)); color: var(--dsh-fg, #c9d1d9); }
-.fw-svn-log-paths { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
-.fw-svn-log-p { font-family: var(--dsh-mono, monospace); font-size: calc(11px * var(--dsh-fs-scale, 1)); color: var(--dsh-fg-weak, #8b949e); }
-.fw-svn-log-p.pa-M, .fw-svn-log-p.pa-A { color: #7ee787; }
-.fw-svn-log-p.pa-D { color: #ffa198; }
+.fw-svn-log-meta { flex: 0 0 auto; display: flex; gap: 10px; color: var(--dsh-fg-weak, #8b949e); font-size: calc(11px * var(--dsh-fs-scale, 1)); }
+.fw-svn-logitem.open { background: color-mix(in srgb, var(--dsh-accent, #238636) 4%, transparent); }
+.fw-svn-log-msg { margin: 6px 0 0 20px; white-space: pre-wrap; font-size: calc(12px * var(--dsh-fs-scale, 1)); color: var(--dsh-fg, #c9d1d9); }
+/* 展开后的变更文件列表：行式布局（动作徽标 + 目录淡色 + 文件名），点击看该次提交 diff */
+.fw-svn-log-cfiles { display: flex; flex-direction: column; gap: 1px; margin: 6px 0 2px 20px; }
+.fw-svn-cfile { display: flex; gap: 8px; align-items: baseline; min-width: 0; padding: 2px 6px; border-radius: 4px; cursor: pointer; }
+.fw-svn-cfile:hover { background: var(--dsh-hover, rgba(48, 54, 61, 0.5)); }
+.fw-svn-cfile-act { flex: 0 0 auto; width: 14px; text-align: center; font-family: var(--dsh-mono, monospace); font-weight: 600; font-size: calc(11px * var(--dsh-fs-scale, 1)); color: var(--dsh-fg-weak, #8b949e); }
+.fw-svn-cfile-act.pa-A { color: #7ee787; }
+.fw-svn-cfile-act.pa-M { color: #7ee787; }
+.fw-svn-cfile-act.pa-D { color: #ffa198; }
+.fw-svn-cfile-act.pa-R { color: #d2a8ff; }
+.fw-svn-cfile-path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--dsh-mono, monospace); font-size: calc(11.5px * var(--dsh-fs-scale, 1)); color: var(--dsh-fg, #c9d1d9); }
+.fw-svn-cfile-dir { color: var(--dsh-fg-weak, #8b949e); }
 
 /* ── 命令输出（对齐命令台 .fw-gp-cli） ────────────────────────── */
 .fw-svn-cli { flex: 1 1 auto; min-height: 0; padding: 8px; display: flex; }

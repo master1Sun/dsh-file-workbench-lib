@@ -167,6 +167,34 @@ if (addedHost?.id) {
   );
 }
 
+/* ---------- 远端（ssh）git/svn 的**写操作**必须命中远端分支 ----------
+ * 背景（真实事故）：远端分流原先只读 query 里的 `path`，而 POST 的引用在 **body** 里 →
+ * 远端写操作（fetch/pull/push/暂存/提交/还原；svn run）全部漏判、落到本地分支，
+ * 被 requireAbsolute 判成 400「不是绝对路径」，症状是「ssh 目录内 git 用不了」（GET 却正常）。
+ * 判别法：用一个**不存在的主机 id** 作探针 —— 命中远端分支会报 **404**（主机未配置），
+ * 误落本地分支则报 **400**（不是绝对路径）。状态码不同即可判别，且不依赖真实 SSH 服务。
+ * （判别力已实测：把构建产物回退成旧写法 → 这 3 条全红并打出 400。） */
+const postStatus = async (p, body) => {
+  const res = await fetch(u(p), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, body: await res.json().catch(() => null) };
+};
+for (const [label, p, body] of [
+  ["git/run", "/git/run", { path: "ssh://no-such-host/", args: ["status", "--short"] }],
+  ["git/sync", "/git/sync", { path: "ssh://no-such-host/", action: "fetch" }],
+  ["svn/run", "/svn/run", { path: "ssh://no-such-host/", args: ["--version"] }],
+]) {
+  const rr = await postStatus(p, body);
+  check(
+    `remote ${label}(POST) routed to the ssh branch (404 unknown host, not 400 "not an absolute path")`,
+    rr.status === 404,
+    `${rr.status} ${JSON.stringify(rr.body).slice(0, 130)}`,
+  );
+}
+
 /* ---------- 终端会话后端：/exec-open 的 kind 分流 ----------
  * 核心不变量：`kind:"ssh"` 的请求**要么真的建起远端 shell，要么失败** ——
  * 绝不能悄悄退回本机 shell。一旦退回，前端会拿到一个没有 ssh 命令的裸 cmd，

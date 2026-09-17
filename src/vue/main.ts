@@ -17,6 +17,7 @@ import AppFileWorkbench from "./App.vue";
 import AppVSCode from "./components/business/vscode/VSCodePane.vue";
 import TerminalHost from "./components/business/terminal/TerminalHost.vue";
 import RepoCloneDialog from "./components/business/repo/RepoCloneDialog.vue";
+import AccountDialog from "./components/business/account/AccountDialog.vue";
 import ToastHost from "./components/common/ToastHost.vue";
 import "./styles.css";
 // WebTUI 主题层（仅作用于 #dsh-term-root 子树，见该文件注释）。
@@ -269,6 +270,7 @@ function mountGlobalTerminal(): void {
 mountGlobalToastHost();
 mountGlobalTerminal();
 mountGlobalCloneDialog();
+mountGlobalAccountDialog();
 
 /**
  * 全局「克隆 / 检出仓库」弹窗：独立于任一面板常驻挂载一次。
@@ -303,4 +305,33 @@ function mountGlobalCloneDialog(): void {
 if (typeof document !== "undefined") {
   const host = document.getElementById("app");
   if (host) mountFileWorkbenchPane(host, { apiBase: (import.meta.env.VITE_API_BASE as string) ?? "" });
+}
+
+/**
+ * 全局「账号管理」对话框：独立于任一面板常驻挂载一次。
+ *
+ * ⛔ 必须提到全局层级，**不能**挂在 Git / SVN 面板内（原先就是那样）：
+ *   - 右侧面板按 tab 卸载重建，切一次面板对话框就没了；
+ *   - 更要紧的是全局克隆弹窗里的「新建账号…」入口 —— 从文件工作台的「新建 ▾」发起克隆时
+ *     两个面板**一个都没挂载**，账号对话框便无人渲染，点了没反应；
+ *   - 状态本就是模块级单例（stores/accounts.ts），挂两份实例反而会同时弹两个对话框。
+ */
+function mountGlobalAccountDialog(): void {
+  if (typeof document === "undefined" || !document.body) return;
+  if (document.getElementById("dsh-acc-root")) return;
+  const host = document.createElement("div");
+  host.id = "dsh-acc-root";
+  host.style.position = "fixed";
+  host.style.left = "0";
+  host.style.top = "0";
+  host.style.width = "0";
+  host.style.height = "0";
+  host.style.overflow = "visible";
+  host.style.zIndex = "10000";
+  document.body.appendChild(host);
+  try {
+    createApp(AccountDialog).mount(host);
+  } catch (e) {
+    console.error("[dsh-file-workbench] 全局账号对话框挂载失败：", e);
+  }
 }

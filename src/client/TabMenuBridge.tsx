@@ -18,8 +18,8 @@ import type { CopyKey } from "../shared/locales.js";
 
 /** 宿主下发的菜单 owner props（只声明本插件用到的字段）。 */
 interface TabMenuOwnerProps {
-  /** 打开菜单的 tab 记录（用 `kind` 区分工作台 / 编辑器入口）。 */
-  tab?: { kind?: string };
+  /** 打开菜单的 tab 记录（用 `kind` 区分工作台 / 编辑器入口，`id` 做浮窗动作）。 */
+  tab?: { kind?: string; id?: string };
   /** 关闭菜单（执行动作后必须调用）。 */
   dismiss?: () => void;
 }
@@ -32,6 +32,8 @@ export interface TabMenuDeps {
   getSessionDir(): string | null;
   /** 平级新开一个编辑器 tab（复用 kind 池分配逻辑，见 index.tsx 的 openNextEditorTab）。 */
   openEditor(params?: Record<string, unknown>): boolean;
+  /** 把指定 tab 弹出为独立浮窗（转发 ctx.sidebarRight.float）。 */
+  floatTab(tabId: string): void;
 }
 
 /** 菜单项样式（对齐 dockkit menuItem 视觉）。注入一次即可，幂等。 */
@@ -60,20 +62,31 @@ export function createTabMenuItems(deps: TabMenuDeps): (props: TabMenuOwnerProps
   return function TabMenuItems(props: TabMenuOwnerProps): ReactNode {
     ensureMenuItemStyle();
     const kind = props?.tab?.kind ?? "";
+    const tabId = props?.tab?.id;
     const dismiss = props?.dismiss;
 
-    const items: Array<{ label: string; run: () => void }> = [];
+    interface MenuItemSpec {
+      id: string;
+      label: string;
+      run: () => void;
+    }
+    const items: MenuItemSpec[] = [];
     if (kind === "workbench") {
       const dir = deps.getSessionDir();
       if (dir) {
         items.push({
+          id: "editor-cwd",
           label: deps.tr("tabMenuOpenInEditor"),
           run: () => deps.openEditor({ projectDir: dir }),
         });
       }
-      items.push({ label: deps.tr("tabMenuNewEditor"), run: () => deps.openEditor({ fresh: true }) });
+      items.push({ id: "editor-new", label: deps.tr("tabMenuNewEditor"), run: () => deps.openEditor({ fresh: true }) });
     } else if (kind.startsWith("vscode")) {
-      items.push({ label: deps.tr("tabMenuAnotherEditor"), run: () => deps.openEditor({ fresh: true }) });
+      items.push({ id: "editor-another", label: deps.tr("tabMenuAnotherEditor"), run: () => deps.openEditor({ fresh: true }) });
+    }
+    // 浮窗：两种 tab 都提供，把当前 tab 弹出为独立浮窗（宿主 dockkit 的 float 动作）。
+    if (tabId) {
+      items.push({ id: "float", label: deps.tr("tabMenuFloat"), run: () => deps.floatTab(tabId) });
     }
     if (items.length === 0) return null;
 
@@ -81,7 +94,7 @@ export function createTabMenuItems(deps: TabMenuDeps): (props: TabMenuOwnerProps
       <>
         {items.map((it) => (
           <button
-            key={it.label}
+            key={it.id}
             type="button"
             role="menuitem"
             className="dshfw-tabMenuItem"

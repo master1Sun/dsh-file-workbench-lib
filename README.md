@@ -1,240 +1,230 @@
-# DSH 文件工作台插件（Vue 3 + Vite）
+# DSH File Workbench Plugin (Vue 3 + Vite)
 
-在 DSH 会话视图的**右侧面板**内提供三个能力，共用同一个工作区根：
+> 🌐 English | [简体中文](README.zh-CN.md)
 
-- 🗂 **文件工作台**（tab kind `workbench`）：Win11 资源管理器风格的文件管理器
-- 📝 **文件编辑器**（tab kind `vscode`）：CodeMirror 多标签代码编辑器 + 项目树
-- ▶ **终端**：node-pty（ConPTY）常驻 shell，**全局单例**，跨面板常驻不重建
+Provides three capabilities inside the **right-side panel** of a DSH session view, all sharing the same workspace root:
 
-在此之上还有：**Git / SVN 管理面板**、把文件作为官方 `@路径` 引用送进会话输入框、
-后台任务面板、用子代理处理选中文件。
+- 🗂 **File Workbench** (tab kind `workbench`): a Windows 11 Explorer-style file manager
+- 📝 **File Editor** (tab kind `vscode`): a CodeMirror multi-tab code editor + project tree
+- ▶ **Terminal**: persistent shells via node-pty (ConPTY), a **global singleton** that survives panel close/reopen
 
-文件**查看**统一改道到 **DSH 右侧原生查看器**（Markdown / 代码高亮 / 图片 / PDF / HTML / 纯文本）；
-需要就地编辑时用文件编辑器，或在列表右键「编辑」打开内置记事本。
+On top of that: **Git / SVN management panels**, sending files into the session input box as official `@path` reference chips, a background-task panel, and handling selected files with a sub-agent.
 
-## 面板与入口
+File **viewing** is delegated to the **DSH native right-side viewer** (Markdown / syntax-highlighted code / images / PDF / HTML / plain text); use the file editor for in-place editing, or right-click "Edit" in the file list to open the built-in notepad.
 
-| 面板 | tab kind | guide 入口 | 说明 |
+## Panels & Entry Points
+
+| Panel | Tab kind | Guide entry | Notes |
 | --- | --- | --- | --- |
-| 文件工作台 | `workbench` | order 100 | 右侧栏 guide 区点击打开，首次自动定位当前会话工作区目录 |
-| 文件编辑器 | `vscode` | order 101 | 同上，排在文件工作台下方 |
-| 终端 | — | — | 工具栏终端按钮，或在目录右键「在终端打开」 |
+| File Workbench | `workbench` | order 100 | Open from the right-sidebar guide area; auto-navigates to the current session's workspace directory on first open |
+| File Editor | `vscode` | order 101 | Same as above, listed below the File Workbench |
+| Terminal | — | — | Toolbar terminal button, or right-click a directory → "Open in Terminal" |
 
-> 入口只有右侧栏 guide 卡与标签，不再有输入框按钮 / 顶部抽屉。
+> The only entries are the right-sidebar guide cards and tabs; there are no input-box buttons or top drawer anymore.
 
-## 功能一览
+## Feature Overview
 
-### 🗂 文件工作台（资源管理器）
+### 🗂 File Workbench (Explorer)
 
-- **单窗口 Win11 树**：主页 / 图库 / 此电脑盘符 / 回收站 / 收藏 / 会话文件；
-  可拖拽分隔条（默认 3:7），命令栏 + 状态栏，目录优先 + 大小写不敏感排序。
-- **盘符真实卷标**：读取系统卷标显示为 `卷标 (C:)`，无卷标回退本地化的「本地磁盘 (C:)」。
-- **视图档位**：超大 / 大 / 中 / 小图标、列表、详情、内容、平铺共 8 档；
-  详情视图列宽可拖拽；可切换是否显示扩展名。
-- **搜索**：聚焦当前目录递归检索文件名与内容，支持区分大小写 / 正则、虚拟滚动；
-  支持对内容命中做跨文件批量替换。
-- **CRUD**：新建文件 / 目录、重命名、删除（带确认）、复制 / 剪切 / 粘贴、
-  鼠标拉框多选、批量操作、外部拖拽上传、压缩 / 解压。
-- **回收站**：与文件列表共用同一套 UI（8 档视图 / 排序 / 多选 / 拉框一致），
-  操作换成 还原 / 永久删除 / 清空回收站。
-- **Git 徽标**：文件状态（`?` / `A` / `M` / `D`）徽标 + 右键 Git 操作。
-- **记事本**：右键「编辑」打开内置文本编辑器（另存 / 剪贴板 / 未保存二次确认）。
-- **后台任务**：上传、压缩等长任务在后台任务面板显示进度与结果，可查历史归档。
-- **子代理**：右键「用子代理处理」，就选中文件 / 目录发起官方子代理会话。
-- **导航**：后退 / 前进 / 上级 / 回到会话目录、面包屑地址栏、收藏、会话触碰文件（SSE 实时）。
+- **Single-window Win11 tree**: Home / Gallery / This PC drives / Recycle Bin / Favorites / Session files; draggable splitter (default 3:7), command bar + status bar, directory-first case-insensitive sorting.
+- **Real drive volume labels**: reads system volume labels shown as `Label (C:)`, falling back to a localized "Local Disk (C:)".
+- **View modes**: 8 modes — extra-large / large / medium / small icons, list, details, content, tiles; details-view column widths are draggable; toggle extension visibility.
+- **Search**: recursive search of file names and content within the current directory, with case sensitivity / regex support and virtual scrolling; supports cross-file batch replace on content hits.
+- **CRUD**: create file / directory, rename, delete (with confirmation), copy / cut / paste, rubber-band multi-select, batch operations, external drag-and-drop upload, compress / extract.
+- **Recycle Bin**: shares the same UI as the file list (same 8 view modes / sorting / multi-select / rubber band), with operations switched to Restore / Delete permanently / Empty recycle bin.
+- **Git badges**: file status (`?` / `A` / `M` / `D`) badges + right-click Git operations.
+- **Notepad**: right-click "Edit" opens the built-in text editor (save-as / clipboard / unsaved-changes confirmation).
+- **Background tasks**: long-running jobs like uploads and compression show progress and results in the background-task panel, with a history archive.
+- **Sub-agent**: right-click "Handle with sub-agent" to start an official sub-agent session on the selected files / directories.
+- **Navigation**: back / forward / up / back to session directory, breadcrumb address bar, favorites, session-touched files (real-time via SSE).
 
-### 📝 文件编辑器
+### 📝 File Editor
 
-- **项目树**：展开状态与滚动位置持久化；单击选中、双击打开；右键
-  新建文件 / 文件夹、重命名、删除、刷新、添加到会话。
-- **多标签编辑**：CodeMirror 6，语言按扩展名**动态加载**（TS/JS/JSON/HTML/CSS/Markdown/YAML/XML/
-  Python/SQL/Java/C++/Rust/Go/PHP，以及 C#/shell/Ruby 等 legacy 模式；无匹配回退纯文本）。
-- **标签栏右键菜单**：关闭 / 保存并关闭 / 关闭其他 / 关闭右侧标签页 / 关闭全部。
-- **编辑器右键**：格式化内容、保存；`Ctrl+S` 保存；未保存关闭时二次确认；只读文件有明确标识。
-- **打开文件夹**：两栏选择器（左栏「我的电脑 + 快捷方式」，右栏对应文件夹），
-  支持**双击下钻、单击选中**，另可新建文件夹或直接输入路径。
-- 与文件工作台**共用同一个全局终端**。
+- **Project tree**: expansion state and scroll position persisted; single click selects, double click opens; right-click for new file / folder, rename, delete, refresh, add to session.
+- **Multi-tab editing**: CodeMirror 6, languages **loaded on demand** by extension (TS/JS/JSON/HTML/CSS/Markdown/YAML/XML/Python/SQL/Java/C++/Rust/Go/PHP, plus legacy modes like C#/shell/Ruby; falls back to plain text when nothing matches).
+- **Tab-bar context menu**: close / save & close / close others / close tabs to the right / close all.
+- **Editor context menu**: format content, save; `Ctrl+S` saves; unsaved tabs confirm before closing; read-only files are clearly marked.
+- **Open folder**: two-pane picker (left pane "My Computer + shortcuts", right pane the corresponding folder), supports **double-click to drill down, single click to select**, plus new-folder creation or direct path input.
+- Shares the **same global terminal** as the file workbench.
 
-### ▶ 终端
+### ▶ Terminal
 
-- **ConPTY 常驻 shell**（node-pty）：真实控制台语义——退格逐字符删除、回车即时执行、
-  全屏 TTY 程序与中文输出正常；`cmd` / `powershell` 可切换。
-- **多标签**（上限 9），每个标签一个独立后端会话；会话跨面板关闭存活，重连即续传输出。
-- **浮窗**：可拖动、右下角缩放、双击复位；最小化收进右下角 **dock 栏**（跨面板常驻，可还原）。
-- **关闭即清理**：Windows 下以 `taskkill /T` 终结整棵进程树，避免 npm / python / node 孤儿残留。
-- **搜索与显示**：Ctrl+F 搜索输出（区分大小写）、字号增减、清屏。
-- **键位**：`Ctrl+C` 有选区时复制（无选区放行 SIGINT）、`Ctrl+V` 粘贴、`Ctrl+F` 搜索、`Ctrl±` / `Ctrl+0` 字号。
-- **权限徽标**：显示当前终端是「管理员」还是「普通权限」，见下文[权限模型](#权限模型终端管理员模式)。
+- **Persistent ConPTY shells** (node-pty): real console semantics — per-character backspace, immediate enter execution, full-screen TTY programs and CJK output all work; switchable between `cmd` / `powershell`.
+- **Multi-tab** (up to 9), one independent backend session per tab; sessions survive panel closes, and reconnecting resumes output.
+- **Floating windows**: draggable, resizable from the bottom-right corner, double-click to reset; minimized windows collapse into the bottom-right **dock** (persistent across panels, restorable).
+- **Cleanup on close**: on Windows the whole process tree is killed with `taskkill /T`, avoiding orphaned npm / python / node processes.
+- **Search & display**: Ctrl+F to search output (case-sensitive), font size up/down, clear screen.
+- **Key bindings**: `Ctrl+C` copies when there's a selection (otherwise passes SIGINT through), `Ctrl+V` paste, `Ctrl+F` search, `Ctrl±` / `Ctrl+0` font size.
+- **Privilege badge**: shows whether the current terminal is "Administrator" or "Standard", see [Permission model](#permission-model-terminal-administrator-mode).
+- **Official terminal backend**: for local shells, the process layer (PTY creation / reconnect / cleanup) is delegated to the host's official `ctx.webTerminals` service when available, with automatic fallback to the plugin's own backend; SSH terminals always use the plugin's own SSH channel.
 
-### 🌿 Git / SVN 管理面板
+### 🌿 Git / SVN Management Panels
 
-两个面板都可从文件工作台与文件编辑器中打开（右键 → 打开管理面板），均按左侧窄栏分区：
+Both panels open from the file workbench and the file editor (right-click → open management panel), each organized into sections in a narrow left column:
 
-**Git**（7 个分区）
+**Git** (7 sections)
 
-| 分区 | 能力 |
+| Section | Capabilities |
 | --- | --- |
-| 变更 | 暂存区 / 未暂存 / 未跟踪三组；行内暂存、取消暂存、忽略、还原；全部暂存；提交（含快捷提交） |
-| 历史 | 提交图（全部 / 当前分支）+ 提交详情（hash / 作者 / 时间 / parents / refs / 文件清单 / 补丁）；`reset`（soft / mixed / hard）、`revert`、`cherry-pick` |
-| 分支 | 新建并切换、重命名、本地与远程分支列表、切换、合并到当前、推送、删除、检出远程分支 |
-| 标签 | 新建、拉取全部、发布 Release、查看、拉取远程标签、推送、删除 |
-| 远程 | 新增、修改 URL、删除 |
-| 贮藏 | 新建、查看、应用 / 删除 |
-| 命令行 | 内置 git CLI，直接跑任意 git 子命令并显示输出 |
+| Changes | staged / unstaged / untracked groups; inline stage, unstage, ignore, discard; stage all; commit (with quick commit) |
+| History | commit graph (all / current branch) + commit details (hash / author / time / parents / refs / file list / patch); `reset` (soft / mixed / hard), `revert`, `cherry-pick` |
+| Branches | create & switch, rename, local & remote branch list, switch, merge into current, push, delete, checkout remote branch |
+| Tags | create, fetch all, publish Release, view, fetch remote tags, push, delete |
+| Remotes | add, edit URL, delete |
+| Stashes | create, view, apply / delete |
+| Command line | built-in git CLI: run any git subcommand and see the output |
 
-另有文件级 **diff 视图 / 文件历史 / blame**，以及分支上下游 `↑ahead ↓behind` 显示。
+Plus per-file **diff view / file history / blame**, and upstream/downstream `↑ahead ↓behind` display.
 
-**SVN**（3 个分区：变更 / 日志 / 输出）
+**SVN** (3 sections: Changes / Log / Output)
 
-- 更新、清理、检出（URL + 目标目录）、加入版本控制、还原、解决冲突、提交（选中或全部）。
-- 文件级 diff / blame；工作副本 URL 与仓库根展示。
-- **忽略**走 `svn:ignore`（目录属性，作用在父目录，先读后幂等追加）。
-- 未装 svn CLI 或当前目录不是工作副本时，给出明确提示与引导。
+- Update, cleanup, checkout (URL + target directory), add to version control, revert, resolve conflicts, commit (selected or all).
+- Per-file diff / blame; working-copy URL and repository root display.
+- **Ignore** uses `svn:ignore` (a directory property applied on the parent directory; read-then-idempotently-append).
+- Clear guidance is shown when the svn CLI is missing or the current directory is not a working copy.
 
-**右键菜单**统一由 `composables/domain/repoMenu.ts` 生成（单一来源），Git 提供
-暂存 / 提交 / 差异 / 还原 / 忽略（写入仓库根 `.gitignore`），SVN 提供 打开管理面板 / 更新 /
-加入版本控制 / 忽略。
+**Context menus** are generated uniformly by `composables/domain/repoMenu.ts` (single source of truth); Git offers stage / commit / diff / discard / ignore (writing the repo-root `.gitignore`), SVN offers open management panel / update / add to version control / ignore.
 
-### 🔗 会话联动
+### 🔗 Session Integration
 
-- **会话文件**：经 SSE 实时推送当前会话触碰过的文件，在导航树「会话文件」分组展示。
-- **添加到会话**：把文件 / 目录作为 **DSH 官方结构化引用 chip**（`@路径`，`source: "reference"`）
-  写入当前会话输入框草稿——不是拼纯文本。
-- **打开改道**：会话里点文件（工具行路径、产物行、正文提及）会改道到本插件；
-  工作台未挂载时自动回落到宿主原生行为。
-- **跟随会话**：切换会话或会话工作目录变化时，工作区根自动跟随。
+- **Session files**: files touched by the current session are pushed in real time via SSE and shown in the nav tree's "Session files" group.
+- **Add to session**: writes a file / directory into the current session input draft as an **official DSH structured reference chip** (`@path`, `source: "reference"`) — not plain text.
+- **Open redirect**: clicking files in the session (tool-line paths, artifact lines, body mentions) is redirected to this plugin; falls back to host-native behavior when the workbench isn't mounted.
+- **Follows the session**: switching sessions or a session's working directory change moves the workspace root automatically.
 
-### 🎨 设置
+### 🎨 Settings
 
-允许操作工作区根之外的文件（root 开关）、显示隐藏文件、强调色、界面字号、字体族、
-主题（跟随宿主 / 深色 / 浅色）、默认视图。
+Allow operations outside the workspace root (root switch), show hidden files, accent color, UI font size, font family, theme (follow host / dark / light), default view.
 
-## 快捷键
+## Keyboard Shortcuts
 
-全局：
+Global:
 
-| 按键  | 功能          |
-| --- | ----------- |
-| `?` | 打开快捷键帮助（全局） |
+| Key | Action |
+| --- | --- |
+| `?` | Open shortcut help (global) |
 
-文件列表（焦点内）：
+File list (while focused):
 
-| 按键                     | 功能               |
-| ---------------------- | ---------------- |
-| `Ctrl/Cmd+A`           | 全选               |
-| `Ctrl/Cmd+C / X / V`   | 复制 / 剪切 / 粘贴     |
-| `Ctrl/Cmd+F`           | 聚焦筛选框            |
-| `Ctrl+Shift+N`         | 新建文件夹            |
-| `Delete` / `F2` / `F5` | 删除（确认）/ 重命名 / 刷新 |
-| `Enter`                | 打开文件 / 进入目录      |
-| `↑ ↓ Home End`         | 移动选中             |
-| `Backspace` / `Alt+↑`  | 返回上级             |
-| `Alt+← / →`            | 浏览历史后退 / 前进      |
+| Key | Action |
+| --- | --- |
+| `Ctrl/Cmd+A` | Select all |
+| `Ctrl/Cmd+C / X / V` | Copy / cut / paste |
+| `Ctrl/Cmd+F` | Focus the filter box |
+| `Ctrl+Shift+N` | New folder |
+| `Delete` / `F2` / `F5` | Delete (confirm) / rename / refresh |
+| `Enter` | Open file / enter directory |
+| `↑ ↓ Home End` | Move selection |
+| `Backspace` / `Alt+↑` | Go to parent directory |
+| `Alt+← / →` | Navigate history back / forward |
 
-文件编辑器与终端：
+File editor & terminal:
 
-| 按键               | 位置    | 功能                       |
-| ---------------- | ----- | ------------------------ |
-| `Ctrl/Cmd+S`     | 编辑器   | 保存当前标签                   |
-| 标签栏右键            | 编辑器   | 关闭 / 保存并关闭 / 关闭其他 / 关闭右侧 / 关闭全部 |
-| `Ctrl+C`         | 终端    | 有选区时复制；无选区放行 `SIGINT`     |
-| `Ctrl+V`         | 终端    | 粘贴                       |
-| `Ctrl+F`         | 终端    | 搜索终端输出                   |
-| `Ctrl±` / `Ctrl+0` | 终端    | 增大 / 减小 / 复位字号           |
+| Key | Where | Action |
+| --- | --- | --- |
+| `Ctrl/Cmd+S` | Editor | Save current tab |
+| Tab-bar right click | Editor | Close / save & close / close others / close to the right / close all |
+| `Ctrl+C` | Terminal | Copy when there's a selection; otherwise passes `SIGINT` through |
+| `Ctrl+V` | Terminal | Paste |
+| `Ctrl+F` | Terminal | Search terminal output |
+| `Ctrl±` / `Ctrl+0` | Terminal | Increase / decrease / reset font size |
 
-## 项目结构
+## Project Structure
 
 ```
 src/
   shared/
-    types.ts             宿主 ↔ 客户端 ↔ Vue 共享类型
-    locales.ts           中英文案字典（zh / en 两份都要同步改）
-    session-files.ts     会话转写文件解析
-  host/                  服务端（Cordis 插件）
-    index.ts             apply：注册 /api/dsh-file-workbench 路由 + 静态资源 + 自更新
-    updater.ts           启动后自更新
+    types.ts             shared types (host ↔ client ↔ Vue)
+    locales.ts           zh/en copy dictionary (both must be updated together)
+    session-files.ts     session transcript file parsing
+  host/                  server side (Cordis plugin)
+    index.ts             apply: registers /api/dsh-file-workbench routes + static assets + self-update
+    updater.ts           self-update after startup
     fs/
-      fs-tree.ts         列目录 / 排序 / 软链接 / containment 守卫
-      fs-search.ts       递归搜索 + 跨文件替换
-      fs-read.ts         打开 / 保存
-      fs-zip.ts          压缩 / 解压
-      fs-drives.ts       盘符与卷标（Win32_LogicalDisk，5 分钟 TTL 缓存）
-      recycle.ts         系统回收站
+      fs-tree.ts         list / sort / symlinks / containment guard
+      fs-search.ts       recursive search + cross-file replace
+      fs-read.ts         open / save
+      fs-zip.ts          compress / extract
+      fs-drives.ts       drives & volume labels (Win32_LogicalDisk, 5-min TTL cache)
+      recycle.ts         system recycle bin
     routes/
-      routes.ts                资源分发表
-      routes-fs.ts             文件系统（列表 / 搜索 / 读写 / 压缩 / 我的电脑）
-      routes-git.ts            Git（status / diff / add / discard / log / branch / tag / remote / stash / 忽略）
-      routes-svn.ts            SVN（info / status / run / 日志 / blame）
-      routes-terminal.ts       终端：ConPTY 常驻 shell（SSE 流）+ 宿主提权探测 /term-env
-      routes-recycle.ts        回收站
-      routes-session-stream.ts 会话触碰文件 SSE
-      routes-subagent.ts       子代理
-      routes-task-archives.ts  后台任务归档
-      routes-persist.ts        偏好持久化
-      routes-util.ts           JSON 信封 / body 解析 / 静态资源 / 路径校验
+      routes.ts                route dispatch table
+      routes-fs.ts             file system (list / search / read-write / compress / My Computer)
+      routes-git.ts            Git (status / diff / add / discard / log / branch / tag / remote / stash / ignore)
+      routes-svn.ts            SVN (info / status / run / log / blame)
+      routes-terminal.ts       terminal: persistent ConPTY shells (SSE stream) + host privilege probe /term-env
+      routes-recycle.ts        recycle bin
+      routes-session-stream.ts session-touched-files SSE
+      routes-subagent.ts       sub-agent
+      routes-task-archives.ts  background task archives
+      routes-persist.ts        preference persistence
+      routes-util.ts           JSON envelope / body parsing / static assets / path validation
     store/
-      root-store.ts      工作区根
-      workbench-store.ts prefs / favorites / layout 持久化
-    subagent/subagent.ts 官方子代理会话
-  client/                DSH 客户端桥接（TSX，注册进右侧栏，注入 Vue 产物 + 挂载）
-    index.tsx            apply：注册两个右侧栏 tab、改道文件打开、注入 Vue 产物、引用通道
-    RightPaneBridge.tsx  把 Vue 工作台 / 编辑器主体挂进右侧面板容器
-    ComposerBridge.tsx   会话输入框引用座位（官方 `@路径` chip 写入）
-    api.ts               「打开 tab」桥
-  vue/                   Vue 3 + Vite 前端
-    main.ts              入口：右侧面板挂载 + **全局终端常驻挂载**（挂 body）
-    App.vue              文件工作台单窗口壳
-    styles.css           全局主题变量与基础样式
+      root-store.ts      workspace root
+      workbench-store.ts prefs / favorites / layout persistence
+    subagent/subagent.ts official sub-agent sessions
+  client/                DSH client bridge (TSX, registered into the right sidebar; injects Vue assets + mounts)
+    index.tsx            apply: registers the two right-sidebar tabs, redirects file opens, injects Vue assets, reference channel
+    RightPaneBridge.tsx  mounts the Vue workbench / editor body into the right-panel container
+    ComposerBridge.tsx   session input reference seat (official `@path` chip writing)
+    TabMenuBridge.tsx    right-sidebar tab menu additions (new editor / float window)
+    OfficialTerminalBridge.ts official terminal bridge: local terminals via host ctx.webTerminals
+    api.ts               "open tab" bridge
+  vue/                   Vue 3 + Vite frontend
+    main.ts              entry: right-panel mounting + global terminal mounted persistently (on body)
+    App.vue              file workbench single-window shell
+    styles.css           global theme variables & base styles
     components/
       common/            WinMenuBar / NavPathBar / Icon / ContextMenu / ConfirmDialog / ShortcutHelpDialog
-      business/explorer/ ExplorerPane（双栏 + 分隔条）、CommandBar、NavPane、FileListPane（列表 / 回收站）、
-                         ThisPcPane、SearchPane、StatusBar、BgTaskPanel、TxtEditor
-      business/vscode/   VSCodePane、ProjectTree、TabBar、CodeEditor、FolderPickerDialog、langResolver
-      business/git/      GitPanel、GitDiffView、GitGraphList、SvnPanel、QuickCommit
-      business/terminal/ TerminalHost（全局单例宿主）、TerminalDialog（浮窗 / 停靠）
+      business/explorer/ ExplorerPane (two panes + splitter), CommandBar, NavPane, FileListPane (list / recycle bin),
+                         ThisPcPane, SearchPane, StatusBar, BgTaskPanel, TxtEditor
+      business/vscode/   VSCodePane, ProjectTree, TabBar, CodeEditor, FolderPickerDialog, langResolver
+      business/git/      GitPanel, GitDiffView, GitGraphList, SvnPanel, QuickCommit
+      business/terminal/ TerminalHost (global singleton host), TerminalDialog (floating / docked)
       settings/          SettingsDialog
     composables/
-      core/              useApi、settings、theme、i18n、dialog、fileTaskMeta
-      domain/            git、gitGraph、svn、repoMenu（右键菜单单一来源）、terminalStore、driveName
-      session/           sessionSse、tasks、listStatus
-      ui/                icons、clipboard、dnd、virtual
-    stores/              workbench、explorer、fileCommands、vscode
-    types/               auto-imports.d.ts、components.d.ts
+      core/              useApi, settings, theme, i18n, dialog, fileTaskMeta
+      domain/            git, gitGraph, svn, repoMenu (single source for context menus), terminalStore,
+                         officialTerm (official terminal bridge accessor), driveName
+      session/           sessionSse, tasks, listStatus
+      ui/                icons, clipboard, dnd, virtual
+    stores/              workbench, explorer, fileCommands, vscode
+    types/               auto-imports.d.ts, components.d.ts
 ```
 
-## 开发
+## Development
 
-前置：Node ≥ 20、npm（或 pnpm）。
+Prerequisites: Node ≥ 20, npm (or pnpm).
 
-| 命令                   | 作用                             |
-| -------------------- | ------------------------------ |
-| `npm run dev:vue`    | 单独跑 Vue 应用联调（自挂 `#app`，配合已运行的 host） |
-| `npm run build:vue`  | 仅构建 Vue 产物（`dist/`）             |
-| `npm run typecheck`  | `vue-tsc --noEmit`             |
-| `npm run build`      | 完整构建：Vite(Vue) + esbuild(host/client) → `lib/` |
-| `npm run build:dev`  | 同上，`--dev`                     |
-| `npm run sync`       | 把 `lib/` 同步进 web profile        |
-| `npm run deploy`     | `build:dev` + `sync`           |
+| Command | Purpose |
+| --- | --- |
+| `npm run dev:vue` | Run the Vue app standalone for development (mounts `#app` itself; pair with a running host) |
+| `npm run build:vue` | Build only the Vue bundle (`dist/`) |
+| `npm run typecheck` | `vue-tsc --noEmit` |
+| `npm run build` | Full build: Vite (Vue) + esbuild (host/client) → `lib/` |
+| `npm run build:dev` | Same, with `--dev` |
+| `npm run sync` | Sync `lib/` into the web profile |
+| `npm run deploy` | `build:dev` + `sync` |
 
-API 基址默认 `/api/dsh-file-workbench`，可用环境变量 `VITE_API_BASE` 覆盖
-（例如开发时指向 `http://localhost:xxxx/api/dsh-file-workbench`）。
+The API base defaults to `/api/dsh-file-workbench` and can be overridden with the `VITE_API_BASE`
+environment variable (e.g. during development, point it at `http://localhost:xxxx/api/dsh-file-workbench`).
 
-**改动生效范围**（影响调试方式）：
+**What a change affects** (affects how you debug):
 
-- 只改 `src/vue/**`、`src/shared/locales.ts` → 构建 + 同步后**硬刷新浏览器**即可。
-- 改了 `src/host/**` 或 `src/client/**`（例如新增路由）→ **必须重启 `dsh web`**。
+- Only `src/vue/**` or `src/shared/locales.ts` → build + sync, then **hard-refresh the browser**.
+- Changes in `src/host/**` or `src/client/**` (e.g. new routes) → **must restart `dsh web`**.
 
-## 安装到 DSH（web 档）
+## Installing into DSH (web profile)
 
 ```bash
-npm run build && npm run sync   # 构建并把产物同步进 web profile
+npm run build && npm run sync   # build and sync the bundle into the web profile
 ```
 
-装好后在 profile 里执行 `npm install`（让 cordis.patch.yml 生效），**重启 `dsh web`** 并硬刷新浏览器
-（Cmd/Ctrl+Shift+R）。
+After installing, run `npm install` inside the profile (so cordis.patch.yml takes effect),
+**restart `dsh web`**, and hard-refresh the browser (Cmd/Ctrl+Shift+R).
 
-> 若 `dsh web` 未内置本插件的挂载行，可在
-> `~/.dsh/profiles/web/cordis.patch.yml` 追加：
+> If `dsh web` doesn't already include the mount entry for this plugin, append the
+> following to `~/.dsh/profiles/web/cordis.patch.yml`:
 >
 > ```yaml
 > - insert:
@@ -242,46 +232,58 @@ npm run build && npm run sync   # 构建并把产物同步进 web profile
 >       name: 'dsh-file-workbench'
 > ```
 
-## 使用
+## Usage
 
-1. 在 DSH 右侧栏的 guide 区点「文件工作台」或「文件编辑器」打开面板
-   （首次会自动定位到当前会话的工作区目录）。
-2. 工作台：左侧导航树选择位置；右侧列表双击文件夹进入、双击文件在 **DSH 右侧查看器**打开。
-3. 编辑器：工具栏「打开文件夹」选定项目目录 → 项目树双击打开文件 → 多标签编写、`Ctrl+S` 保存。
-4. 终端：工具栏终端按钮打开，最小化后收进右下角 dock 栏，点一下还原。
-5. `?` 查看快捷键帮助。
+1. Click "File Workbench" or "File Editor" in the DSH right-sidebar guide area
+   (the first open auto-navigates to the current session's workspace directory).
+2. Workbench: pick a location in the left nav tree; double-click folders on the right to enter,
+   double-click files to open them in the **DSH right-side viewer**.
+3. Editor: pick a project directory via the toolbar "Open folder" → double-click files in the
+   project tree → edit across tabs, `Ctrl+S` to save.
+4. Terminal: open via the toolbar terminal button; minimized windows collapse into the
+   bottom-right dock; click to restore.
+5. `?` shows the shortcut help.
 
-## 权限模型（终端管理员模式）
+## Permission Model (Terminal Administrator Mode)
 
-终端 shell 由宿主以 **ConPTY** 派生，**子进程继承 `dsh web` 进程的令牌** ——
-所以「终端里的命令有没有管理员权限」等于「`dsh web` 是不是以管理员启动」。
+Terminal shells are spawned by the host via **ConPTY**, and **child processes inherit the token of
+the `dsh web` process** — so "do commands in the terminal have administrator rights" equals
+"was `dsh web` started as administrator".
 
-- **获得管理员终端**：以**管理员身份运行** `dsh web`（右键终端/快捷方式 →
-  「以管理员身份运行」），面板内**所有**终端即拥有管理员权限。
-- **徽标**：终端标签栏显示「管理员 / 普通权限」，鼠标悬停可看说明；点击给出获取指引。
-  探测由 host 的 `GET /term-env` 提供（Windows 用 `whoami /groups` 的完整性级别 SID 判定，
-  POSIX 用 `uid === 0`）。
-- **为什么不能在插件内单开一个提权终端**：Windows 提权必须过 UAC，而走 ShellExecute / `runas`
-  的提权进程**无法挂到 ConPTY 伪控制台**上，因此插件无法对单个终端提权；可行路径只有让宿主整体提权。
-- 备选方案（当前未实现）：以 `sudo.exe` 做单命令级提权（需先启用 Windows sudo 且设为 inline 模式），
-  或宿主注册高权限助手经命名管道桥接（引入自建提权通道，安全面较大）。
+- **Getting an administrator terminal**: run `dsh web` **as administrator** (right-click the
+  terminal/shortcut → "Run as administrator"); then **all** terminals in the panel have
+  administrator rights.
+- **Badge**: the terminal tab bar shows "Administrator / Standard"; hover for details, click for
+  guidance. The probe is provided by the host's `GET /term-env` (on Windows, determined by the
+  integrity-level SID from `whoami /groups`; on POSIX, `uid === 0`).
+- **Why the plugin can't spawn a single elevated terminal**: on Windows elevation must go through
+  UAC, and a process elevated via ShellExecute / `runas` **cannot attach to a ConPTY pseudo-console**,
+  so the plugin cannot elevate a single terminal; the only viable path is elevating the host itself.
+- Alternatives (not implemented): per-command elevation via `sudo.exe` (requires Windows sudo
+  enabled in inline mode), or a host-registered high-privilege helper bridged over a named pipe
+  (introduces a self-built elevation channel with a large security surface).
 
-## 安全
+## Security
 
-- 所有读写路径先经根目录 containment 守卫（含符号链接解析后的再检查），拒绝越权与路径穿越。
-- 工作区根之外默认只读；需在设置中开启 **root 开关**才允许写操作。
-- 搜索对符号链接目录不下钻（循环安全），并对访问数与命中数设预算。
-- 终端工作目录同样过保护路径校验；终止会话时清理整棵进程树。
-- 持久化仅写 `{DSH_HOME|~/.dsh}/fileworkbench/` 白名单键（prefs / favorites / layout）。
+- All read/write paths first pass a root containment guard (re-checked after symlink resolution),
+  rejecting privilege escalation and path traversal.
+- Outside the workspace root everything is read-only by default; the **root switch** in settings
+  must be enabled to allow writes.
+- Search does not descend into symlinked directories (loop-safe) and has budgets on visited and
+  matched file counts.
+- Terminal working directories go through the same protected-path validation; terminating a
+  session cleans up the whole process tree.
+- Persistence only writes whitelisted keys (prefs / favorites / layout) under
+  `{DSH_HOME|~/.dsh}/fileworkbench/`.
 
-## 依赖
+## Dependencies
 
-- **Vue 3 + Vite**（前端）；**React**（DSH 右侧栏桥接，由宿主提供）；**esbuild**（host/client 构建）。
-- `element-plus`（UI 组件）；`@xterm/xterm` + fit / search / web-links addon（终端渲染）。
-- **CodeMirror 6**（编辑器：`@codemirror/*` 语言包按需动态加载）。
-- `node-pty`（ConPTY 交互终端，原生模块，缺失时终端不可用）。
-- `fflate`（压缩 / 解压）；`fzstd`（解压会话转写 zstd）。
-- 复用 peer `@deepseek-ai/cordis`、`@deepseek-ai/dsh-host-webserver`。
+- **Vue 3 + Vite** (frontend); **React** (DSH right-sidebar bridge, provided by the host); **esbuild** (host/client build).
+- `element-plus` (UI components); `@xterm/xterm` + fit / search / web-links addons (terminal rendering).
+- **CodeMirror 6** (editor: `@codemirror/*` language packages loaded on demand).
+- `node-pty` (ConPTY interactive terminal, a native module; the terminal is unavailable if missing).
+- `fflate` (compress / extract); `fzstd` (decompress zstd session transcripts).
+- Reuses peers `@deepseek-ai/cordis` and `@deepseek-ai/dsh-host-webserver`.
 
 ## License
 

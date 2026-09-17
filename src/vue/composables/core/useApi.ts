@@ -955,6 +955,77 @@ export function   gitSetUserConfig(name: string, email: string): Promise<GitActi
     return request("POST", "/svn/run", { path, args });
   }
 
+/* ---------- 账号管理（Git / SVN 凭据，两个面板共用） ---------- */
+
+/** git / svn 两端共用一套账号模型。 */
+export type AccountKind = "git" | "svn";
+
+/** 账号（host 侧已抹去机密：只有 secretKind 与 hasSecret 标记）。 */
+export interface AccPublic {
+  id: string;
+  kind: AccountKind;
+  host: string;
+  /** 生效范围：仓库/远程地址；留空 = 该主机下全部仓库。 */
+  url: string;
+  name: string;
+  username: string;
+  secretKind: "password" | "token";
+  note: string;
+  hasSecret: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 新增/更新入参（更新时 secret 留空 = 沿用现有值）。 */
+export interface AccInput {
+  kind?: AccountKind;
+  host?: string;
+  url?: string;
+  name?: string;
+  username?: string;
+  secret?: string;
+  secretKind?: "password" | "token";
+  note?: string;
+}
+
+/** 账号列表（机密已抹除）。 */
+export function accountsList(): Promise<{ accounts: AccPublic[] }> {
+  return request("GET", "/accounts");
+}
+
+export function accountAdd(body: AccInput): Promise<{ account: AccPublic }> {
+  return request("POST", "/accounts/add", body);
+}
+
+/**
+ * 预览某地址会命中哪条账号（界面上显示「当前仓库将使用 xxx」）。
+ * 与执行期注入共用同一套匹配规则，故显示的就是真正会用的那条。
+ */
+export function accountMatch(kind: AccountKind, url: string): Promise<{ account: AccPublic | null }> {
+  return request("GET", `/accounts/match${qs({ kind, url })}`, undefined, { silent: true });
+}
+
+export function accountUpdate(body: AccInput & { id: string }): Promise<{ account: AccPublic }> {
+  return request("POST", "/accounts/update", body);
+}
+
+export function accountRemove(id: string): Promise<{ id: string }> {
+  return request("POST", "/accounts/remove", { id });
+}
+
+/**
+ * 测试连通：`{ id }` 走已存配置；也可内联一套还没保存的凭据（表单里点「测试连通」）。
+ * 返回的 `ok` 是**业务结论**（能连上/连不上），HTTP 层始终 200。
+ */
+export function accountTest(body: AccInput & { id?: string }): Promise<{ ok: boolean; detail: string }> {
+  return request("POST", "/accounts/test", body);
+}
+
+/** 写入系统凭据存储（Git → 凭据管理器；SVN → svn 自身认证缓存）。 */
+export function accountApply(id: string): Promise<{ detail: string }> {
+  return request("POST", "/accounts/apply", { id });
+}
+
 /** 读取全量持久化状态（偏好/收藏/布局，后端 JSON 配置文件）。 */
 export function loadPersist(): Promise<Record<string, unknown>> {
   return request("GET", "/persist");

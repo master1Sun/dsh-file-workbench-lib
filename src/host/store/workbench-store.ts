@@ -29,6 +29,9 @@ export const PERSIST_KEYS = [
   "vscode",
   // SSH 远端主机连接配置（含认证机密——本机配置文件，不外发）。
   "ssh-hosts",
+  // Git / SVN 账号（凭据）配置（含认证机密——本机配置文件，不外发）；
+  // 与系统凭据管理器 / %APPDATA%\Subversion\auth 互不干扰，仅在用户显式点「写入系统」时写入。
+  "accounts",
 ] as const;
 export type PersistKey = (typeof PERSIST_KEYS)[number];
 
@@ -36,6 +39,14 @@ export type PersistKey = (typeof PERSIST_KEYS)[number];
 function stateDir(): string {
   const dshHome = process.env.DSH_HOME || join(homedir(), ".dsh");
   return join(dshHome, "fileworkbench");
+}
+
+/**
+ * 对外暴露持久化目录：accounts 需要在同目录下生成 git 凭据外壳（askpass），
+ * 与 `accounts.json` 同处一个已被本插件管理的目录，避免再引入一处散落状态。
+ */
+export function workbenchStateDir(): string {
+  return stateDir();
 }
 
 /** key 是否合法：命中白名单。 */

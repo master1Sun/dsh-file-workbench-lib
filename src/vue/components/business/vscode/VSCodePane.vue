@@ -130,7 +130,10 @@
             <div class="vs-empty-hint">{{ t("vsEmptyHint") }}</div>
             <button class="vs-btn" @click="selectProject">{{ t("vsOpenFolder") }}</button>
           </div>
-          <div v-else-if="activeLoading" class="vs-loading-big">{{ t("vsLoading") }}</div>
+          <div v-else-if="activeLoading" class="vs-loading-big">
+            <span class="vs-loading-spin" aria-hidden="true"></span>
+            <span>{{ t("vsLoading") }}</span>
+          </div>
           <div v-else-if="activeError" class="vs-error">{{ activeError }}</div>
           <!-- 非文本文件：不进编辑器，避免把二进制当文本渲染 / 保存 -->
           <div v-else-if="activeBuffer?.binary" class="vs-empty">
@@ -2082,6 +2085,25 @@ onBeforeUnmount(() => {
 }
 .vs-error {
   color: #f85149;
+}
+/*
+ * 打开文件的加载动画：内容到位前编辑器区域是空的，只给文字会像「卡住了」。
+ * 取色与全局 `.fw-loading` 一致（边框用弱色、顶边用强调色），尺寸放大到适配整块空白区。
+ */
+.vs-loading-spin {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  border: 2px solid var(--dsh-border, #30363d);
+  border-top-color: var(--dsh-accent, #238636);
+  border-radius: 50%;
+  box-sizing: border-box;
+  animation: vs-loading-spin 0.7s linear infinite;
+}
+@keyframes vs-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .vs-status {
   display: flex;

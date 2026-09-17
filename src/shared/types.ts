@@ -532,6 +532,14 @@ export interface RepoCloneRequest {
   depth?: number;
   /** svn 专用：检出的版本号（缺省取 HEAD）。 */
   revision?: string;
+  /**
+   * 显式指定的账号 id（「账号管理」里那一条）。
+   *
+   * 留空 = 按 URL 自动匹配（URL 前缀最长 → 同主机默认账号），与仓库内的同步命令同一套规则；
+   * 指定则**忽略自动匹配**，直接用这条账号的凭据 —— 克隆前就能在弹窗里选好，
+   * 不必先建好账号再指望它「恰好被匹配上」。
+   */
+  accountId?: string;
   /** 工作区根 key（与其它路由一致，用于工作区外守卫判定）。 */
   key?: string;
 }
