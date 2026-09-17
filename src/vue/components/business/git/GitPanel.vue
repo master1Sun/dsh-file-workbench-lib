@@ -206,7 +206,8 @@
                     <button class="fw-gp-mini" :title="t('gitCheckoutCommit')" @click="checkoutCommit">
                       <icon name="check" :size="12" />
                     </button>
-                    <el-dropdown trigger="click" :teleported="false" @command="onCommitCmd">
+                    <!-- bottom-end：菜单右缘对齐触发按钮，向左展开；传送到 body，避免被外层弹窗遮盖。 -->
+                    <el-dropdown trigger="click" placement="bottom-end" @command="onCommitCmd">
                       <button class="fw-gp-mini"><icon name="sort" :size="12" /></button>
                       <template #dropdown>
                         <el-dropdown-menu>
@@ -1895,7 +1896,10 @@ function focusCli(): void {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  /* 不要 overflow:hidden —— 否则内部“提交操作”下拉（teleported=false 留在 .fw-gp-detail 内）
+     向右展开时会被本容器裁切（右侧图标菜单右侧被压盖）。详情体 .fw-gp-scroll 自带 overflow:auto，
+     去掉这里不影响滚动，反而让浮层能浮在左侧列表之上。 */
+  position: relative;
 }
 .fw-gp-one { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px; }
 .fw-gp-cli-wrap { padding: 0; overflow: hidden; display: flex; }
