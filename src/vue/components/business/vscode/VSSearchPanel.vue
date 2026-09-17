@@ -238,7 +238,7 @@ const dirOf = (rel: string): string => {
   padding-right: 2px;
 }
 .vs-sp-inputwrap:focus-within {
-  border-color: var(--dsh-accent, #238636);
+  border-color: var(--dsh-accent, #2f81f7);
 }
 .vs-sp-input {
   flex: 1 1 auto;
@@ -270,7 +270,7 @@ const dirOf = (rel: string): string => {
   background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
 }
 .vs-sp-toggle.on {
-  color: var(--dsh-accent, #3fb950);
+  color: var(--dsh-accent, #2f81f7);
   background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
 }
 /* 搜索范围行：主输入框下方的弱化小输入行，填了子目录时高亮 */
@@ -287,8 +287,8 @@ const dirOf = (rel: string): string => {
 }
 .vs-sp-scope.on {
   border-style: solid;
-  border-color: var(--dsh-accent, #238636);
-  color: var(--dsh-accent, #3fb950);
+  border-color: var(--dsh-accent, #2f81f7);
+  color: var(--dsh-accent, #2f81f7);
 }
 .vs-sp-scope-input {
   flex: 1 1 auto;

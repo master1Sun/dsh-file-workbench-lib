@@ -135,6 +135,7 @@ import { clipboardHas } from "../../../composables/ui/clipboard";
 import { driveName } from "../../../composables/domain/driveName";
 import { toast } from "../../../stores/workbench";
 import ContextMenu from "../../common/ContextMenu.vue";
+import { useContextMenu } from "../../../composables/ui/useContextMenu";
 import Icon from "../../common/Icon.vue";
 import type { DriveInfo, MenuItem } from "../../../../shared/types";
 import type { Prefs } from "../../../composables/core/settings";
@@ -264,18 +265,8 @@ function quickView(opt: ViewOption): void {
   setFolderView(VIEW_KEY, opt);
 }
 
-/* ---------- 右键菜单 ---------- */
-const cmOpen = ref(false);
-const cmX = ref(0);
-const cmY = ref(0);
-const cmItems = ref<MenuItem[]>([]);
-
-function openMenu(e: MouseEvent, items: MenuItem[]): void {
-  cmItems.value = items;
-  cmX.value = e.clientX;
-  cmY.value = e.clientY;
-  cmOpen.value = true;
-}
+/* ---------- 右键菜单（状态收敛到公共 composable） ---------- */
+const { cmOpen, cmX, cmY, cmItems, openMenu } = useContextMenu();
 
 /** 驱动器右键：打开 / 在文件编辑器中打开 / 收藏 / 复制完整路径 / 属性（对齐 Win11 的常用项）。 */
 function onDriveCtx(e: MouseEvent, d: DriveInfo): void {

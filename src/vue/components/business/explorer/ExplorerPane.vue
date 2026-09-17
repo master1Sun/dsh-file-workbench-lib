@@ -1,7 +1,7 @@
 <template>
   <div ref="rootRef" class="fw-explorer">
     <!-- Win11 命令栏：面板内部顶部 -->
-    <CommandBar :nav-folded="leftFolded" @unfold-nav="leftFolded = false" />
+    <CommandBar :nav-folded="leftFolded" :compact="compact" @unfold-nav="leftFolded = false" />
     <div class="fw-exp-body" :class="{ 'left-folded': leftFolded }">
       <!-- 左栏：Win11 风格导航树（此电脑 / 图库 / 桌面 / 下载 / …） -->
       <div class="fw-exp-left" :style="leftStyle">
@@ -56,10 +56,16 @@ const LEFT_FOLD_BELOW = 640;
 /** 面板宽度 ≥ 此值时恢复左栏；与上者之间是迟滞死区。 */
 const LEFT_UNFOLD_ABOVE = 780;
 const leftFolded = ref(false);
+/** 面板当前宽度（观察器回写）；命令栏据此切换「只显示图标」的紧凑模式。 */
+const panelW = ref(0);
+/** 宽度低于该值时命令栏按钮退化为纯图标（与折叠阈值同量级，迟滞交给 leftFolded）。 */
+const COMPACT_BELOW = 680;
+const compact = computed(() => panelW.value > 0 && panelW.value < COMPACT_BELOW);
 let foldRO: ResizeObserver | null = null;
 
 function evalLeftFold(): void {
   const w = rootRef.value?.clientWidth ?? 0;
+  panelW.value = w;
   if (w <= LEFT_FOLD_BELOW) leftFolded.value = true;
   else if (w >= LEFT_UNFOLD_ABOVE) leftFolded.value = false;
 }

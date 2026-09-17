@@ -32,8 +32,8 @@
     <div class="fw-nav-div" aria-hidden="true"></div>
 
     <!-- 此电脑：左侧箭头展开/折叠，标签点击进入「此电脑」视图（Win11 行为），两者均可右键 -->
-    <div class="fw-nav-row" :class="{ active: explorer.view === 'computer' }">
-      <button class="fw-nav-caret" :title="open.myComputer ? t('navCollapse') : t('navExpand')" @click="toggle('myComputer')">
+    <div class="fw-nav-row" :class="{ active: explorer.view === 'computer' }" @click="goThisPc">
+      <button class="fw-nav-caret" :title="open.myComputer ? t('navCollapse') : t('navExpand')" @click.stop="toggle('myComputer')">
         <icon :name="open.myComputer ? 'chevronDown' : 'chevronRight'" :size="12" />
       </button>
       <button
@@ -47,7 +47,7 @@
       </button>
     </div>
     <div v-if="open.myComputer" class="fw-nav-children">
-      <div v-if="explorer.drivesErr" class="fw-nav-empty">{{ explorer.drivesErr }}</div>
+    <div v-if="explorer.drivesErr" class="fw-nav-empty is-err">{{ explorer.drivesErr }}</div>
       <button
         v-for="d in explorer.drives"
         :key="d.path"
@@ -65,7 +65,7 @@
     <!-- 分割线②：此电脑 / 盘符  ⇢  回收站 -->
     <div class="fw-nav-div" aria-hidden="true"></div>
 
-    <!-- 回收站（虚拟位置：进入系统回收站视图） -->
+    <!-- 回收站（虚拟位置：进入系统回收站视图；清空入口在右键菜单） -->
     <button
       class="fw-nav-item fw-nav-top"
       :class="{ active: explorer.view === 'recycle' }"
@@ -77,9 +77,7 @@
       <span class="fw-nav-label">{{ t("recycleBin") }}</span>
     </button>
 
-    <!-- 分割线③：系统位置（主文件夹 / 此电脑 / 回收站）⇢ 插件自有分组 -->
-    <div class="fw-nav-div" aria-hidden="true"></div>
-
+    <!-- 插件自有分组（SSH / 收藏）：靠分组标题自身分区，不再加分隔线 -->
     <!-- SSH 远端主机（插件自有分组：已配置主机各占一行，点击进入远端根浏览） -->
     <div class="fw-nav-sec" :class="{ collapsed: !open.ssh }">
       <button
@@ -88,7 +86,7 @@
         @click="toggle('ssh')"
         @contextmenu.prevent.stop="onSshGroupCtx"
       >
-        <span class="fw-caret">{{ open.ssh ? "▾" : "▸" }}</span>
+        <span class="fw-caret" :class="{ open: open.ssh }"><icon name="chevronDown" :size="11" /></span>
         <span class="fw-sec-txt">{{ t("sshNavGroup") }}</span>
       </button>
       <div v-if="open.ssh" class="fw-sec-b">
@@ -112,7 +110,7 @@
     <!-- 收藏列表（插件自有分组，置于 Win11 结构之外的最下方） -->
     <div class="fw-nav-sec" :class="{ collapsed: !open.favorites }">
       <button class="fw-sec-h" :aria-expanded="open.favorites" @click="toggle('favorites')">
-        <span class="fw-caret">{{ open.favorites ? "▾" : "▸" }}</span>
+        <span class="fw-caret" :class="{ open: open.favorites }"><icon name="chevronDown" :size="11" /></span>
         <span class="fw-sec-txt">{{ t("favorites") }}</span>
       </button>
       <div v-if="open.favorites" class="fw-sec-b">
@@ -132,7 +130,12 @@
       </div>
     </div>
 
-    <div v-if="explorer.loadErr" class="fw-nav-err">{{ explorer.loadErr }}</div>
+    <!-- 加载/连接错误：统一错误态（图标 + 居中文案），替代裸排红字 -->
+    <div v-if="explorer.loadErr" class="fw-error">
+      <span class="fw-error-ico"><icon name="warning" :size="16" /></span>
+      <span>{{ explorer.loadErr }}</span>
+      <button class="fw-retry" @click="refreshListing()">{{ t("retry") }}</button>
+    </div>
 
     <!-- 左侧导航树右键菜单（Win11 资源管理器同款外观） -->
     <ContextMenu v-if="cmOpen" :items="cmItems" :x="cmX" :y="cmY" @close="cmOpen = false" />
@@ -149,10 +152,12 @@ import { sshHosts, sshRootRef, sshParentOf, sshStateOf, sshErrorOf, refreshSshHo
 import { useI18n } from "../../../composables/core/i18n";
 import { openProjectInEditor } from "../../../composables/core/sidebarRight";
 import { openPreview, toast } from "../../../stores/workbench";
+import { emptyRecycleBin } from "../../../composables/session/recycle";
 import { favorites, layout, saveLayout, toggleFavorite, isFavorite } from "../../../composables/core/settings";
 import * as api from "../../../composables/core/useApi";
 import Icon from "../../common/Icon.vue";
 import ContextMenu from "../../common/ContextMenu.vue";
+import { useContextMenu } from "../../../composables/ui/useContextMenu";
 import SshHostDialog from "./SshHostDialog.vue";
 import { myComputerDriveName } from "../../../composables/domain/driveName";
 import type { DriveInfo, MenuItem, MyComputerItem } from "../../../../shared/types";
@@ -463,18 +468,8 @@ function itemIcon(it: MyComputerItem): string {
   }
 }
 
-/* ---------- 右键菜单（Win11 左侧导航树） ---------- */
-const cmOpen = ref(false);
-const cmX = ref(0);
-const cmY = ref(0);
-const cmItems = ref<MenuItem[]>([]);
-
-function openMenu(e: MouseEvent, items: MenuItem[]): void {
-  cmItems.value = items;
-  cmX.value = e.clientX;
-  cmY.value = e.clientY;
-  cmOpen.value = true;
-}
+/* ---------- 右键菜单（Win11 左侧导航树；状态收敛到公共 composable） ---------- */
+const { cmOpen, cmX, cmY, cmItems, openMenu } = useContextMenu();
 
 /**
  * 路径型条目的右键菜单：打开 / 在文件编辑器中打开 / 收藏 / 复制完整路径（属性需递归统计目录大小，故不在此提供）。
@@ -535,12 +530,13 @@ function onDriveCtx(e: MouseEvent, d: DriveInfo): void {
   onPathCtx(e, d.path);
 }
 
-/** 回收站右键：打开 / 刷新（清空等破坏性操作只在回收站视图的列表里提供）。 */
+/** 回收站右键：打开 / 刷新 / 清空（清空走共享的确认+后台任务流程）。 */
 function onRecycleCtx(e: MouseEvent): void {
   openMenu(e, [
     { label: t("menuOpen"), icon: "arrowRight", onClick: goRecycle },
-    { separator: true },
     { label: t("menuRefresh"), icon: "refresh", onClick: () => void refreshListing() },
+    { separator: true },
+    { label: t("recycleEmpty"), icon: "trash", disabled: (explorer.recycleItems?.length ?? 0) === 0, onClick: () => void emptyRecycleBin() },
   ]);
 }
 
@@ -571,7 +567,8 @@ async function copyPath(p: string): Promise<void> {
   align-items: center;
   gap: 8px;
   width: 100%;
-  min-height: 26px;
+  /* 顶部系统行 / 子项 / 分组标题统一 28px 行高，左栏节奏一致 */
+  min-height: 28px;
   padding: 3px 10px;
   border: none;
   background: transparent;
@@ -592,17 +589,18 @@ async function copyPath(p: string): Promise<void> {
 }
 .fw-nav-top {
   margin: 0 4px 1px;
+  min-height: 28px;
 }
 /*
  * 分组分割线：把左侧导航的几大类（主文件夹·快速访问 / 此电脑·盘符 / 回收站 / 收藏·会话文件）
  * 用细线分隔，左右内缩留白，与 Win11 资源管理器导航窗格的分组观感一致。
- * 分割线本身不可点、不参与选中，仅作视觉分区。
+ * 分割线本身不可点、不参与选中，仅作视觉分区；颜色比边框再淡一档，避免满屏线条感。
  */
 .fw-nav-div {
   flex: 0 0 auto;
   height: 1px;
   margin: 6px 10px;
-  background: var(--dsh-border, #30363d);
+  background: color-mix(in srgb, var(--dsh-border, #30363d) 55%, transparent);
 }
 /* 快速访问文件夹：右侧固定图钉（Win11 已固定项的标志） */
 .fw-nav-leaf .fw-nav-pin {
@@ -621,6 +619,8 @@ async function copyPath(p: string): Promise<void> {
   align-items: center;
   margin: 2px 4px 1px;
   border-radius: 4px;
+  /* 整行可点（点击空白处=进入该位置），与条目的点击观感一致 */
+  cursor: pointer;
 }
 .fw-nav-row:hover { background: var(--dsh-hover, rgba(48, 54, 61, 0.5)); }
 .fw-nav-row.active {
@@ -649,7 +649,7 @@ async function copyPath(p: string): Promise<void> {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 26px;
+  min-height: 28px;
   padding: 3px 10px 3px 0;
   border: none;
   background: transparent;
@@ -659,37 +659,71 @@ async function copyPath(p: string): Promise<void> {
   cursor: pointer;
   text-align: left;
 }
-/* 子项缩进：与 Win11 一致（箭头宽度 + 图标起点对齐） */
-.fw-nav-children { display: flex; flex-direction: column; }
-.fw-nav-drive { padding-left: 28px; }
+/* 子项缩进 + 引导线：与下方插件分组的展开结构一致 */
+.fw-nav-children {
+  display: flex;
+  flex-direction: column;
+  margin-left: 22px;
+  padding-left: 4px;
+  border-left: 1px solid color-mix(in srgb, var(--dsh-border, #30363d) 60%, transparent);
+}
+.fw-nav-drive { padding-left: 8px; }
 
 .fw-nav-sec {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  margin-top: 6px;
+  /* 分组之间用留白分区（替代分隔线）：节标题自带层次，线多了反而平 */
+  margin-top: 12px;
 }
+/* 节标题：真正的“分组头”——小号加粗 + 大字距 + 弱色，与普通条目拉开层级 */
 .fw-sec-h {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 6px 10px 4px;
+  gap: 5px;
+  width: calc(100% - 8px);
+  min-height: 28px;
+  margin: 0 4px;
+  padding: 0 8px 0 4px;
   font-size: calc(11px * var(--dsh-fs-scale, 1));
-  font-weight: 600;
-  color: var(--dsh-fg-weak, #8b949e);
+  font-weight: 700;
+  color: var(--dsh-fg-muted, #6e7681);
   background: transparent;
   border: none;
+  border-radius: var(--dsh-radius-sm, 4px);
   cursor: pointer;
   text-align: left;
   user-select: none;
-  letter-spacing: 0.2px;
+  letter-spacing: 0.6px;
 }
-.fw-sec-h:hover { color: var(--dsh-fg, #c9d1d9); }
-.fw-caret { flex: 0 0 auto; width: 10px; font-size: calc(9px * var(--dsh-fs-scale, 1)); opacity: 0.85; text-align: center; }
+.fw-sec-h:hover {
+  color: var(--dsh-fg, #c9d1d9);
+  background: var(--dsh-hover, rgba(48, 54, 61, 0.35));
+}
+/* 分组 chevron：展开/折叠同一图标 + 旋转过渡，替代 ▾/▸ 字符切换 */
+.fw-caret {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  color: var(--dsh-fg-muted, #6e7681);
+  transition: transform 0.15s ease;
+}
+.fw-caret.open { transform: rotate(0deg); }
+.fw-caret:not(.open) { transform: rotate(-90deg); }
 .fw-sec-txt { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.fw-sec-b { display: flex; flex-direction: column; gap: 1px; padding: 0 6px; }
+/* 分组内容：缩进 + 左侧引导线，让“属于该分组”一眼可辨（树形层次的核心） */
+.fw-sec-b {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 2px 10px 0 16px;
+  padding-left: 4px;
+  border-left: 1px solid color-mix(in srgb, var(--dsh-border, #30363d) 60%, transparent);
+}
+.fw-sec-b .fw-nav-item { padding-left: 8px; }
 .fw-nav-ico {
   flex: 0 0 auto;
   display: inline-flex;
@@ -703,8 +737,19 @@ async function copyPath(p: string): Promise<void> {
 .fw-nav-item.active .fw-nav-ico,
 .fw-nav-row.active .fw-nav-ico { color: var(--dsh-accent, #238636); }
 .fw-nav-label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.fw-nav-err { color: #b62324; font-size: calc(12px * var(--dsh-fs-scale, 1)); padding: 4px 10px 8px; }
-.fw-nav-empty { font-size: calc(11px * var(--dsh-fs-scale, 1)); color: var(--dsh-fg-weak, #8b949e); padding: 4px 10px 8px; user-select: none; }
+/* 分组空态：图标 + 居中弱化文案；is-err 变体用于错误信息（danger 色点缀） */
+.fw-nav-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 10px;
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
+  color: var(--dsh-fg-muted, #6e7681);
+  text-align: center;
+  user-select: none;
+}
+.fw-nav-empty.is-err { color: var(--dsh-danger, #f85149); }
 /* 连接指示灯：绿=已连接 / 红=断开 / 琥珀脉冲=检测中 / 灰=未检测 */
 .fw-ssh-dot {
   flex: 0 0 auto;

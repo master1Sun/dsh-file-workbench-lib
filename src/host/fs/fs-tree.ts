@@ -381,6 +381,11 @@ async function resolveRealPath(path: string, label: string): Promise<string> {
   try {
     return await realpath(path);
   } catch (error) {
+    // 源已不存在（ENOENT）是常见业务态：列表过期后仍按旧路径 rename/删除等。
+    // 给 404 + 可读文案，而不是晦涩的 realpath 400。
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new FsError("not-found", `${label} "${path}" does not exist (it may have been moved, renamed or deleted)`, 404);
+    }
     throw new FsError("fs-error", `cannot resolve ${label} "${path}": ${messageOf(error)}`, 400);
   }
 }

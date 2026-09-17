@@ -42,9 +42,9 @@
         </span>
         <span class="fw-gp-repo" :title="panel.repo">{{ t("gitLocalRepo") }}{{ shortRepo }}</span>
         <span class="fw-gp-headacts">
-          <el-button size="small" :loading="busy.sync === 'fetch'" @click="sync('fetch')">Fetch</el-button>
-          <el-button size="small" :loading="busy.sync === 'pull'" @click="sync('pull')">Pull</el-button>
-          <el-button size="small" :loading="busy.sync === 'push'" @click="sync('push')">Push</el-button>
+          <el-button size="small" :loading="busy.sync === 'fetch'" @click="sync('fetch')">{{ t("gitFetch") }}</el-button>
+          <el-button size="small" :loading="busy.sync === 'pull'" @click="sync('pull')">{{ t("gitPull") }}</el-button>
+          <el-button size="small" :loading="busy.sync === 'push'" @click="sync('push')">{{ t("gitPush") }}</el-button>
           <el-button size="small" :disabled="busy.refresh" :title="t('gitRefresh')" @click="reload()"><span class="fw-gp-refresh-ic" :class="{ spin: busy.refresh }"><icon name="refresh" :size="13" /></span></el-button>
           <el-button size="small" :title="t('gitConfig')" @click="openConfig"><icon name="gear" :size="13" /></el-button>
           <el-button size="small" :title="t('accTitle')" @click="openAccounts"><icon name="shield" :size="13" /></el-button>
@@ -89,6 +89,7 @@
                   :class="{ active: sel && sel.file.path === f.path && sel.group === g.key }"
                   :title="f.path"
                   @click="openFile(f, g.key)"
+                  @contextmenu.prevent.stop="openChangeMenu($event, f, g.key)"
                 >
                   <span class="fw-gp-st" :class="'st-' + f.status">{{ statusLetter(f.status) }}</span>
                   <span class="fw-gp-path">
@@ -107,18 +108,6 @@
                       :title="t('gitUnstage')"
                       @click.stop="unstageFile(f)"
                     ><icon name="undo" :size="11" /></button>
-                    <button
-                      v-if="g.key === 'untracked'"
-                      class="fw-gp-mini"
-                      :title="t('gitIgnore')"
-                      @click.stop="ignoreFile(f)"
-                    ><icon name="eyeOff" :size="11" /></button>
-                    <button
-                      v-if="g.key !== 'untracked'"
-                      class="fw-gp-mini danger"
-                      :title="t('gitDiscard')"
-                      @click.stop="discardFile(f)"
-                    ><icon name="close" :size="11" /></button>
                   </span>
                 </div>
               </template>
@@ -187,6 +176,8 @@
                 <button class="fw-gp-tab" :class="{ on: !graphAll }" @click="setGraphScope(false)">{{ t("gitHistoryCurrent") }}</button>
                 <span class="fw-gp-spacer"></span>
                 <span class="fw-gp-count">{{ graphRows.length }}</span>
+                <!-- 懒加载：已加载条数达到上限才出现，说明可能还有更早提交 -->
+                <button v-if="graphRows.length >= graphLimit" class="fw-gp-tab" @click="loadMoreGraph">{{ t("gitLoadMore") }}</button>
               </div>
               <GitGraphList :rows="graphRows" :active="selCommit" :empty="t('gitLogEmpty')" @select="openCommit" />
             </div>
@@ -206,19 +197,8 @@
                     <button class="fw-gp-mini" :title="t('gitCheckoutCommit')" @click="checkoutCommit">
                       <icon name="check" :size="12" />
                     </button>
-                    <!-- bottom-end：菜单右缘对齐触发按钮，向左展开；传送到 body，避免被外层弹窗遮盖。 -->
-                    <el-dropdown trigger="click" placement="bottom-end" @command="onCommitCmd">
-                      <button class="fw-gp-mini"><icon name="sort" :size="12" /></button>
-                      <template #dropdown>
-                        <el-dropdown-menu>
-                          <el-dropdown-item command="reset-soft">{{ t("gitResetSoft") }}</el-dropdown-item>
-                          <el-dropdown-item command="reset-mixed">{{ t("gitResetMixed") }}</el-dropdown-item>
-                          <el-dropdown-item command="reset-hard" divided>{{ t("gitResetHard") }}</el-dropdown-item>
-                          <el-dropdown-item command="revert" divided>{{ t("gitRevert") }}</el-dropdown-item>
-                          <el-dropdown-item command="cherry-pick">{{ t("gitCherryPick") }}</el-dropdown-item>
-                        </el-dropdown-menu>
-                      </template>
-                    </el-dropdown>
+                    <!-- 危险操作（重置/还原/拣选）收进自研 ContextMenu：与全应用菜单同一套观感 -->
+                    <button class="fw-gp-mini" :title="t('gitMenu')" @click.stop="openCommitMenu($event)"><icon name="sort" :size="12" /></button>
                   </span>
                 </div>
                 <div class="fw-gp-scroll">
@@ -269,19 +249,18 @@
               <el-button size="small" :disabled="detached" @click="renameBranch">{{ t("gitBranchRename") }}</el-button>
             </div>
             <div class="fw-gp-sec-title">{{ t("gitBranchLocalGroup") }}</div>
-            <div v-for="b in localBranches" :key="b.name" class="fw-gp-row" :class="{ active: b.current }">
+            <div v-for="b in localBranches" :key="b.name" class="fw-gp-row" :class="{ active: b.current }" @contextmenu.prevent.stop="openBranchMenu($event, b)">
               <span class="fw-gp-st st-branch"><icon name="git" :size="12" /></span>
               <span class="fw-gp-path">{{ b.name }}<span v-if="b.current" class="fw-gp-cur"> • {{ t("gitBranchCurrent") }}</span></span>
               <span class="fw-gp-rowacts">
+                <!-- 行内只留主操作：当前分支=推送，其余=检出；合并/重命名/删除进右键菜单 -->
                 <el-button v-if="!b.current" text size="small" @click="checkoutBranch(b.name)">{{ t("gitCheckout") }}</el-button>
-                <el-button v-if="!b.current" text size="small" @click="mergeBranch(b.name)">{{ t("gitMergeIntoCurrent") }}</el-button>
-                <el-button text size="small" @click="pushBranch(b.name)">{{ t("gitPushBranch") }}</el-button>
-                <el-button v-if="!b.current" text size="small" @click="deleteBranch(b.name)">{{ t("gitDelete") }}</el-button>
+                <el-button v-else text size="small" @click="pushBranch(b.name)">{{ t("gitPushBranch") }}</el-button>
               </span>
             </div>
             <template v-if="remoteBranches.length">
               <div class="fw-gp-sec-title">{{ t("gitBranchRemoteGroup") }}</div>
-              <div v-for="b in remoteBranches" :key="b.name" class="fw-gp-row">
+              <div v-for="b in remoteBranches" :key="b.name" class="fw-gp-row" @contextmenu.prevent.stop="openRemoteBranchMenu($event, b)">
                 <span class="fw-gp-st st-remote"><icon name="globe" :size="12" /></span>
                 <span class="fw-gp-path">{{ b.name }}</span>
                 <span class="fw-gp-rowacts">
@@ -319,7 +298,7 @@
                 >{{ t("gitTagFetchAll") }}</el-button>
               </div>
               <div v-if="!tags.length" class="fw-gp-empty">{{ t("gitTagEmpty") }}</div>
-              <div v-for="tg in tags" :key="tg.name" class="fw-gp-row" :title="tagTip(tg)">
+              <div v-for="tg in tags" :key="tg.name" class="fw-gp-row" :title="tagTip(tg)" @contextmenu.prevent.stop="openTagMenu($event, tg)">
                 <span class="fw-gp-st st-tag"><icon name="tag" :size="12" /></span>
                 <span class="fw-gp-path">
                   {{ tg.name }}
@@ -330,14 +309,8 @@
                 <span v-if="tg.subject" class="fw-gp-subject" :title="tg.subject">{{ tg.subject }}</span>
                 <span class="fw-gp-hash">{{ tg.hash }}</span>
                 <span class="fw-gp-rowacts">
+                  <!-- 行内只留「查看」；推送 / 拉取 / 删除进右键菜单 -->
                   <el-button text size="small" @click="viewTag(tg)">{{ t("gitView") }}</el-button>
-                  <template v-if="tg.remoteOnly">
-                    <el-button text size="small" @click="pullRemoteTag(tg)">{{ t("gitTagPull") }}</el-button>
-                  </template>
-                  <template v-else>
-                    <el-button text size="small" @click="pushTag(tg.name)">{{ t("gitPushBranch") }}</el-button>
-                    <el-button text size="small" @click="deleteTag(tg.name)">{{ t("gitDelete") }}</el-button>
-                  </template>
                 </span>
               </div>
             </template>
@@ -401,14 +374,10 @@
               >{{ t("gitRemoteAdd") }}</el-button>
             </div>
             <div v-if="!remotes.length" class="fw-gp-empty">{{ t("gitRemoteEmpty") }}</div>
-            <div v-for="rm in remotes" :key="rm.name" class="fw-gp-row">
+            <div v-for="rm in remotes" :key="rm.name" class="fw-gp-row" @contextmenu.prevent.stop="openRemoteMenu($event, rm)">
               <span class="fw-gp-st st-remote"><icon name="globe" :size="12" /></span>
               <span class="fw-gp-path">{{ rm.name }}</span>
               <span class="fw-gp-remote-url" :title="rm.url">{{ rm.url }}</span>
-              <span class="fw-gp-rowacts">
-                <el-button text size="small" @click="editRemoteUrl(rm)">{{ t("gitRemoteSetUrl") }}</el-button>
-                <el-button text size="small" @click="removeRemote(rm.name)">{{ t("gitDelete") }}</el-button>
-              </span>
             </div>
           </div>
 
@@ -433,18 +402,14 @@
                 :class="{ active: selStash === s.ref }"
                 :title="s.full"
                 @click="viewStash(s.ref)"
+                @contextmenu.prevent.stop="openStashMenu($event, s)"
               >
                 <span class="fw-gp-st st-stash"><icon name="stash" :size="12" /></span>
                 <span class="fw-gp-path">{{ s.message }}</span>
                 <span class="fw-gp-rowacts">
+                  <!-- 行内只留主操作「应用」；弹出 / 丢弃 / 复制说明进右键菜单 -->
                   <button class="fw-gp-mini" :title="t('gitStashApply')" @click.stop="applyStash(s.ref)">
                     <icon name="download" :size="11" />
-                  </button>
-                  <button class="fw-gp-mini" :title="t('gitStashPop')" @click.stop="popStash(s.ref)">
-                    <icon name="upload" :size="11" />
-                  </button>
-                  <button class="fw-gp-mini danger" :title="t('gitStashDrop')" @click.stop="dropStash(s.ref)">
-                    <icon name="close" :size="11" />
                   </button>
                 </span>
               </div>
@@ -519,7 +484,12 @@
     <!-- 加载中 / 非仓库：占位与主内容同高，弹窗高度全程固定不抖动 -->
     <div v-else class="fw-gitpanel-empty">
       <template v-if="busy.refresh"><span class="fw-gp-spin"></span>{{ t("gitOpRunning") }}</template>
-      <template v-else>{{ t("gitNotRepo") }}</template>
+      <!-- 非仓库：给一条可操作的出路（克隆），与 SVN 面板的内嵌检出表单对齐 -->
+      <div v-else class="fw-norepo">
+        <icon name="git" :size="28" />
+        <span>{{ t("gitNotRepo") }}</span>
+        <button class="fw-retry" @click="openClone">{{ t("gitCloneHere") }}</button>
+      </div>
     </div>
 
     <!-- git 身份配置 -->
@@ -624,6 +594,9 @@
 
     <!-- 账号管理对话框已在 main.ts 全局挂载（面板内挂会在切 tab 时被卸载重建，
          且全局克隆弹窗里的「新建账号…」在面板未挂载时无人渲染），此处不再重复挂载。 -->
+
+    <!-- Git 面板内部的右键菜单（分支/标签/远程/储藏/更改行 + 提交操作），全应用同一套 ContextMenu -->
+    <ContextMenu v-if="cmOpen" :items="cmItems" :x="cmX" :y="cmY" @close="closeMenu" />
   </el-dialog>
 </template>
 
@@ -651,6 +624,11 @@ import { toast } from "../../../stores/workbench";
 import { isBrowsablePath } from "../../../stores/explorer";
 import * as api from "../../../composables/core/useApi";
 import Icon from "../../common/Icon.vue";
+import ContextMenu from "../../common/ContextMenu.vue";
+import { useContextMenu } from "../../../composables/ui/useContextMenu";
+import { openCloneDialog } from "../../../composables/core/cloneDialog";
+import { wb } from "../../../stores/workbench";
+import type { MenuItem } from "../../../../shared/types";
 import GitDiffView from "./GitDiffView.vue";
 import GitGraphList from "./GitGraphList.vue";
 import { openAccountDialog } from "../../../stores/accounts";
@@ -701,16 +679,19 @@ const commitMsg = ref("");
 
 // ── 历史 ────────────────────────────────────────────────────────
 const graphRows = ref<GraphRow[]>([]);
-/** true = 全部分支，false = 仅当前分支。 */
-const graphAll = ref(true);
+/** true = 全部分支，false = 仅当前分支。默认只看当前分支——大仓库「全部」一次拉全量会卡，
+     需要全貌时用户显式切换（标签页在图谱工具条上，成本一次点击）。 */
+const graphAll = ref(false);
 const selCommit = ref("");
 /** 当前查看的提交详情（元信息 + 正文）。 */
 const commitInfo = ref<GitCommitDetail | null>(null);
 const commitFiles = ref<CommitFileStat[]>([]);
 const selCommitFile = ref("");
 const patchLines = ref<string[]>([]);
-/** 图谱最多拉取多少条提交。 */
-const GRAPH_COUNT = 120;
+/** 图谱单次拉取多少条提交；「加载更多」按此步长递增。 */
+const GRAPH_STEP = 120;
+/** 当前已申请的提交上限（graphRows.length 达到该值时显示「加载更多」）。 */
+const graphLimit = ref(GRAPH_STEP);
 
 // ── 分支 / 标签 / 远程 / 储藏 ───────────────────────────────────
 interface RefItem {
@@ -1056,7 +1037,7 @@ async function loadRemoteTags(): Promise<void> {
 
 /** 读取提交图谱（历史页）。 */
 async function loadGraph(): Promise<void> {
-  const args = ["log", `--max-count=${GRAPH_COUNT}`, "--date-order"];
+  const args = ["log", `--max-count=${graphLimit.value}`, "--date-order"];
   if (graphAll.value) args.push("--all");
   args.push(`--pretty=format:${LOG_FORMAT}`);
   const out = await runOrThrow(args).catch(() => "");
@@ -1066,7 +1047,14 @@ async function loadGraph(): Promise<void> {
 function setGraphScope(all: boolean): void {
   if (graphAll.value === all) return;
   graphAll.value = all;
+  graphLimit.value = GRAPH_STEP; // 切换作用域后重新从最新开始
   void loadGraph().catch(() => undefined);
+}
+
+/** 「加载更多」：上限翻倍再拉一次（git log 没有 offset，翻倍策略保证语义简单可靠）。 */
+async function loadMoreGraph(): Promise<void> {
+  graphLimit.value += GRAPH_STEP;
+  await loadGraph().catch(() => undefined);
 }
 
 /** 读取储藏列表。 */
@@ -1237,6 +1225,122 @@ async function copyText(text: string): Promise<void> {
   } catch {
     toast("error", t("gitOpFailed"));
   }
+}
+
+/* ── 面板内部右键菜单：所有列表行共用一套状态（composable），条目就地构建 ── */
+const { cmOpen, cmX, cmY, cmItems, openMenu, closeMenu } = useContextMenu();
+
+/** 更改行：详情三件套（diff/历史/blame）+ 暂存类 + 还原/忽略 + 复制路径。 */
+function openChangeMenu(e: MouseEvent, f: GitPanelFile, group: ChangeGroup): void {
+  const items: MenuItem[] = [
+    { label: t("gitDiff"), icon: "code", onClick: () => void openFile(f, group) },
+    { label: t("gitFileHistory"), icon: "clock", disabled: group === "untracked", onClick: () => void showFileHistoryFor(f, group) },
+    { label: t("gitBlame"), icon: "activity", disabled: group === "untracked", onClick: () => void showBlameFor(f, group) },
+    { separator: true },
+    group === "staged"
+      ? { label: t("gitUnstage"), icon: "undo", onClick: () => void unstageFile(f) }
+      : { label: t("gitAddShort"), icon: "plus", onClick: () => void stageFile(f) },
+    { label: t("gitIgnore"), icon: "eyeOff", disabled: group !== "untracked", onClick: () => void ignoreFile(f) },
+    { label: t("gitDiscard"), icon: "close", disabled: group === "untracked", onClick: () => void discardFile(f) },
+    { separator: true },
+    { label: t("gitCopyPath"), icon: "copy", onClick: () => void copyText(f.path) },
+  ];
+  openMenu(e, items);
+}
+
+/** 历史/blame 需要「当前右侧详情目标」：菜单项先选中文件再切换视图。 */
+async function showFileHistoryFor(f: GitPanelFile, group: ChangeGroup): Promise<void> {
+  if (!sel.value || sel.value.file.path !== f.path || sel.value.group !== group) await openFile(f, group);
+  await showFileHistory();
+}
+async function showBlameFor(f: GitPanelFile, group: ChangeGroup): Promise<void> {
+  if (!sel.value || sel.value.file.path !== f.path || sel.value.group !== group) await openFile(f, group);
+  await showBlame();
+}
+
+/** 本地分支行：检出（主操作已在行内）之外的全部管理动作。 */
+function openBranchMenu(e: MouseEvent, b: RefItem): void {
+  const items: MenuItem[] = [
+    { label: t("gitCheckout"), icon: "arrowRight", disabled: b.current, onClick: () => void checkoutBranch(b.name) },
+    { label: t("gitMergeIntoCurrent"), icon: "merge", disabled: b.current, onClick: () => void mergeBranch(b.name) },
+    { label: t("gitPushBranch"), icon: "upload", onClick: () => void pushBranch(b.name) },
+    { separator: true },
+    { label: t("gitBranchRename"), icon: "edit", disabled: !b.current, onClick: () => void renameBranch() },
+    { label: t("gitDelete"), icon: "trash", disabled: b.current, onClick: () => void deleteBranch(b.name) },
+    { separator: true },
+    { label: t("gitCopyName"), icon: "copy", onClick: () => void copyText(b.name) },
+  ];
+  openMenu(e, items);
+}
+
+/** 远程分支行：检出（跟踪）/ 复制名称。 */
+function openRemoteBranchMenu(e: MouseEvent, b: RefItem): void {
+  openMenu(e, [
+    { label: t("gitCheckout"), icon: "arrowRight", onClick: () => void checkoutRemoteBranch(b.name) },
+    { separator: true },
+    { label: t("gitCopyName"), icon: "copy", onClick: () => void copyText(b.name) },
+  ]);
+}
+
+/** 标签行：查看（行内已有）之外的全部动作。 */
+function openTagMenu(e: MouseEvent, tg: RefItem): void {
+  const items: MenuItem[] = [
+    { label: t("gitView"), icon: "eye", onClick: () => viewTag(tg) },
+  ];
+  if (tg.remoteOnly) {
+    items.push({ label: t("gitTagPull"), icon: "download", onClick: () => void pullRemoteTag(tg) });
+  } else {
+    items.push({ label: t("gitPushBranch"), icon: "upload", onClick: () => void pushTag(tg.name) });
+    items.push({ label: t("gitDelete"), icon: "trash", onClick: () => void deleteTag(tg.name) });
+  }
+  items.push({ separator: true });
+  items.push({ label: t("gitCopyName"), icon: "copy", onClick: () => void copyText(tg.name) });
+  openMenu(e, items);
+}
+
+/** 远程行：改 URL / 删除 / 复制 URL（行内不再放按钮）。 */
+function openRemoteMenu(e: MouseEvent, rm: RemoteItem): void {
+  openMenu(e, [
+    { label: t("gitRemoteSetUrl"), icon: "edit", onClick: () => void editRemoteUrl(rm) },
+    { label: t("gitDelete"), icon: "trash", onClick: () => void removeRemote(rm.name) },
+    { separator: true },
+    { label: t("gitCopyUrl"), icon: "copy", onClick: () => void copyText(rm.url) },
+  ]);
+}
+
+/** 储藏行：应用（行内已有）/ 弹出 / 丢弃 / 复制说明。 */
+function openStashMenu(e: MouseEvent, st: StashItem): void {
+  openMenu(e, [
+    { label: t("gitStashApply"), icon: "download", onClick: () => void applyStash(st.ref) },
+    { label: t("gitStashPop"), icon: "upload", onClick: () => void popStash(st.ref) },
+    { label: t("gitStashDrop"), icon: "close", onClick: () => void dropStash(st.ref) },
+    { separator: true },
+    { label: t("gitCopyMsg"), icon: "copy", onClick: () => void copyText(st.message) },
+  ]);
+}
+
+/** 提交详情的重置/还原/拣选：沿用 onCommitCmd 的确认与执行逻辑。 */
+function openCommitMenu(e: MouseEvent): void {
+  openMenu(e, [
+    { label: t("gitResetSoft"), icon: "undo", onClick: () => void onCommitCmd("reset-soft") },
+    { label: t("gitResetMixed"), icon: "undo", onClick: () => void onCommitCmd("reset-mixed") },
+    { label: t("gitResetHard"), icon: "warning", onClick: () => void onCommitCmd("reset-hard") },
+    { separator: true },
+    { label: t("gitRevert"), icon: "undo", onClick: () => void onCommitCmd("revert") },
+    { label: t("gitCherryPick"), icon: "check", onClick: () => void onCommitCmd("cherry-pick") },
+  ]);
+}
+
+/** 非仓库空态的「克隆仓库…」：复用全局克隆弹窗，完成后重探面板。 */
+function openClone(): void {
+  openCloneDialog({
+    kind: "git",
+    dir: props.dir,
+    key: wb.key,
+    onDone: () => {
+      void reload();
+    },
+  });
 }
 
 async function branchFromCommit(): Promise<void> {
@@ -1681,37 +1785,15 @@ function focusCli(): void {
 }
 </script>
 
+<style src="./panel-shared.css"></style>
 <style scoped>
-/* ── 头部状态条 ───────────────────────────────────────────────── */
-.fw-gp-head {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 2px 8px;
-  border-bottom: 1px solid var(--dsh-border, #30363d);
-  font-size: calc(12px * var(--dsh-fs-scale, 1));
-  min-width: 0;
-}
-.fw-gp-branch {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 22px;
-  padding: 0 8px;
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--dsh-accent, #238636) 18%, transparent);
-  border: 1px solid color-mix(in srgb, var(--dsh-accent, #238636) 45%, transparent);
-  color: var(--dsh-accent, #238636);
-  max-width: 260px;
-  overflow: hidden;
-}
-.fw-gp-branch b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+/* 与 SvnPanel 同构的规则已抽取到 ./panel-shared.css（fw-gp-* / fw-svn-* 双前缀共享）；
+   本块只保留 Git 面板独有的规则。颜色走 --dsh-* token，浅色主题自动跟随。 */
+/* ── 头部状态条（Git 独有：分支 pill 的 detached 态、ahead/behind） ── */
 .fw-gp-branch.detached {
-  background: color-mix(in srgb, #d29922 18%, transparent);
-  border-color: color-mix(in srgb, #d29922 45%, transparent);
-  color: #e3b341;
+  background: color-mix(in srgb, var(--dsh-warn) 18%, transparent);
+  border-color: color-mix(in srgb, var(--dsh-warn) 45%, transparent);
+  color: var(--dsh-warn);
 }
 .fw-gp-up {
   flex: 0 0 auto;
@@ -1732,104 +1814,6 @@ function focusCli(): void {
   color: var(--dsh-fg-weak, #8b949e);
   font-size: calc(11px * var(--dsh-fs-scale, 1));
 }
-.fw-gp-headacts { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; }
-
-/* ── 主体：左导航 + 内容 ──────────────────────────────────────── */
-.fw-gp-shell {
-  display: flex;
-  flex-direction: column;
-  /* 固定外壳高度：页签切换（提交栏显隐）与加载态都不再改变弹窗高度，避免抖动 */
-  height: min(78vh, 800px);
-  min-height: 470px;
-}
-.fw-gp-body {
-  display: flex;
-  align-items: stretch;
-  /* 高度由外壳分配，页签内容自适应 */
-  flex: 1 1 auto;
-  min-height: 0;
-  margin-top: 8px;
-  border: 1px solid var(--dsh-border, #30363d);
-  border-radius: 6px;
-  overflow: hidden;
-}
-/* 加载中 / 非仓库占位：与外壳同高，弹窗总高度恒定 */
-.fw-gitpanel-empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  height: min(78vh, 800px);
-  min-height: 470px;
-  color: var(--dsh-fg-weak, #8b949e);
-  font-size: calc(12px * var(--dsh-fs-scale, 1));
-}
-.fw-gp-rail {
-  flex: 0 0 132px;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding: 6px 4px;
-  background: var(--dsh-bg2, #161b22);
-  border-right: 1px solid var(--dsh-border, #30363d);
-}
-.fw-gp-rail-btn {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  min-height: 28px;
-  padding: 0 8px;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--dsh-fg, #c9d1d9);
-  font: inherit;
-  font-size: calc(12px * var(--dsh-fs-scale, 1));
-  text-align: left;
-  cursor: pointer;
-}
-.fw-gp-rail-btn:hover { background: var(--dsh-hover, rgba(48, 54, 61, 0.5)); }
-.fw-gp-rail-btn.active {
-  background: var(--dsh-hover, rgba(48, 54, 61, 0.9));
-  box-shadow: inset 2px 0 0 var(--dsh-accent, #238636);
-  color: var(--dsh-accent, #238636);
-  font-weight: 600;
-}
-.fw-gp-rail-txt { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.fw-gp-rail-badge {
-  flex: 0 0 auto;
-  min-width: 17px;
-  height: 16px;
-  padding: 0 5px;
-  border-radius: 8px;
-  background: var(--dsh-hover, rgba(110, 118, 129, 0.3));
-  color: var(--dsh-fg, #c9d1d9);
-  font-size: calc(10px * var(--dsh-fs-scale, 1));
-  line-height: 16px;
-  text-align: center;
-}
-.fw-gp-rail-fill { flex: 1 1 auto; }
-.fw-gp-rail-op {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
-  font-size: calc(11px * var(--dsh-fs-scale, 1));
-  color: var(--dsh-accent, #238636);
-}
-.fw-gp-spin {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  border: 2px solid var(--dsh-border, #30363d);
-  border-top-color: var(--dsh-accent, #238636);
-  animation: fw-gp-spin 0.8s linear infinite;
-}
-@keyframes fw-gp-spin { to { transform: rotate(360deg); } }
-/* 刷新按钮：加载时 refresh 图标自身旋转（不再叠加 el-button 的 loading 转圈） */
-.fw-gp-refresh-ic { display: inline-flex; align-items: center; }
-.fw-gp-refresh-ic.spin { animation: fw-gp-spin 0.8s linear infinite; }
 /* 标签区块内 tab（标签/版本）：分段控件 */
 .fw-gp-sectabs {
   display: flex;
@@ -1850,7 +1834,7 @@ function focusCli(): void {
   height: 22px;
   padding: 0 8px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--dsh-radius-sm, 4px);
   background: transparent;
   color: var(--dsh-fg-weak, #8b949e);
   font-size: calc(11px * var(--dsh-fs-scale, 1));
@@ -1875,20 +1859,8 @@ function focusCli(): void {
   background: var(--dsh-hover, rgba(255, 255, 255, 0.1));
   font-variant-numeric: tabular-nums;
 }
-
-.fw-gp-content { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
-/* 左右分栏：列表 + 详情 */
-.fw-gp-split { display: flex; align-items: stretch; flex: 1 1 auto; min-height: 0; }
-.fw-gp-list {
-  flex: 0 0 44%;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  overflow-y: auto;
-  border-right: 1px solid var(--dsh-border, #30363d);
-}
 /* 历史页的列表由内部图谱组件自己滚动，容器不再滚 */
+.fw-gp-list { flex: 0 0 44%; }
 .fw-gp-list.fw-gp-list-col { overflow: hidden; }
 .fw-gp-detail {
   flex: 1 1 auto;
@@ -1903,7 +1875,6 @@ function focusCli(): void {
 }
 .fw-gp-one { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px; }
 .fw-gp-cli-wrap { padding: 0; overflow: hidden; display: flex; }
-
 .fw-gp-listbar {
   display: flex;
   align-items: center;
@@ -1925,22 +1896,6 @@ function focusCli(): void {
 .fw-gp-in-target { width: 170px; }
 .fw-gp-in-msg { width: 220px; }
 .fw-gp-in-url { width: 320px; }
-
-/* ── 列表行（通用） ───────────────────────────────────────────── */
-.fw-gp-groupbar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 8px 4px;
-  font-size: calc(11px * var(--dsh-fs-scale, 1));
-  font-weight: 600;
-  color: var(--dsh-fg-weak, #8b949e);
-  position: sticky;
-  top: 0;
-  background: var(--dsh-bg, #0d1117);
-  z-index: 1;
-}
-.fw-gp-groupname { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fw-gp-groupcount {
   flex: 0 0 auto;
   min-width: 16px;
@@ -1951,22 +1906,7 @@ function focusCli(): void {
   border-radius: 7px;
   background: var(--dsh-hover, rgba(110, 118, 129, 0.3));
 }
-.fw-gp-row {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 26px;
-  padding: 0 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: calc(12px * var(--dsh-fs-scale, 1));
-  color: var(--dsh-fg, #c9d1d9);
-}
-.fw-gp-row:hover { background: var(--dsh-hover, rgba(48, 54, 61, 0.45)); }
-.fw-gp-row.active {
-  background: var(--dsh-hover, rgba(48, 54, 61, 0.85));
-  box-shadow: inset 2px 0 0 var(--dsh-accent, #238636);
-}
+/* 状态徽标：色底 18% + 同色文字（token 化，浅色主题自动跟随） */
 .fw-gp-st {
   flex: 0 0 auto;
   width: 16px;
@@ -1980,43 +1920,20 @@ function focusCli(): void {
   line-height: 1;
   color: var(--dsh-fg-weak, #8b949e);
 }
-.fw-gp-st.st-modified { color: #d29922; background: color-mix(in srgb, #d29922 18%, transparent); }
-.fw-gp-st.st-added { color: #3fb950; background: color-mix(in srgb, #3fb950 18%, transparent); }
-.fw-gp-st.st-untracked { color: #3fb950; background: color-mix(in srgb, #3fb950 12%, transparent); }
-.fw-gp-st.st-deleted { color: #f85149; background: color-mix(in srgb, #f85149 18%, transparent); }
+.fw-gp-st.st-modified { color: var(--dsh-warn); background: color-mix(in srgb, var(--dsh-warn) 18%, transparent); }
+.fw-gp-st.st-added { color: var(--dsh-success); background: color-mix(in srgb, var(--dsh-success) 18%, transparent); }
+.fw-gp-st.st-untracked { color: var(--dsh-success); background: color-mix(in srgb, var(--dsh-success) 12%, transparent); }
+.fw-gp-st.st-deleted { color: var(--dsh-danger); background: color-mix(in srgb, var(--dsh-danger) 18%, transparent); }
 .fw-gp-st.st-branch,
 .fw-gp-st.st-tag,
 .fw-gp-st.st-remote,
 .fw-gp-st.st-stash { background: transparent; }
-.fw-gp-st.st-branch { color: #79c0ff; }
-.fw-gp-st.st-tag { color: #e3b341; }
-.fw-gp-st.st-remote { color: #d2a8ff; }
+.fw-gp-st.st-branch { color: var(--dsh-info, #79c0ff); }
+.fw-gp-st.st-tag { color: var(--dsh-warn); }
+.fw-gp-st.st-remote { color: var(--dsh-purple); }
 .fw-gp-st.st-stash { color: var(--dsh-fg-weak, #8b949e); }
-.fw-gp-path {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.fw-gp-dir { color: var(--dsh-fg-weak, #8b949e); }
 .fw-gp-cur { color: var(--dsh-accent, #238636); font-size: calc(11px * var(--dsh-fs-scale, 1)); }
-.fw-gp-rowacts { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 2px; }
-.fw-gp-mini {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--dsh-fg-weak, #8b949e);
-  cursor: pointer;
-}
-.fw-gp-mini:hover { background: var(--dsh-border, #30363d); color: var(--dsh-fg, #c9d1d9); }
-.fw-gp-mini.danger:hover { color: #f85149; }
+.fw-gp-mini.danger:hover { color: var(--dsh-danger); }
 .fw-gp-hash {
   flex: 0 0 auto;
   font-family: var(--dsh-mono, ui-monospace, sfmono-regular, consolas, monospace);
@@ -2050,8 +1967,8 @@ function focusCli(): void {
   vertical-align: middle;
 }
 .fw-gp-num { flex: 0 0 auto; display: inline-flex; gap: 6px; font-size: calc(11px * var(--dsh-fs-scale, 1)); }
-.fw-gp-num .add { color: #3fb950; }
-.fw-gp-num .del { color: #f85149; }
+.fw-gp-num .add { color: var(--dsh-success); }
+.fw-gp-num .del { color: var(--dsh-danger); }
 .fw-gp-remote-url {
   flex: 0 0 auto;
   max-width: 42%;
@@ -2068,27 +1985,7 @@ function focusCli(): void {
   font-weight: 600;
   color: var(--dsh-fg-weak, #8b949e);
 }
-.fw-gp-empty { padding: 12px 10px; font-size: calc(12px * var(--dsh-fs-scale, 1)); color: var(--dsh-fg-weak, #8b949e); }
-
 /* ── 详情面板 ─────────────────────────────────────────────────── */
-.fw-gp-detailhead {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
-  border-bottom: 1px solid var(--dsh-border, #30363d);
-  background: var(--dsh-bg2, #161b22);
-}
-.fw-gp-detailtitle {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: calc(11px * var(--dsh-fs-scale, 1));
-  color: var(--dsh-fg-weak, #8b949e);
-}
 .fw-gp-detailacts { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 2px; }
 .fw-gp-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
 .fw-gp-filerow {
@@ -2111,12 +2008,11 @@ function focusCli(): void {
   font-size: calc(11px * var(--dsh-fs-scale, 1));
   white-space: pre;
 }
-.fw-gp-blame-hash { flex: 0 0 auto; color: #79c0ff; }
-.fw-gp-blame-author { flex: 0 0 84px; overflow: hidden; text-overflow: ellipsis; color: #e3b341; }
+.fw-gp-blame-hash { flex: 0 0 auto; color: var(--dsh-info, #79c0ff); }
+.fw-gp-blame-author { flex: 0 0 84px; overflow: hidden; text-overflow: ellipsis; color: var(--dsh-warn); }
 .fw-gp-blame-date { flex: 0 0 78px; color: var(--dsh-fg-weak, #8b949e); }
 .fw-gp-blame-no { flex: 0 0 42px; text-align: right; color: var(--dsh-fg-weak, #8b949e); }
 .fw-gp-blame-txt { flex: 1 1 auto; color: var(--dsh-fg, #c9d1d9); }
-
 /* 提交详情 */
 .fw-gp-cmeta { padding: 8px 10px; border-bottom: 1px solid var(--dsh-border, #30363d); }
 .fw-gp-crow { display: flex; gap: 8px; font-size: calc(12px * var(--dsh-fs-scale, 1)); padding: 1px 0; }
@@ -2137,8 +2033,8 @@ function focusCli(): void {
   background: color-mix(in srgb, var(--dsh-accent, #238636) 25%, transparent);
   color: var(--dsh-accent, #238636);
 }
-.fw-gp-refchip.rf-tag { background: color-mix(in srgb, #d29922 22%, transparent); color: #e3b341; }
-.fw-gp-refchip.rf-remote { background: color-mix(in srgb, #bc8cff 20%, transparent); color: #d2a8ff; }
+.fw-gp-refchip.rf-tag { background: color-mix(in srgb, var(--dsh-warn) 22%, transparent); color: var(--dsh-warn); }
+.fw-gp-refchip.rf-remote { background: color-mix(in srgb, var(--dsh-purple) 20%, transparent); color: var(--dsh-purple); }
 .fw-gp-cbody {
   margin: 0;
   padding: 8px 10px;
@@ -2156,7 +2052,6 @@ function focusCli(): void {
   color: var(--dsh-fg-weak, #8b949e);
 }
 .fw-gp-patch { height: 260px; display: flex; border-top: 1px solid var(--dsh-border, #30363d); }
-
 /* 提交对比弹窗 */
 .fw-gp-cv { display: flex; flex-direction: column; height: 560px; min-height: 0; }
 .fw-gp-cv-meta { flex: 0 0 auto; padding: 8px 10px; border-bottom: 1px solid var(--dsh-border, #30363d); }
@@ -2178,11 +2073,10 @@ function focusCli(): void {
 .fw-gp-cv-diff :deep(.fw-diff) { flex: 1 1 auto; }
 /* 远程标签徽标（区别于本地附注标签） */
 .fw-gp-badge-remote {
-  color: #d2a8ff;
-  border-color: color-mix(in srgb, #d2a8ff 50%, transparent);
-  background: color-mix(in srgb, #d2a8ff 14%, transparent);
+  color: var(--dsh-purple);
+  border-color: color-mix(in srgb, var(--dsh-purple) 50%, transparent);
+  background: color-mix(in srgb, var(--dsh-purple) 14%, transparent);
 }
-
 /* 图谱工具条 */
 .fw-gp-tab {
   height: 20px;
@@ -2202,13 +2096,11 @@ function focusCli(): void {
 }
 .fw-gp-spacer { flex: 1 1 auto; }
 .fw-gp-count { font-size: calc(11px * var(--dsh-fs-scale, 1)); color: var(--dsh-fg-weak, #8b949e); }
-
 /* ── 底部提交栏 ───────────────────────────────────────────────── */
 .fw-gp-commitbar { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 8px; margin-top: 8px; }
 .fw-gp-commitbar :deep(.el-textarea) { flex: 1 1 auto; }
 .fw-gp-commitacts { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
 .fw-gp-commitmeta { font-size: calc(11px * var(--dsh-fs-scale, 1)); color: var(--dsh-fg-weak, #8b949e); }
-
 /* ── 命令台 ───────────────────────────────────────────────────── */
 .fw-gp-cli {
   flex: 1 1 auto;
@@ -2222,7 +2114,7 @@ function focusCli(): void {
 }
 .fw-gp-cli-hint { color: var(--dsh-fg-weak, #8b949e); }
 .fw-gp-cli-line { white-space: pre-wrap; word-break: break-all; }
-.fw-gp-cli-line.kind-err { color: #f85149; }
+.fw-gp-cli-line.kind-err { color: var(--dsh-danger); }
 .fw-gp-cli-line.kind-out { color: var(--dsh-fg, #c9d1d9); }
 .fw-gp-cli-prompt { color: var(--dsh-accent, #238636); }
 .fw-gp-cli-cmd { color: var(--dsh-fg, #c9d1d9); }
@@ -2236,25 +2128,7 @@ function focusCli(): void {
   color: var(--dsh-fg, #c9d1d9);
   font: inherit;
 }
-
 /* 身份配置弹窗字段 */
 .fw-gp-cfgfield { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
 .fw-gp-cfgfield label { font-size: calc(12px * var(--dsh-fs-scale, 1)); color: var(--dsh-fg-weak, #8b949e); }
-</style>
-
-<style>
-/* Git/SVN 管理弹窗的遮罩：固定居中 + 背景模糊，对齐 dsh 官方浮层
-   （参考 dsh-prompt-library dialog-style：rgba(0,0,0,.35) + blur(12px)，弹窗表面 24px 圆角）。
-   modal-class 挂在 .el-overlay 上，弹窗（append-to-body）也会带上，故为全局样式。 */
-.el-overlay.fw-blur-overlay {
-  background: rgba(0, 0, 0, 0.35);
-  backdrop-filter: var(--dsw-mask-blur, blur(12px));
-  -webkit-backdrop-filter: var(--dsw-mask-blur, blur(12px));
-}
-.el-dialog.fw-gitpanel-dialog,
-.el-dialog.fw-gitconfig-dialog,
-.el-dialog.fw-gp-commitview-dialog,
-.el-dialog.fw-gp-release-dialog {
-  border-radius: 24px;
-}
 </style>

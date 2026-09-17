@@ -109,6 +109,10 @@ export interface VSCodeState {
   treeScroll: number;
   /** 各打开文件的查看器位置（键 = 文件绝对路径）。 */
   views: Record<string, FileViewState>;
+  /** Activity Bar 配置：图标条对齐位置与被隐藏的视图 id（内置 + 插件）。 */
+  activityBar: { position: "top" | "bottom"; hidden: string[] };
+  /** 侧栏（Activity Bar + 内容区）位于编辑区的哪一侧，仿 VS Code 的 Side Bar 位置设置。 */
+  sidebarSide: "left" | "right";
 }
 
 function defaults(): VSCodeState {
@@ -123,6 +127,8 @@ function defaults(): VSCodeState {
     termHeight: 260,
     treeScroll: 0,
     views: {},
+    activityBar: { position: "top", hidden: [] },
+    sidebarSide: "left",
   };
 }
 
@@ -193,6 +199,19 @@ function parseState(raw: Record<string, unknown>): VSCodeState {
     s.termHeight = Math.min(1200, raw.termHeight);
   }
   if (typeof raw.treeScroll === "number" && Number.isFinite(raw.treeScroll) && raw.treeScroll >= 0) s.treeScroll = raw.treeScroll;
+  if (
+    raw.activityBar &&
+    typeof raw.activityBar === "object" &&
+    ((raw.activityBar as Record<string, unknown>).position === "top" ||
+      (raw.activityBar as Record<string, unknown>).position === "bottom")
+  ) {
+    const ab = raw.activityBar as Record<string, unknown>;
+    s.activityBar.position = ab.position as "top" | "bottom";
+    if (Array.isArray(ab.hidden)) {
+      s.activityBar.hidden = ab.hidden.filter((x): x is string => typeof x === "string" && x !== "");
+    }
+  }
+  if (raw.sidebarSide === "left" || raw.sidebarSide === "right") s.sidebarSide = raw.sidebarSide;
   if (raw.views && typeof raw.views === "object") {
     const views: Record<string, FileViewState> = {};
     for (const [k, v] of Object.entries(raw.views as Record<string, unknown>)) {

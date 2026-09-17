@@ -5,21 +5,35 @@
 <template>
   <div class="fw-diff">
     <div v-if="!lines.length" class="fw-diff-empty">{{ empty }}</div>
-    <div v-else class="fw-diff-body">
-      <div
-        v-for="(ln, i) in lines"
-        :key="i"
-        class="fw-diff-line"
-        :class="'dl-' + diffLineKind(ln)"
-      >{{ ln || " " }}</div>
-    </div>
+    <template v-else>
+      <div class="fw-diff-body">
+        <div
+          v-for="(ln, i) in shown"
+          :key="i"
+          class="fw-diff-line"
+          :class="'dl-' + diffLineKind(ln)"
+        >{{ ln || " " }}</div>
+      </div>
+      <!-- 大文件保护：超限截断，避免一次渲染数万行卡死面板 -->
+      <div v-if="truncated" class="fw-diff-empty">{{ t("gitDiffTruncated") }}</div>
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
 import { diffLineKind } from "../../../composables/domain/gitGraph";
+import { useI18n } from "../../../composables/core/i18n";
 
-defineProps<{ lines: string[]; empty: string }>();
+const props = defineProps<{ lines: string[]; empty: string }>();
+const { t } = useI18n();
+
+/** 单次最多渲染的行数：超出部分截断并提示（完整内容可走编辑器）。 */
+const DIFF_MAX_LINES = 5000;
+const shown = computed(() =>
+  props.lines.length > DIFF_MAX_LINES ? props.lines.slice(0, DIFF_MAX_LINES) : props.lines,
+);
+const truncated = computed(() => props.lines.length > DIFF_MAX_LINES);
 </script>
 
 <style scoped>

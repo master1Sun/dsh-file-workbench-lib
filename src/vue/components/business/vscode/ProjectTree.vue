@@ -6,10 +6,15 @@
         v-for="n in visibleNodes"
         :key="n.path"
         class="vs-tree-row"
-        :class="{ 'is-active': n.path === activePath }"
+        :class="{ 'is-active': n.path === activePath, 'drop-target': dropPath === n.path }"
         :style="{ paddingLeft: n.depth * 12 + 6 + 'px' }"
+        draggable="true"
         @click.stop="onRowClick(n)"
         @contextmenu.prevent.stop="openMenu(n, $event)"
+        @dragstart="onDragStart(n, $event)"
+        @dragover.prevent="onDragOver(n, $event)"
+        @dragleave="onDragLeave(n)"
+        @drop.prevent="onDrop(n, $event)"
       >
         <span class="vs-caret" @click.stop="toggle(n)">
           <span v-if="n.isDir">{{ n.expanded ? '▾' : '▸' }}</span>
@@ -171,6 +176,7 @@ import { gitState, gitStatusOf, refreshGitStatus } from "../../../composables/do
 import { refreshSvnStatus, svnState, svnStatusOf } from "../../../composables/domain/svn";
 import { gitMenuFor, svnMenuFor, type RepoMenuActions } from "../../../composables/domain/repoMenu";
 import ContextMenu from "../../common/ContextMenu.vue";
+import { useContextMenu } from "../../../composables/ui/useContextMenu";
 import QuickCommit from "../git/QuickCommit.vue";
 import GitPanel from "../git/GitPanel.vue";
 import SvnPanel from "../git/SvnPanel.vue";
@@ -586,7 +592,7 @@ async function rebuild(): Promise<void> {
 }
 
 /** 供父面板在「状态就绪 / 重新激活」时显式重建（切回面板、换项目后确保有内容）。 */
-defineExpose({ rebuild });
+defineExpose({ rebuild, createFileAtRoot, createFolderAtRoot });
 
 // 只在 `vsReady`（持久化已加载 + 项目根已注册）后建树：
 // 否则会在状态刚写入、host 根还没注册、另一面板可能正在全局取消请求时抢跑，
@@ -647,10 +653,8 @@ function svnBadgeTitleOf(node: TreeEntry): string {
   return "";
 }
 
-/* ---------- 右键菜单 ---------- */
-const cmOpen = ref(false);
-const cmX = ref(0);
-const cmY = ref(0);
+/* ---------- 右键菜单（开关/坐标收敛到公共 composable，条目按节点 computed 生成） ---------- */
+const { cmOpen, cmX, cmY, openMenu: openMenuAt } = useContextMenu();
 /** 当前右键目标（打开菜单时固定）。 */
 const cmTarget = ref<TreeEntry | null>(null);
 /** 本次右键是否来自**空白处**（目标节点仍是项目根，但菜单取「空白区」那一套项）。 */
@@ -666,13 +670,11 @@ const cmItems = computed<MenuItem[]>(() =>
 function openMenu(node: TreeEntry, e: MouseEvent): void {
   cmBlank.value = false;
   cmTarget.value = node;
-  cmX.value = e.clientX;
-  cmY.value = e.clientY;
   // 打开菜单时补探一次目标归属目录的 git/svn 状态（未展开过的目录也能拿到子菜单）。
   const dir = menuDirOf(node);
   void refreshGitStatus(dir);
   void refreshSvnStatus(dir);
-  cmOpen.value = true;
+  openMenuAt(e);
 }
 
 /**
@@ -686,11 +688,9 @@ function onBlankMenu(e: MouseEvent): void {
   if (!rootNode) return;
   cmBlank.value = true;
   cmTarget.value = rootNode;
-  cmX.value = e.clientX;
-  cmY.value = e.clientY;
   void refreshGitStatus(rootNode.path);
   void refreshSvnStatus(rootNode.path);
-  cmOpen.value = true;
+  openMenuAt(e);
 }
 
 /** 菜单上下文目录（判断是否在仓库/工作副本、以及面板作用目录）。 */
@@ -931,6 +931,63 @@ function containerOf(node: TreeEntry): TreeEntry {
   return node.isDir ? node : nodes[parentDir(node.path)] ?? node;
 }
 
+/* ---------- 行内拖拽移动（拖文件 / 文件夹到目录行上松手 = 移动到该目录） ---------- */
+/** 当前拖拽源路径（本树内部拖拽才有值；跨树 / 系统拖入不支持）。 */
+let dragSrc: string | null = null;
+/** 高亮的放置目标目录行。 */
+const dropPath = ref<string | null>(null);
+
+function onDragStart(node: TreeEntry, e: DragEvent): void {
+  dragSrc = node.path;
+  e.dataTransfer?.setData("text/plain", node.path);
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+}
+
+/** 悬停高亮：目录行即目标；文件行高亮其父目录（与右键「新建」的落点口径一致）。 */
+function onDragOver(node: TreeEntry, e: DragEvent): void {
+  if (!dragSrc || dragSrc === node.path) return;
+  e.dataTransfer && (e.dataTransfer.dropEffect = "move");
+  dropPath.value = node.isDir ? node.path : parentDir(node.path);
+}
+
+function onDragLeave(node: TreeEntry): void {
+  const target = node.isDir ? node.path : parentDir(node.path);
+  if (dropPath.value === target) dropPath.value = null;
+}
+
+async function onDrop(node: TreeEntry, e: DragEvent): Promise<void> {
+  const src = dragSrc ?? e.dataTransfer?.getData("text/plain") ?? "";
+  const dir = containerOf(node).path;
+  dragSrc = null;
+  dropPath.value = null;
+  if (!src || !dir) return;
+  const destDir = dir.replace(/[\\/]+$/, "");
+  // 拖进自身（目录拖到自己内部）：源路径是目标目录的前缀即为其后代，拒绝。
+  if (src === dir || destDir.startsWith(src.replace(/[\\/]+$/, ""))) return;
+  const name = src.split(/[\\/]/).filter(Boolean).pop() ?? "";
+  if (!name) return;
+  const to = `${destDir}/${name}`;
+  if (to === src) return;
+  try {
+    await api.rename(src, to, VS_KEY);
+    emit("file-renamed", src, to);
+    await rebuild(); // 目录可能整棵迁移：直接重建最稳（树缓存本身有滚动/展开恢复）
+  } catch (err) {
+    toast("error", (err as Error).message);
+  }
+}
+
+/** 根级新建文件（供顶栏「文件」菜单等外部入口调用）：等价于在根节点右键新建。 */
+function createFileAtRoot(): void {
+  const rootNode = props.root ? nodes[props.root] : undefined;
+  if (rootNode) void actNewFile(rootNode);
+}
+/** 根级新建文件夹（同上）。 */
+function createFolderAtRoot(): void {
+  const rootNode = props.root ? nodes[props.root] : undefined;
+  if (rootNode) void actNewFolder(rootNode);
+}
+
 async function actNewFile(node: TreeEntry): Promise<void> {
   const dir = containerOf(node);
   const name =
@@ -1054,7 +1111,12 @@ function persist(): void {
   background: var(--dsh-hover, rgba(255, 255, 255, 0.06));
 }
 .vs-tree-row.is-active {
-  background: var(--dsh-accent-soft, rgba(35, 134, 54, 0.22));
+  background: var(--dsh-accent-soft, rgba(47, 129, 247, 0.16));
+}
+/* 拖拽移动的放置目标：accent 描边提示可松手 */
+.vs-tree-row.drop-target {
+  background: var(--dsh-accent-soft, rgba(47, 129, 247, 0.16));
+  box-shadow: inset 0 0 0 1px var(--dsh-accent, #2f81f7);
 }
 .vs-caret {
   width: 14px;
@@ -1106,16 +1168,16 @@ function persist(): void {
   border: 1px solid #8b949e88;
 }
 .vs-git-badge.st-added {
-  color: #238636;
-  border: 1px solid #238636;
+  color: var(--dsh-accent, #2f81f7);
+  border: 1px solid var(--dsh-accent, #2f81f7);
 }
 .vs-git-badge.st-modified {
-  color: #d29922;
-  border: 1px solid #d29922;
+  color: var(--dsh-warn, #d29922);
+  border: 1px solid var(--dsh-warn, #d29922);
 }
 .vs-git-badge.st-deleted {
-  color: #f85149;
-  border: 1px solid #f8514988;
+  color: var(--dsh-danger, #f85149);
+  border: 1px solid color-mix(in srgb, var(--dsh-danger, #f85149) 55%, transparent);
 }
 </style>
 

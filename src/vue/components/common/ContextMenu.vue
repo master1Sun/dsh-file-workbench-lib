@@ -29,7 +29,7 @@
               <span class="fw-cm-ico"><icon v-if="hasIcon(item.icon ?? '')" :name="item.icon ?? ''" :size="14" /><span v-else>{{ item.icon ?? "" }}</span></span>
               <span class="fw-cm-label">{{ item.label }}</span>
               <span v-if="item.hint" class="fw-cm-hint">{{ item.hint }}</span>
-              <span class="fw-cm-check">{{ item.checked ? "●" : "" }}</span>
+              <span class="fw-cm-check">{{ item.checked ? "✓" : "" }}</span>
               <span class="fw-cm-arrow" v-if="item.children?.length"><icon name="chevronRight" :size="10" /></span>
               <span
                 v-if="item.trailing"
@@ -77,7 +77,7 @@
             >
               <span class="fw-cm-ico"><icon v-if="hasIcon(sub.icon ?? '')" :name="sub.icon ?? ''" :size="14" /><span v-else>{{ sub.icon ?? "" }}</span></span>
               <span class="fw-cm-label">{{ sub.label }}</span>
-              <span class="fw-cm-check">{{ sub.checked ? "●" : "" }}</span>
+              <span class="fw-cm-check">{{ sub.checked ? "✓" : "" }}</span>
             </div>
           </template>
         </div>
@@ -257,17 +257,29 @@ onBeforeUnmount(() => {
   inset: 0;
   z-index: 2147483800;
 }
+@keyframes fw-cm-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
 .fw-cm {
   position: fixed;
   z-index: 2147483900;
+  transform-origin: top left;
+  animation: fw-cm-in 0.1s ease-out;
   min-width: 200px;
   max-width: 280px;
   /* 根菜单本身不加 overflow：子菜单渲染在根层级，需 escape 裁剪（否则 Git 子菜单被裁） */
   padding: 4px;
   border: 1px solid var(--dsh-border, #30363d);
-  border-radius: 8px;
+  border-radius: var(--dsh-radius-md, 8px);
   background: var(--dsh-bg2, #161b22);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--dsh-shadow-menu, 0 8px 24px rgba(0, 0, 0, 0.4));
   font-size: calc(12px * var(--dsh-fs-scale, 1));
   user-select: none;
 }
@@ -308,7 +320,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  border-radius: 5px;
+  border-radius: var(--dsh-radius-sm, 4px);
   color: var(--dsh-fg, #c9d1d9);
   cursor: pointer;
   white-space: nowrap;

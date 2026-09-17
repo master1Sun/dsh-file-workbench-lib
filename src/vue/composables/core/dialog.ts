@@ -24,8 +24,11 @@ interface DialogState {
   inputValue: string;
   /** prompt 输入框是否为多行 textarea（长文本场景，如子代理任务描述）。 */
   multiline: boolean;
+  /** 多按钮确认框（choiceDialog）的按钮列表；confirm/prompt 时空。 */
+  choices: DialogChoice[];
   resolve: Resolver | null;
 }
+
 
 export const dialogState = reactive<DialogState>({
   visible: false,
@@ -37,6 +40,7 @@ export const dialogState = reactive<DialogState>({
   inputPlaceholder: "",
   inputValue: "",
   multiline: false,
+  choices: [],
   resolve: null,
 });
 
@@ -47,6 +51,36 @@ interface ConfirmOptions {
   cancelText?: string;
 }
 
+/** 多按钮确认框的单个按钮（VS Code 式「保存 / 不保存 / 取消」三选场景）。 */
+export interface DialogChoice {
+  id: string;
+  text: string;
+  /** true 时用主按钮样式（默认最后一个按钮是「取消」样式的兜底）。 */
+  primary?: boolean;
+}
+
+interface ChoiceOptions {
+  title?: string;
+  message: string;
+  /** 按钮列表（渲染顺序即数组顺序）；点任意按钮 resolve 对应 id，Esc / 关闭 resolve null。 */
+  choices: DialogChoice[];
+}
+
+/**
+ * 多按钮选择框：与 confirmDialog 同一套弹窗外观，但按钮可自定义（≥2 个），
+ * 返回被点按钮的 id；取消（Esc / 关闭 / 点遮罩关闭被禁时）返回 null。
+ */
+export function choiceDialog(opts: ChoiceOptions): Promise<string | null> {
+  return new Promise((resolve) => {
+    dialogState.kind = "confirm";
+    dialogState.title = opts.title ?? "";
+    dialogState.message = opts.message;
+    dialogState.choices = opts.choices;
+    dialogState.visible = true;
+    dialogState.resolve = (v) => resolve(typeof v === "string" ? v : null);
+  });
+}
+
 /** 确认框：resolve(true) 确认；(false) 取消。 */
 export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
   return new Promise((resolve) => {
@@ -55,6 +89,7 @@ export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
     dialogState.message = opts.message;
     dialogState.okText = opts.okText ?? "";
     dialogState.cancelText = opts.cancelText ?? "";
+    dialogState.choices = [];
     dialogState.inputValue = "";
     dialogState.visible = true;
     dialogState.resolve = (v) => resolve(v === true);
@@ -80,6 +115,7 @@ export function promptDialog(opts: PromptOptions): Promise<string | null> {
     dialogState.message = opts.message ?? "";
     dialogState.okText = opts.okText ?? "";
     dialogState.cancelText = opts.cancelText ?? "";
+    dialogState.choices = [];
     dialogState.inputPlaceholder = opts.placeholder ?? "";
     dialogState.inputValue = opts.initial ?? "";
     dialogState.multiline = opts.multiline === true;

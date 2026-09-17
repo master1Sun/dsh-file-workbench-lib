@@ -10,9 +10,6 @@
  *   svn 由 svn 自己完成一次认证并落进它自己的 auth 缓存（**不加** `--no-auth-cache`）。
  *   两者都是为了让命令行 / 其它 GUI 工具也免密，属显式动作。
  */
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
 import {
   addAccount,
   applyGitToSystem,
@@ -31,44 +28,28 @@ import {
 import { FsError } from "../fs/fs-tree.js";
 import { decodeSvnOutput, resolveSvnExe } from "./routes-svn.js";
 import { json, readBody, type RouteMatcher } from "./routes-util.js";
-
-const execFileP = promisify(execFile);
+import { CommandLineRunner, type CmdResult } from "../services/command-runner.js";
 
 /** 账号连通性测试超时（毫秒）：远端不可达时应尽快返回原因，而不是挂住请求。 */
 const ACCOUNT_TEST_TIMEOUT_MS = 30_000;
 
-interface CmdResult {
-  code: number;
-  stdout: string;
-  stderr: string;
-}
-
-/** 执行一条命令并返回退出码/输出（失败不抛错；svn 输出按混合编码逐行解码）。 */
-async function runCmd(exe: string, args: string[], env: NodeJS.ProcessEnv, isSvn = false): Promise<CmdResult> {
-  try {
-    const { stdout, stderr } = await execFileP(exe, args, {
-      windowsHide: true,
-      encoding: "buffer",
-      maxBuffer: 8 * 1024 * 1024,
-      timeout: ACCOUNT_TEST_TIMEOUT_MS,
+/**
+ * 测试连通专用 runner：复用 CommandLineRunner 统一的进程执行骨架
+ * （超时 killed→124、输出解码、错误文案拼装），自身不含任何业务状态。
+ * svn 输出按混合编码逐行解码，其余按 UTF-8（与原 runCmd 行为一致）。
+ */
+class AccountTestRunner extends CommandLineRunner {
+  async runCmd(exe: string, args: string[], env: NodeJS.ProcessEnv, isSvn = false): Promise<CmdResult> {
+    return this.execCapture(exe, args, {
       env,
+      timeoutMs: ACCOUNT_TEST_TIMEOUT_MS,
+      maxBufferBytes: 8 * 1024 * 1024,
+      timeoutMessage: `超时（${ACCOUNT_TEST_TIMEOUT_MS / 1000}s，已终止）`,
+      decode: isSvn ? decodeSvnOutput : (b: Buffer) => b.toString("utf8"),
     });
-    const dec = (b: Buffer) => (isSvn ? decodeSvnOutput(b) : b.toString("utf8"));
-    return {
-      code: 0,
-      stdout: dec(stdout as Buffer).trim(),
-      stderr: dec(stderr as Buffer).trim(),
-    };
-  } catch (error) {
-    const e = error as NodeJS.ErrnoException & { stderr?: Buffer; stdout?: Buffer; killed?: boolean };
-    const dec = (b?: Buffer) => (b ? (isSvn ? decodeSvnOutput(b) : b.toString("utf8")).trim() : "");
-    return {
-      code: e.killed ? 124 : typeof e.code === "number" ? Number(e.code) : 1,
-      stdout: dec(e.stdout),
-      stderr: (e.killed ? `超时（${ACCOUNT_TEST_TIMEOUT_MS / 1000}s，已终止）` : dec(e.stderr) || e.message) || String(error),
-    };
   }
 }
+const accountRunner = new AccountTestRunner();
 
 /** 由请求体构造一条「尚未保存」的账号（测试连通用），字段语义与落盘记录一致。 */
 function draftAccount(body: AccountInput): AccountRecord {
@@ -95,7 +76,7 @@ async function testGitAccount(acct: AccountRecord): Promise<{ ok: boolean; detai
   if (!target) return { ok: false, detail: "请先填写仓库地址，测试需要一个可访问的 URL" };
   if (!acct.username || !acct.secret) return { ok: false, detail: "用户名与口令（或令牌）均为必填" };
   const inject = await gitInjectFor(acct);
-  const r = await runCmd("git", [...inject.args, "ls-remote", "--heads", target], { ...process.env, ...inject.env });
+  const r = await accountRunner.runCmd("git", [...inject.args, "ls-remote", "--heads", target], { ...process.env, ...inject.env });
   if (r.code === 0) {
     const n = r.stdout.split(/\r?\n/).filter(Boolean).length;
     return { ok: true, detail: `已连通，远端分支 ${n} 个` };
@@ -111,7 +92,7 @@ async function testSvnAccount(acct: AccountRecord): Promise<{ ok: boolean; detai
   const exe = await resolveSvnExe();
   if (!exe) return { ok: false, detail: "未找到可用的 svn 命令行工具（未安装 Subversion？）" };
   const args = withSvnAuth(["list", target], acct);
-  const r = await runCmd(exe, args, process.env, true);
+  const r = await accountRunner.runCmd(exe, args, process.env, true);
   if (r.code === 0) {
     const n = r.stdout.split(/\r?\n/).filter(Boolean).length;
     return { ok: true, detail: `已连通，该路径下条目 ${n} 个` };
@@ -198,7 +179,7 @@ export const accountsResource: RouteMatcher = async (req, res, seg, _q, method) 
     if (!exe) throw new FsError("fs-error", "未找到可用的 svn 命令行工具", 400);
     // ⛔ 这里**故意不加** `--no-auth-cache` —— 正是要让 svn 把凭据写进自己的认证缓存。
     const args = ["info", "--non-interactive", "--username", acct.username, "--password", acct.secret, target];
-    const r = await runCmd(exe, args, process.env, true);
+    const r = await accountRunner.runCmd(exe, args, process.env, true);
     if (r.code !== 0) throw new FsError("fs-error", `svn 认证失败：${r.stderr || r.stdout || `退出码 ${r.code}`}`, 400);
     return (json(res, 200, { ok: true, data: { detail: `已写入 svn 认证缓存（${acct.username}@${acct.host}）` } }), true);
   }

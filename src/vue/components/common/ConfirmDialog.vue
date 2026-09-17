@@ -36,8 +36,20 @@
       </template>
     </div>
     <template #footer>
-      <el-button @click="onCancel">{{ cancelText }}</el-button>
-      <el-button type="primary" @click="onOk">{{ okText }}</el-button>
+      <!-- choiceDialog：自定义多按钮（如「保存并关闭 / 不保存关闭 / 取消」） -->
+      <template v-if="dialogState.choices.length">
+        <el-button
+          v-for="c in dialogState.choices"
+          :key="c.id"
+          :type="c.primary ? 'primary' : 'default'"
+          @click="onChoice(c.id)"
+          >{{ c.text }}</el-button
+        >
+      </template>
+      <template v-else>
+        <el-button @click="onCancel">{{ cancelText }}</el-button>
+        <el-button type="primary" @click="onOk">{{ okText }}</el-button>
+      </template>
     </template>
   </el-dialog>
 </template>
@@ -54,7 +66,11 @@ const okText = computed(() => dialogState.okText || t("confirmOk"));
 const cancelText = computed(() => dialogState.cancelText || t("cancel"));
 
 function onModel(v: boolean): void {
-  if (!v) resolveDialog(dialogState.kind === "prompt" ? null : false);
+  if (!v) resolveDialog(dialogState.kind === "prompt" ? null : dialogState.choices.length ? null : false);
+}
+/** choiceDialog：点自定义按钮 resolve 对应 id。 */
+function onChoice(id: string): void {
+  resolveDialog(id);
 }
 function onOk(): void {
   if (dialogState.kind === "prompt") resolveDialog(dialogState.inputValue.trim());

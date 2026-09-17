@@ -44,10 +44,18 @@ html[data-theme="dark"],
      白天模式下不会自动变浅，故必须显式定义（与 --dsh-bg3 同一类问题）。 */
   --dsh-fg-muted: #6e7681;
   --dsh-warn: #d29922;
+  --dsh-danger: #f85149;
+  --dsh-success: #3fb950;
+  --dsh-purple: #d2a8ff;
+  --dsh-info: #79c0ff;
   --dsh-select: #1f6feb33;
   --dsh-hover: #30363d;
-  --dsh-accent: #238636;
-  --dsh-accent-glow: color-mix(in srgb, var(--dsh-accent, #238636) 45%, transparent);
+  /* 强调色默认蓝（未在设置中自定义时）；accent-soft/weak 用 color-mix 派生，
+     用户在设置里换强调色时半透明版本会自动跟随（theme.ts 的 setAccent 只覆盖 --dsh-accent）。 */
+  --dsh-accent: #2f81f7;
+  --dsh-accent-soft: color-mix(in srgb, var(--dsh-accent, #2f81f7) 20%, transparent);
+  --dsh-accent-weak: color-mix(in srgb, var(--dsh-accent, #2f81f7) 14%, transparent);
+  --dsh-accent-glow: color-mix(in srgb, var(--dsh-accent, #2f81f7) 45%, transparent);
   --dsh-font: "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   --dsh-mono: "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", Menlo, monospace;
   --hljs-comment: #8b949e;
@@ -91,10 +99,16 @@ html[data-theme="light"],
   --dsh-fg-weak: #656d76;
   --dsh-fg-muted: #6e7781;
   --dsh-warn: #9a6700;
+  --dsh-danger: #cf222e;
+  --dsh-success: #1a7f37;
+  --dsh-purple: #8250df;
+  --dsh-info: #0550ae;
   --dsh-select: #0969da33;
   --dsh-hover: #d7dce3;
-  --dsh-accent: #1f883d;
-  --dsh-accent-glow: color-mix(in srgb, var(--dsh-accent, #1f883d) 40%, transparent);
+  --dsh-accent: #0969da;
+  --dsh-accent-soft: color-mix(in srgb, var(--dsh-accent, #0969da) 14%, transparent);
+  --dsh-accent-weak: color-mix(in srgb, var(--dsh-accent, #0969da) 10%, transparent);
+  --dsh-accent-glow: color-mix(in srgb, var(--dsh-accent, #0969da) 40%, transparent);
   --dsh-font: "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   --dsh-mono: "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", Menlo, monospace;
   --hljs-comment: #6e7781;
@@ -127,6 +141,18 @@ html[data-theme="light"],
   --el-mask-color: rgba(31, 35, 40, 0.4);
 }
 
+/* ---- 主题无关的结构 token（圆角 / 阴影 / 弹窗头 / 徽标色）----
+ * 颜色 token 只放随主题翻转的（--dsh-success / --dsh-purple 等见下方深浅色板）；
+ * 圆角与阴影深浅主题通用，定义一次即可，各组件经 var() 消费，不再各写各的。 */
+:root {
+  --dsh-radius-sm: 4px;
+  --dsh-radius-md: 8px;
+  --dsh-radius-lg: 12px;
+  --dsh-shadow-dialog: 0 18px 48px rgba(0, 0, 0, 0.55);
+  --dsh-shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5);
+  --dsh-shadow-menu: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -137,6 +163,23 @@ html[data-theme="light"],
 }
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* 错误态里的「重试」按钮：共享样式（FileListPane / NavPane 等复用） */
+.fw-retry {
+  margin-top: 2px;
+  padding: 4px 14px;
+  border: 1px solid var(--dsh-border, #30363d);
+  border-radius: var(--dsh-radius-sm, 4px);
+  background: var(--dsh-bg2, #161b22);
+  color: var(--dsh-fg, #c9d1d9);
+  font: inherit;
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+  cursor: pointer;
+}
+.fw-retry:hover {
+  border-color: color-mix(in srgb, var(--dsh-accent, #2f81f7) 55%, transparent);
+  color: var(--dsh-accent, #2f81f7);
 }
 
 /* ---- 统一空态 / 加载态 ---- */
@@ -171,4 +214,70 @@ html[data-theme="light"],
   to {
     transform: rotate(360deg);
   }
+}
+/* ---- 统一错误态 ----
+ * 后端不可达 / 加载失败等场景：图标 + 居中弱化文案，替代此前各处裸排的红字。
+ * 颜色仍用 --dsh-danger 点缀，但整体保持空态的安静观感。 */
+.fw-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 28px 16px;
+  color: var(--dsh-fg-weak, #8b949e);
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+  text-align: center;
+  user-select: none;
+}
+.fw-error .fw-error-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--dsh-danger, #f85149) 10%, transparent);
+  color: var(--dsh-danger, #f85149);
+}
+
+/* ---- 命令栏 el-dropdown 下拉（排序/查看/新建）：字体与观感对齐内容区 ----
+   此前 fw-panelmenu 无任何样式，下拉一直用 EP 默认字体（14px 系统栈），
+   与内容区的 --dsh-font + fs-scale 12px 不一致。teleported=false，popper 渲染在面板内。 */
+.fw-panelmenu-popper.el-popper {
+  font-family: var(--dsh-font);
+  background: var(--dsh-bg2, #161b22);
+  border: 1px solid var(--dsh-border, #30363d);
+  border-radius: var(--dsh-radius-md, 8px);
+  box-shadow: var(--dsh-shadow-menu, 0 8px 24px rgba(0, 0, 0, 0.4));
+  padding: 4px;
+}
+.fw-panelmenu-popper .fw-panelmenu {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+}
+.fw-panelmenu-popper .fw-panelitem {
+  font-family: var(--dsh-font);
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+  color: var(--dsh-fg, #c9d1d9);
+  border-radius: var(--dsh-radius-sm, 4px);
+  padding: 6px 10px;
+  line-height: 1.4;
+}
+.fw-panelmenu-popper .fw-panelitem:not(.is-disabled):hover,
+.fw-panelmenu-popper .fw-panelitem:not(.is-disabled):focus {
+  background: var(--dsh-hover, rgba(48, 54, 61, 0.5));
+  color: var(--dsh-fg, #c9d1d9);
+}
+.fw-panelmenu-popper .fw-pmenu-check { font-family: inherit; }
+
+/* el-select 下拉弹层：字体对齐内容区（各 popper 自带背景主题，此处只统一字体字号） */
+.fw-set-popper,
+.fw-acc-popper,
+.fw-acc-popper .el-select-dropdown__item,
+.fw-set-popper .el-select-dropdown__item {
+  font-family: var(--dsh-font);
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
 }

@@ -10,10 +10,11 @@
  * 路由层无需在边界做 scheme 换算。方法内部再拆出远端 POSIX 路径。
  *
  * 首版范围：浏览 / 查看 / 编辑 / 增删 / 重命名 / 搜索 / 快速打开。
- * 压缩解压 / 此电脑 / 跨文件 replace 在远端根下明确 501「不支持」。
+ * 此电脑 / 跨文件 replace 在远端根下明确 501「不支持」；压缩解压由 SFTP + fflate 内存打包实现。
  */
 import { SshError, type RemoteFs, type RemoteStat } from "../ssh/ssh-core.js";
 import { connFor } from "../ssh/ssh-hosts.js";
+import { zipSync, unzipSync } from "fflate";
 import { FsError, type FsEntryRow, type MyComputerItem } from "./fs-tree.js";
 import { parseRef } from "./fs-provider.js";
 import type { DriveInfo } from "./fs-drives.js";
@@ -79,9 +80,18 @@ async function execOk(hostId: string, cmd: string, what: string, timeoutMs = 30_
   return result.stdout;
 }
 
+/** 探测远端是否存在某命令（zip/unzip 等按需探测，缺命令时走 SFTP 回退路径）。 */
+async function remoteHasBin(hostId: string, bin: string): Promise<boolean> {
+  try {
+    const out = await execOk(hostId, `command -v ${shellQuote(bin)} >/dev/null 2>&1 && echo __ok__`, `check "${bin}"`);
+    return out.includes("__ok__");
+  } catch {
+    return false;
+  }
+}
+
 /** 统一文件语义入口（SFTP 优先，禁用降级 ExecFs）。 */
-async function remoteFsFor(raw: string): Promise<{ hostId: string; remote: string; fs: RemoteFs }> {
-  const { hostId, remote } = splitRef(raw);
+async function remoteFsFor(raw: string): Promise<{ hostId: string; remote: string; fs: RemoteFs }> {  const { hostId, remote } = splitRef(raw);
   try {
     const conn = await connFor(hostId);
     return { hostId, remote, fs: await conn.fs() };
@@ -525,12 +535,118 @@ export const sftpFsProvider: FsProvider = {
     throw new FsError("not-implemented", "cross-file replace is not supported on remote (ssh) roots", 501);
   },
 
-  async compressTo() {
-    throw new FsError("not-implemented", "compress is not supported on remote (ssh) roots", 501);
+  /**
+   * 远端压缩：**优先在远端服务器上直接执行 `zip -qr`**（数据不出服务器，快且省流量）；
+   * 远端没有 zip 命令时回退为 SFTP 逐文件读取 + fflate 宿主内存打包（不依赖远端装命令，
+   * 与本地 fs-zip 同为「全内存打包」，超大目录受内存约束）。符号链接不进包。
+   */
+  async compressTo(srcRaw: string, destZipRaw: string): Promise<string> {
+    const srcSt = await statRemote(srcRaw);
+    if (!srcSt) throw new FsError("not-found", `"${srcRaw}" does not exist`, 404);
+    const { hostId, remote, fs } = await remoteFsFor(srcRaw);
+    const src = normalizeRemote(remote);
+    const destZip = normalizeRemote(splitRef(destZipRaw).remote);
+
+    // 快路径：远端有 zip → 原地打包（cd 到源目录使包内保留顶层名，与本地版语义一致）。
+    if (await remoteHasBin(hostId, "zip")) {
+      await execOk(
+        hostId,
+        `cd ${shellQuote(posixDirname(src))} && zip -qr -- ${shellQuote(destZip)} ${shellQuote(posixBasename(src))}`,
+        `compress "${srcRaw}"`,
+        300_000,
+      );
+      return destZipRaw;
+    }
+
+    // 回退路径：SFTP 逐文件读取 + fflate 内存打包 + 写回远端。
+    const rootName = posixBasename(src);
+    const entries: Record<string, Uint8Array> = {};
+
+    async function walk(dirRemote: string, prefix: string): Promise<void> {
+      let list;
+      try {
+        list = await fs.listDir(dirRemote);
+      } catch (error) {
+        throw toFsError(error, `cannot list "${dirRemote}"`);
+      }
+      for (const e of list) {
+        const childRemote = normalizeRemote(`${dirRemote}/${e.name}`);
+        const rel = prefix ? `${prefix}/${e.name}` : e.name;
+        if (e.type === "dir") {
+          await walk(childRemote, rel);
+          continue;
+        }
+        if (e.type !== "file") continue; // 链接/其他不进包
+        try {
+          entries[rel] = new Uint8Array(await fs.readBytes(childRemote));
+        } catch (error) {
+          throw toFsError(error, `cannot read "${childRemote}"`);
+        }
+      }
+    }
+
+    try {
+      if (srcSt.type === "file") {
+        entries[rootName] = new Uint8Array(await fs.readBytes(src));
+      } else {
+        await walk(src, rootName);
+      }
+      const data = zipSync(entries);
+      await this.writeFileBytes(destZipRaw, Buffer.from(data));
+    } catch (error) {
+      if (error instanceof FsError) throw error;
+      throw toFsError(error, `cannot compress "${srcRaw}"`);
+    }
+    return destZipRaw;
   },
 
-  async extractTo() {
-    throw new FsError("not-implemented", "extract is not supported on remote (ssh) roots", 501);
+  /**
+   * 远端解压：**优先在远端服务器上直接执行 `unzip -oq`**（数据不出服务器），解完用
+   * `find | wc -l` 统计写入文件数；远端没有 unzip 命令时回退为 SFTP 读入 + fflate 内存
+   * 解包 + 逐条目写回（writeFileBytes 自带 `mkdir -p` 父目录）。两条路径的穿越防护一致：
+   * 回退路径丢弃空段 / "." / ".."，重组后必须仍落在 destDir 之下；zip 目录条目跳过。
+   */
+  async extractTo(zipRaw: string, destDirRaw: string): Promise<number> {
+    const { hostId, fs } = await remoteFsFor(zipRaw);
+    const zipRemote = normalizeRemote(splitRef(zipRaw).remote);
+    const dest = normalizeRemote(splitRef(destDirRaw).remote);
+
+    // 快路径：远端有 unzip → 服务器本地解压，数据不过网络。
+    if (await remoteHasBin(hostId, "unzip")) {
+      const out = await execOk(
+        hostId,
+        `unzip -oq -- ${shellQuote(zipRemote)} -d ${shellQuote(dest)} && find ${shellQuote(dest)} -type f | wc -l`,
+        `extract "${zipRaw}"`,
+        300_000,
+      );
+      const count = Number.parseInt(out.trim(), 10);
+      return Number.isFinite(count) ? count : 0;
+    }
+
+    // 回退路径：SFTP 读入 zip → fflate 解包 → 逐条目写回远端。
+    let buf: Buffer;
+    try {
+      buf = await fs.readBytes(zipRemote);
+    } catch (error) {
+      throw toFsError(error, `cannot read zip "${zipRaw}"`);
+    }
+    let files: Record<string, Uint8Array>;
+    try {
+      files = unzipSync(new Uint8Array(buf));
+    } catch (error) {
+      throw new FsError("fs-error", `invalid zip: ${error instanceof Error ? error.message : String(error)}`, 400);
+    }
+    let count = 0;
+    for (const rel of Object.keys(files)) {
+      if (rel.endsWith("/")) continue; // 目录条目：无需写出
+      const parts = rel.replace(/\\/g, "/").split("/").filter((s) => s && s !== "." && s !== "..");
+      if (!parts.length) continue;
+      const target = normalizeRemote(`${dest}/${parts.join("/")}`);
+      if (!target.startsWith(`${dest}/`)) continue; // 防穿越
+      await this.writeFileBytes(joinRef(hostId, target), Buffer.from(files[rel]));
+      count += 1;
+    }
+    return count;
   },
 
   async resolveExisting(raw) {

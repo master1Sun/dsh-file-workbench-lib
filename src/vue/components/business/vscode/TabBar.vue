@@ -52,6 +52,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import type { MenuItem } from "../../../../shared/types";
 import { t } from "../../../composables/core/i18n";
 import ContextMenu from "../../common/ContextMenu.vue";
+import { useContextMenu } from "../../../composables/ui/useContextMenu";
 import Icon from "../../common/Icon.vue";
 
 export interface TabInfo {
@@ -144,18 +145,14 @@ function basename(p: string): string {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? p;
 }
 
-/* ---------- 右键菜单 ---------- */
-const menuOpen = ref(false);
-const menuX = ref(0);
-const menuY = ref(0);
+/* ---------- 右键菜单（开关/坐标收敛到公共 composable） ---------- */
+const { cmOpen: menuOpen, cmX: menuX, cmY: menuY, openMenu: openMenuAt } = useContextMenu();
 /** 当前右键的标签（菜单打开时固定）。 */
 const menuTarget = ref<TabInfo | null>(null);
 
 function openMenu(tab: TabInfo, e: MouseEvent): void {
   menuTarget.value = tab;
-  menuX.value = e.clientX;
-  menuY.value = e.clientY;
-  menuOpen.value = true;
+  openMenuAt(e, []);
 }
 
 const menuItems = computed<MenuItem[]>(() => {
@@ -249,14 +246,18 @@ const menuItems = computed<MenuItem[]>(() => {
   white-space: nowrap;
   border-right: 1px solid var(--dsh-border, #30363d);
   color: var(--dsh-fg-weak, #8b949e);
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.vs-tab:hover {
+  background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
 }
 .vs-tab.is-active {
   background: var(--dsh-bg, #0d1117);
   color: var(--dsh-fg, #c9d1d9);
-  border-top: 1px solid var(--dsh-accent, #238636);
+  border-top: 1px solid var(--dsh-accent, #2f81f7);
 }
 .vs-tab-name {
-  font-size: 13px;
+  font-size: calc(13px * var(--dsh-fs-scale, 1));
 }
 .vs-tab-dirty {
   width: 8px;
@@ -266,8 +267,8 @@ const menuItems = computed<MenuItem[]>(() => {
 }
 /* 冲突态：琥珀色圆点 + 外圈，和普通「未保存」圆点一眼可分 */
 .vs-tab-dirty.conflict {
-  background: #d29922;
-  box-shadow: 0 0 0 2px rgba(210, 153, 34, 0.25);
+  background: var(--dsh-warn, #d29922);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsh-warn, #d29922) 25%, transparent);
 }
 .vs-tab-dot {
   width: 8px;
@@ -280,14 +281,15 @@ const menuItems = computed<MenuItem[]>(() => {
   text-align: center;
   border-radius: 3px;
   font-size: 14px;
+  transition: background 0.12s;
 }
 .vs-tab-close:hover {
-  background: var(--dsh-hover, rgba(255, 255, 255, 0.1));
+  background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
 }
 .vs-tabs-empty {
   padding: 0 12px;
   line-height: 35px;
   color: var(--dsh-fg-weak, #8b949e);
-  font-size: 12px;
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
 }
 </style>

@@ -46,6 +46,10 @@ export interface Prefs {
   txtShowStatus: boolean;
   /** VS 面板左栏底部 Git 记录栏的展开高度（px，拖拽顶边调整）；0 = 用默认上限。 */
   vsGitBarH: number;
+  /** 文件编辑器自动保存：编辑停顿 1 秒后静默写入磁盘。 */
+  autoSave: boolean;
+  /** 文件编辑器 Minimap（右侧块状缩略渲染）开关。 */
+  vsMinimap: boolean;
 }
 
 const defaults: Prefs = {
@@ -67,6 +71,8 @@ const defaults: Prefs = {
   txtWordWrap: false,
   txtShowStatus: true,
   vsGitBarH: 0,
+  autoSave: false,
+  vsMinimap: true,
 };
 
 /** 启动初始值一律用默认；initPersist() 拉取成功后再用后端值覆盖。 */
@@ -107,6 +113,8 @@ function sanitizePrefs(raw: unknown): Partial<Prefs> {
   if (typeof src.txtWordWrap === "boolean") out.txtWordWrap = src.txtWordWrap;
   if (typeof src.txtShowStatus === "boolean") out.txtShowStatus = src.txtShowStatus;
   if (typeof src.vsGitBarH === "number" && src.vsGitBarH >= 0) out.vsGitBarH = src.vsGitBarH;
+  if (typeof src.autoSave === "boolean") out.autoSave = src.autoSave;
+  if (typeof src.vsMinimap === "boolean") out.vsMinimap = src.vsMinimap;
   return out;
 }
 

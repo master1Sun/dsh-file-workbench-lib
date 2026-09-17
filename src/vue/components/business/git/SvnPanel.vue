@@ -602,30 +602,10 @@ async function doCheckout(): Promise<void> {
 }
 </script>
 
+<style src="./panel-shared.css"></style>
 <style scoped>
-/* ── 顶部状态条（对齐 .fw-gp-head） ───────────────────────────── */
-.fw-svn-head {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 2px 8px;
-  border-bottom: 1px solid var(--dsh-border, #30363d);
-  font-size: calc(12px * var(--dsh-fs-scale, 1));
-  min-width: 0;
-}
-.fw-svn-revpill {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 22px;
-  padding: 0 8px;
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--dsh-accent, #238636) 18%, transparent);
-  border: 1px solid color-mix(in srgb, var(--dsh-accent, #238636) 45%, transparent);
-  color: var(--dsh-accent, #238636);
-}
+/* 与 GitPanel 同构的规则已抽取到 ./panel-shared.css（fw-gp-* / fw-svn-* 双前缀共享）；
+   本块只保留 SVN 面板独有的规则（版本 pill 差异、勾选列表、提交框、日志折叠等）。 */
 .fw-svn-url {
   flex: 1 1 auto;
   min-width: 0;
@@ -644,128 +624,9 @@ async function doCheckout(): Promise<void> {
   color: var(--dsh-fg-weak, #8b949e);
   font-size: calc(11px * var(--dsh-fs-scale, 1));
 }
-.fw-svn-headacts { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; }
-
-/* ── 主体：左导航 + 内容（对齐 .fw-gp-body / .fw-gp-rail） ────── */
-.fw-svn-shell {
-  display: flex;
-  flex-direction: column;
-  /* 固定外壳高度：加载/检出/警告等状态切换时弹窗高度恒定，避免抖动 */
-  height: min(78vh, 800px);
-  min-height: 470px;
-}
-.fw-svn-body {
-  display: flex;
-  align-items: stretch;
-  /* 高度由外壳分配，页签内容自适应 */
-  flex: 1 1 auto;
-  min-height: 0;
-  margin-top: 8px;
-  border: 1px solid var(--dsh-border, #30363d);
-  border-radius: 6px;
-  overflow: hidden;
-}
-/* 加载 / 缺 CLI / 检出等占位态：与外壳同高，弹窗总高度恒定 */
-.fw-svn-state {
-  display: flex;
-  height: min(78vh, 800px);
-  min-height: 470px;
-  align-items: center;
-  justify-content: center;
-  align-content: center;
-  box-sizing: border-box;
-  padding: 20px;
-}
-.fw-svn-rail {
-  flex: 0 0 132px;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding: 6px 4px;
-  background: var(--dsh-bg2, #161b22);
-  border-right: 1px solid var(--dsh-border, #30363d);
-}
-.fw-svn-rail-btn {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  min-height: 28px;
-  padding: 0 8px;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--dsh-fg, #c9d1d9);
-  font: inherit;
-  font-size: calc(12px * var(--dsh-fs-scale, 1));
-  cursor: pointer;
-  text-align: left;
-}
-.fw-svn-rail-btn:hover { background: var(--dsh-hover, rgba(48, 54, 61, 0.45)); }
-.fw-svn-rail-btn.active { background: var(--dsh-hover, rgba(110, 118, 129, 0.3)); color: var(--dsh-accent, #238636); }
-.fw-svn-rail-txt { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.fw-svn-rail-badge {
-  flex: 0 0 auto;
-  min-width: 17px;
-  height: 16px;
-  padding: 0 5px;
-  border-radius: 8px;
-  background: var(--dsh-hover, rgba(110, 118, 129, 0.3));
-  color: var(--dsh-fg, #c9d1d9);
-  font-size: calc(10px * var(--dsh-fs-scale, 1));
-  line-height: 16px;
-  text-align: center;
-}
-.fw-svn-rail-fill { flex: 1 1 auto; }
-.fw-svn-rail-op {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
-  font-size: calc(11px * var(--dsh-fs-scale, 1));
-  color: var(--dsh-accent, #238636);
-}
-.fw-svn-spin {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  border: 2px solid var(--dsh-border, #30363d);
-  border-top-color: var(--dsh-accent, #238636);
-  animation: fw-svn-spin 0.8s linear infinite;
-}
-@keyframes fw-svn-spin { to { transform: rotate(360deg); } }
-.fw-svn-content { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
-
-/* ── 本地修改：左列表 + 右提交框（对齐 .fw-gp-split） ─────────── */
-.fw-svn-split { display: flex; align-items: stretch; flex: 1 1 auto; min-height: 0; }
-.fw-svn-list {
-  flex: 1 1 46%;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  overflow-y: auto;
-  border-right: 1px solid var(--dsh-border, #30363d);
-  padding-bottom: 4px;
-}
-.fw-svn-groupbar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 8px 4px;
-  font-size: calc(11px * var(--dsh-fs-scale, 1));
-  font-weight: 600;
-  color: var(--dsh-fg-weak, #8b949e);
-  position: sticky;
-  top: 0;
-  background: var(--dsh-bg, #0d1117);
-  z-index: 1;
-}
-.fw-svn-groupname { flex: 1 1 auto; }
+/* 本地修改列表：SVN 独有的勾选交互 */
+.fw-svn-list { flex: 1 1 46%; padding-bottom: 4px; }
 .fw-svn-selall { display: inline-flex; align-items: center; gap: 5px; font-size: calc(11px * var(--dsh-fs-scale, 1)); font-weight: 400; color: var(--dsh-fg-weak, #8b949e); cursor: pointer; }
-.fw-svn-empty { padding: 12px 10px; color: var(--dsh-fg-weak, #8b949e); font-size: calc(12px * var(--dsh-fs-scale, 1)); }
-.fw-svn-row { display: flex; align-items: center; gap: 7px; padding: 3px 8px; min-height: 26px; }
-.fw-svn-row:hover { background: var(--dsh-hover, rgba(48, 54, 61, 0.45)); }
 .fw-svn-badge {
   flex: 0 0 auto;
   min-width: 18px;
@@ -777,16 +638,12 @@ async function doCheckout(): Promise<void> {
   background: var(--dsh-bg2, #161b22);
   border: 1px solid var(--dsh-border, #30363d);
 }
-.fw-svn-badge[data-code="A"], .fw-svn-badge[data-code="M"], .fw-svn-badge[data-code="R"] { color: #7ee787; }
-.fw-svn-badge[data-code="D"], .fw-svn-badge[data-code="!"] { color: #ffa198; }
-.fw-svn-badge[data-code="C"] { color: #e3b341; }
-.fw-svn-badge[data-code="?"], .fw-svn-badge[data-code="I"] { color: #8b949e; }
-.fw-svn-path { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: calc(12px * var(--dsh-fs-scale, 1)); }
-.fw-svn-dir { color: var(--dsh-fg-weak, #8b949e); }
+.fw-svn-badge[data-code="A"], .fw-svn-badge[data-code="M"], .fw-svn-badge[data-code="R"] { color: var(--dsh-success); }
+.fw-svn-badge[data-code="D"], .fw-svn-badge[data-code="!"] { color: var(--dsh-danger); }
+.fw-svn-badge[data-code="C"] { color: var(--dsh-warn); }
+.fw-svn-badge[data-code="?"], .fw-svn-badge[data-code="I"] { color: var(--dsh-fg-weak, #8b949e); }
 .fw-svn-stext { flex: 0 0 auto; color: var(--dsh-fg-weak, #8b949e); font-size: calc(11px * var(--dsh-fs-scale, 1)); }
-.fw-svn-rowacts { flex: 0 0 auto; display: inline-flex; gap: 2px; }
-
-/* ── 右侧提交框（对齐 .fw-gp-detail） ─────────────────────────── */
+/* ── 右侧提交框 ───────────────────────────────────────────────── */
 .fw-svn-detail {
   flex: 1 1 54%;
   display: flex;
@@ -795,30 +652,12 @@ async function doCheckout(): Promise<void> {
   min-height: 0;
   overflow: hidden;
 }
-.fw-svn-detailhead {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
-  border-bottom: 1px solid var(--dsh-border, #30363d);
-  background: var(--dsh-bg2, #161b22);
-}
-.fw-svn-detailtitle {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: calc(11px * var(--dsh-fs-scale, 1));
-  color: var(--dsh-fg-weak, #8b949e);
-}
 .fw-svn-msg {
   flex: 0 0 auto;
   margin: 8px;
   resize: vertical;
   border: 1px solid var(--dsh-border, #30363d);
-  border-radius: 4px;
+  border-radius: var(--dsh-radius-sm, 4px);
   background: var(--dsh-bg2, #161b22);
   color: var(--dsh-fg, #c9d1d9);
   padding: 6px 8px;
@@ -836,7 +675,7 @@ async function doCheckout(): Promise<void> {
   align-items: center;
   gap: 5px;
   border: 1px solid var(--dsh-border, #30363d);
-  border-radius: 4px;
+  border-radius: var(--dsh-radius-sm, 4px);
   background: var(--dsh-bg2, #161b22);
   color: var(--dsh-fg, #c9d1d9);
   font: inherit;
@@ -846,7 +685,6 @@ async function doCheckout(): Promise<void> {
 .fw-svn-btn:hover:not(:disabled) { border-color: color-mix(in srgb, var(--dsh-accent, #238636) 55%, transparent); color: var(--dsh-accent, #238636); }
 .fw-svn-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .fw-svn-btn.primary { background: var(--dsh-accent, #238636); border-color: var(--dsh-accent, #238636); color: #fff; }
-
 /* ── 提交日志（内嵌列表；默认折叠，对齐 Git 历史交互） ─────────── */
 .fw-svn-loglist { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-bottom: 6px; }
 .fw-svn-logitem { padding: 6px 10px; border-bottom: 1px solid var(--dsh-border, #30363d); }
@@ -861,17 +699,16 @@ async function doCheckout(): Promise<void> {
 .fw-svn-log-msg { margin: 6px 0 0 20px; white-space: pre-wrap; font-size: calc(12px * var(--dsh-fs-scale, 1)); color: var(--dsh-fg, #c9d1d9); }
 /* 展开后的变更文件列表：行式布局（动作徽标 + 目录淡色 + 文件名），点击看该次提交 diff */
 .fw-svn-log-cfiles { display: flex; flex-direction: column; gap: 1px; margin: 6px 0 2px 20px; }
-.fw-svn-cfile { display: flex; gap: 8px; align-items: baseline; min-width: 0; padding: 2px 6px; border-radius: 4px; cursor: pointer; }
+.fw-svn-cfile { display: flex; gap: 8px; align-items: baseline; min-width: 0; padding: 2px 6px; border-radius: var(--dsh-radius-sm, 4px); cursor: pointer; }
 .fw-svn-cfile:hover { background: var(--dsh-hover, rgba(48, 54, 61, 0.5)); }
 .fw-svn-cfile-act { flex: 0 0 auto; width: 14px; text-align: center; font-family: var(--dsh-mono, monospace); font-weight: 600; font-size: calc(11px * var(--dsh-fs-scale, 1)); color: var(--dsh-fg-weak, #8b949e); }
-.fw-svn-cfile-act.pa-A { color: #7ee787; }
-.fw-svn-cfile-act.pa-M { color: #7ee787; }
-.fw-svn-cfile-act.pa-D { color: #ffa198; }
-.fw-svn-cfile-act.pa-R { color: #d2a8ff; }
+.fw-svn-cfile-act.pa-A { color: var(--dsh-success); }
+.fw-svn-cfile-act.pa-M { color: var(--dsh-success); }
+.fw-svn-cfile-act.pa-D { color: var(--dsh-danger); }
+.fw-svn-cfile-act.pa-R { color: var(--dsh-purple); }
 .fw-svn-cfile-path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--dsh-mono, monospace); font-size: calc(11.5px * var(--dsh-fs-scale, 1)); color: var(--dsh-fg, #c9d1d9); }
 .fw-svn-cfile-dir { color: var(--dsh-fg-weak, #8b949e); }
-
-/* ── 命令输出（对齐命令台 .fw-gp-cli） ────────────────────────── */
+/* ── 命令输出 ─────────────────────────────────────────────────── */
 .fw-svn-cli { flex: 1 1 auto; min-height: 0; padding: 8px; display: flex; }
 .fw-svn-cli-body {
   flex: 1 1 auto;
@@ -879,7 +716,7 @@ async function doCheckout(): Promise<void> {
   padding: 8px 10px;
   overflow: auto;
   border: 1px solid var(--dsh-border, #30363d);
-  border-radius: 4px;
+  border-radius: var(--dsh-radius-sm, 4px);
   background: var(--dsh-bg2, #161b22);
   font-family: var(--dsh-mono, ui-monospace, sfmono-regular, consolas, monospace);
   font-size: calc(11.5px * var(--dsh-fs-scale, 1));
@@ -887,24 +724,9 @@ async function doCheckout(): Promise<void> {
   white-space: pre-wrap;
   word-break: break-word;
 }
-
 /* ── 降级视图 / 弹窗 ──────────────────────────────────────────── */
-.fw-svn-mini {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: none;
-  border-radius: 3px;
-  background: transparent;
-  color: var(--dsh-fg-weak, #8b949e);
-  cursor: pointer;
-}
-.fw-svn-mini:hover:not(:disabled) { background: var(--dsh-border, #30363d); color: var(--dsh-accent, #238636); }
 .fw-svn-mini:disabled { opacity: 0.45; cursor: not-allowed; }
-.fw-svn-warn { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 4px; background: color-mix(in srgb, #d29922 16%, transparent); border: 1px solid color-mix(in srgb, #d29922 40%, transparent); color: #e3b341; font-size: calc(12px * var(--dsh-fs-scale, 1)); }
+.fw-svn-warn { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: var(--dsh-radius-sm, 4px); background: color-mix(in srgb, var(--dsh-warn) 16%, transparent); border: 1px solid color-mix(in srgb, var(--dsh-warn) 40%, transparent); color: var(--dsh-warn); font-size: calc(12px * var(--dsh-fs-scale, 1)); }
 .fw-svn-checkout-form { display: flex; flex-direction: column; gap: 8px; }
 .fw-svn-tip { margin: 0; color: var(--dsh-fg-weak, #8b949e); font-size: calc(12px * var(--dsh-fs-scale, 1)); }
 .fw-svn-checkout-row { display: flex; align-items: center; gap: 6px; }
@@ -913,11 +735,4 @@ async function doCheckout(): Promise<void> {
 .fw-svn-blame { margin: 0; height: 60vh; overflow: auto; font-family: var(--dsh-mono, monospace); font-size: calc(11.5px * var(--dsh-fs-scale, 1)); white-space: pre; }
 .fw-svn-co-form { display: flex; flex-direction: column; gap: 6px; }
 .fw-svn-co-label { font-size: calc(11px * var(--dsh-fs-scale, 1)); color: var(--dsh-fg-weak, #8b949e); }
-</style>
-
-<style>
-/* SVN 管理弹窗表面 24px 圆角（遮罩 .fw-blur-overlay 在 GitPanel.vue 的全局样式中统一定义） */
-.el-dialog.fw-svn-dialog {
-  border-radius: 24px;
-}
 </style>

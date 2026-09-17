@@ -1,0 +1,289 @@
+/* GitPanel / SvnPanel 共享结构样式（全局生效）。
+ * 两个面板布局同构（头部状态条 / 左侧 rail / 列表+详情），此前是两份手工复制的
+ * scoped CSS（fw-gp-* 与 fw-svn-*）。现把同构规则收敛到本文件，用「双前缀选择器」
+ * 一处定义；各面板 scoped 块只保留自己独有的规则（scoped 带 [data-v] 权重更高，
+ * 可覆盖这里的共享默认值）。
+ * 颜色一律走 --dsh-* token（不再内联深色兜底十六进制），保证浅色主题跟随。 */
+
+/* ── 头部状态条 ─────────────────────────────────────────────── */
+.fw-gp-head,
+.fw-svn-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 2px 8px;
+  border-bottom: 1px solid var(--dsh-border);
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+  min-width: 0;
+}
+/* 分支 pill（Git）/ 版本 pill（SVN）：强调色软徽标 */
+.fw-gp-branch,
+.fw-svn-revpill {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  background: var(--dsh-accent-weak);
+  border: 1px solid var(--dsh-accent-glow);
+  color: var(--dsh-accent);
+  overflow: hidden;
+}
+.fw-gp-branch b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.fw-gp-headacts,
+.fw-svn-headacts { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; }
+
+/* ── 主体：左导航 + 内容 ────────────────────────────────────── */
+.fw-gp-shell,
+.fw-svn-shell {
+  display: flex;
+  flex-direction: column;
+  /* 固定外壳高度：页签切换（提交栏显隐）与加载态都不再改变弹窗高度，避免抖动 */
+  height: min(78vh, 800px);
+  min-height: 470px;
+}
+.fw-gp-body,
+.fw-svn-body {
+  display: flex;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 8px;
+  border: 1px solid var(--dsh-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+/* 加载中 / 非仓库占位：与外壳同高，弹窗总高度恒定 */
+.fw-gitpanel-empty,
+.fw-svn-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  align-content: center;
+  gap: 8px;
+  box-sizing: border-box;
+  height: min(78vh, 800px);
+  min-height: 470px;
+  padding: 20px;
+  color: var(--dsh-fg-weak);
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+}
+
+/* rail：左侧页签导航 */
+.fw-gp-rail,
+.fw-svn-rail {
+  flex: 0 0 132px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 4px;
+  background: var(--dsh-bg2);
+  border-right: 1px solid var(--dsh-border);
+}
+.fw-gp-rail-btn,
+.fw-svn-rail-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--dsh-radius-sm);
+  background: transparent;
+  color: var(--dsh-fg);
+  font: inherit;
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+  text-align: left;
+  cursor: pointer;
+}
+.fw-gp-rail-btn:hover,
+.fw-svn-rail-btn:hover { background: var(--dsh-hover); }
+/* 选中态统一：左侧 2px 强调色竖条 + 强调色文字（Git 原有样式，SVN 一并对齐） */
+.fw-gp-rail-btn.active,
+.fw-svn-rail-btn.active {
+  background: var(--dsh-hover);
+  box-shadow: inset 2px 0 0 var(--dsh-accent);
+  color: var(--dsh-accent);
+  font-weight: 600;
+}
+.fw-gp-rail-txt,
+.fw-svn-rail-txt { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fw-gp-rail-badge,
+.fw-svn-rail-badge {
+  flex: 0 0 auto;
+  min-width: 17px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--dsh-hover);
+  color: var(--dsh-fg);
+  font-size: calc(10px * var(--dsh-fs-scale, 1));
+  line-height: 16px;
+  text-align: center;
+}
+.fw-gp-rail-fill,
+.fw-svn-rail-fill { flex: 1 1 auto; }
+.fw-gp-rail-op,
+.fw-svn-rail-op {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
+  color: var(--dsh-accent);
+}
+/* 两套 keyframes 名都定义一次（各自 scoped 块不再重复）；加载 spinner 共用观感 */
+.fw-gp-spin,
+.fw-svn-spin {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--dsh-border);
+  border-top-color: var(--dsh-accent);
+  animation: fw-gp-spin 0.8s linear infinite;
+}
+@keyframes fw-gp-spin { to { transform: rotate(360deg); } }
+@keyframes fw-svn-spin { to { transform: rotate(360deg); } }
+/* 刷新按钮：加载时 refresh 图标自身旋转（不再叠加 el-button 的 loading 转圈） */
+.fw-gp-refresh-ic { display: inline-flex; align-items: center; }
+.fw-gp-refresh-ic.spin { animation: fw-gp-spin 0.8s linear infinite; }
+.fw-gp-content,
+.fw-svn-content { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+/* ── 内容区：左右分栏（列表 + 详情） ───────────────────────── */
+.fw-gp-split,
+.fw-svn-split { display: flex; align-items: stretch; flex: 1 1 auto; min-height: 0; }
+.fw-gp-list,
+.fw-svn-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--dsh-border);
+}
+
+/* ── 列表行（通用） ────────────────────────────────────────── */
+.fw-gp-groupbar,
+.fw-svn-groupbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 4px;
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
+  font-weight: 600;
+  color: var(--dsh-fg-weak);
+  position: sticky;
+  top: 0;
+  background: var(--dsh-bg);
+  z-index: 1;
+}
+.fw-gp-groupname,
+.fw-svn-groupname { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fw-gp-empty,
+.fw-svn-empty {
+  padding: 12px 10px;
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+  color: var(--dsh-fg-weak);
+}
+.fw-gp-row,
+.fw-svn-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 26px;
+  padding: 3px 8px;
+  border-radius: var(--dsh-radius-sm);
+  cursor: pointer;
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+  color: var(--dsh-fg);
+}
+.fw-gp-row:hover,
+.fw-svn-row:hover { background: var(--dsh-hover); }
+.fw-gp-row.active {
+  background: var(--dsh-hover);
+  box-shadow: inset 2px 0 0 var(--dsh-accent);
+}
+.fw-gp-path,
+.fw-svn-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+}
+.fw-gp-dir,
+.fw-svn-dir { color: var(--dsh-fg-weak); }
+.fw-gp-rowacts,
+.fw-svn-rowacts { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 2px; }
+/* 行内 mini 图标按钮（Git 20px / SVN 22px 统一为 20px） */
+.fw-gp-mini,
+.fw-svn-mini {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--dsh-radius-sm);
+  background: transparent;
+  color: var(--dsh-fg-weak);
+  cursor: pointer;
+}
+.fw-gp-mini:hover,
+.fw-svn-mini:hover:not(:disabled) { background: var(--dsh-border); color: var(--dsh-fg); }
+
+/* ── 详情面板头部 ──────────────────────────────────────────── */
+.fw-gp-detailhead,
+.fw-svn-detailhead {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--dsh-border);
+  background: var(--dsh-bg2);
+}
+.fw-gp-detailtitle,
+.fw-svn-detailtitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
+  color: var(--dsh-fg-weak);
+}
+
+/* 非仓库空态：图标 + 文案 + 「克隆仓库…」引导按钮（Git 面板独有内容，共用 .fw-retry 样式） */
+.fw-norepo {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  color: var(--dsh-fg-weak);
+}
+.fw-norepo button { min-width: 120px; }
+
+/* ── 遮罩 + 弹窗表面 ───────────────────────────────────────── */
+/* Git/SVN 管理弹窗的遮罩：固定居中 + 背景模糊，对齐 dsh 官方浮层。
+   modal-class 挂在 .el-overlay 上，弹窗（append-to-body）也会带上，故为全局样式。 */
+.el-overlay.fw-blur-overlay {
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: var(--dsw-mask-blur, blur(12px));
+  -webkit-backdrop-filter: var(--dsw-mask-blur, blur(12px));
+}
+/* 弹窗表面圆角统一走 token（原 24px 与 clone 弹窗 12px 不一致） */
+.el-dialog.fw-gitpanel-dialog,
+.el-dialog.fw-gitconfig-dialog,
+.el-dialog.fw-gp-commitview-dialog,
+.el-dialog.fw-gp-release-dialog,
+.el-dialog.fw-svn-dialog {
+  border-radius: var(--dsh-radius-lg);
+}

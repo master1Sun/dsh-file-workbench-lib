@@ -259,7 +259,7 @@ async function save(): Promise<void> {
   border: 1px solid var(--dsh-border, #30363d);
   border-radius: 12px;
   overflow: hidden;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--dsh-shadow-dialog, 0 18px 48px rgba(0, 0, 0, 0.55));
   padding: 0;
 }
 :global(.fw-ssh-dlg .el-dialog__header) {
@@ -370,7 +370,7 @@ async function save(): Promise<void> {
   background: var(--dsh-bg2, #161b22);
   border: 1px solid var(--dsh-border, #30363d);
   border-radius: 8px;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--dsh-shadow-pop, 0 12px 32px rgba(0, 0, 0, 0.5));
 }
 :global(.fw-set-popper .el-select-dropdown__item) { color: var(--dsh-fg, #c9d1d9); border-radius: 4px; }
 :global(.fw-set-popper .el-select-dropdown__item:hover:not(.is-disabled)) { background: var(--dsh-hover, rgba(48, 54, 61, 0.5)); }

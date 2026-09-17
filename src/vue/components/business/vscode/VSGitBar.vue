@@ -627,7 +627,7 @@ async function refresh(): Promise<void> {
 }
 .vs-gitbar-file .st.s-a { color: #3fb950; }
 .vs-gitbar-file .st.s-m { color: #e3b341; }
-.vs-gitbar-file .st.s-d { color: #f85149; }
+.vs-gitbar-file .st.s-d { color: var(--dsh-danger, #f85149); }
 .vs-gitbar-file .st.s-r, .vs-gitbar-file .st.s-t { color: #58a6ff; }
 .vs-gitbar-file .name {
   flex: 0 1 auto;

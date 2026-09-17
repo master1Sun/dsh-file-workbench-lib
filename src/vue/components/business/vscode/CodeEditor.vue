@@ -1,6 +1,42 @@
 <template>
   <!-- 右键交由父组件弹菜单（格式化内容等）；CodeMirror 自身的原生菜单不拦截 -->
-  <div ref="hostRef" class="vs-code-editor" @contextmenu.prevent.stop="onContextMenu"></div>
+  <div class="vs-ce-root" @contextmenu.prevent.stop="onContextMenu">
+    <div ref="hostRef" class="vs-code-editor"></div>
+    <!-- 查找 / 替换浮层（Ctrl+F / Ctrl+H）：右上角悬浮，Enter / Shift+Enter 上下切换，Esc 关闭 -->
+    <div v-if="findOpen" class="vs-find">
+      <div class="vs-find-row">
+        <input
+          ref="findInputRef"
+          v-model="findQ"
+          class="vs-find-input"
+          :placeholder="t('vsFindPlaceholder')"
+          @input="pushQuery"
+          @keydown.enter.prevent="findShift($event.shiftKey)"
+          @keydown.esc.prevent="closeFind"
+        />
+        <span class="vs-find-count">{{ matchLabel }}</span>
+        <button class="vs-find-btn" :class="{ on: optCase }" :title="t('vsGrepCase')" @click="toggleOpt('case')">Aa</button>
+        <button class="vs-find-btn" :class="{ on: optRe }" :title="t('vsGrepRegex')" @click="toggleOpt('re')">.*</button>
+        <button class="vs-find-btn" :class="{ on: optWord }" :title="t('vsFindWord')" @click="toggleOpt('word')">|w|</button>
+        <span class="vs-find-vsep"></span>
+        <button class="vs-find-btn" :title="t('vsFindPrev')" @click="goPrev">↑</button>
+        <button class="vs-find-btn" :title="t('vsFindNext')" @click="goNext">↓</button>
+        <button class="vs-find-btn" :class="{ on: replaceOpen }" :title="t('vsFindToggleReplace')" @click="replaceOpen = !replaceOpen">⇅</button>
+        <button class="vs-find-btn" :title="t('vsFindClose')" @click="closeFind">×</button>
+      </div>
+      <div v-if="replaceOpen" class="vs-find-row">
+        <input
+          v-model="replaceQ"
+          class="vs-find-input"
+          :placeholder="t('vsReplacePlaceholder')"
+          @keydown.enter.prevent="doReplace"
+          @keydown.esc.prevent="closeFind"
+        />
+        <button class="vs-find-btn" :title="t('vsFindReplace')" @click="doReplace">⏎</button>
+        <button class="vs-find-btn" :title="t('vsFindReplaceAll')" @click="doReplaceAll">≡</button>
+      </div>
+    </div>
+  </div>
 </template>
 
 <!--
@@ -10,6 +46,37 @@
  -->
 <script lang="ts">
 import { acquireVSCodeSlot } from "../../../stores/vscode";
+import { Prec } from "@codemirror/state";
+import { keymap } from "@codemirror/view";
+
+/**
+ * 查找/替换浮层的**跨实例控制器**：Ctrl+F/H 的快捷键扩展随 EditorState 一起被跨挂载复用
+ * （docCache 按 slot 常驻），不能闭包某个实例的 refs —— 与 updateListener 同样的陷阱。
+ * 这里让每个实例挂载时登记自己的 findApi（见 <script setup> onMounted），静态 keymap
+ * 永远调用「当前实例」的实现；未挂载实例的旧扩展调用是无害的空操作。
+ */
+interface EditorFindApi {
+  openFind(withReplace: boolean): void;
+  /** 关闭浮层；返回 true 表示此前是打开的（供 Escape keymap 决定是否吞掉按键）。 */
+  closeFind(): boolean;
+}
+let activeFindApi: EditorFindApi | null = null;
+
+/** Ctrl+F / Ctrl+H / Escape：接管 CodeMirror 自带的搜索面板，交给自绘浮层。 */
+const findKeymapExt = Prec.highest(
+  keymap.of([
+    { key: "Mod-f", run: () => (activeFindApi?.openFind(false), true) },
+    { key: "Mod-h", run: () => (activeFindApi?.openFind(true), true) },
+    { key: "Escape", run: () => activeFindApi?.closeFind() ?? false },
+  ]),
+);
+
+/** minimap 容器 DOM（@replit/codemirror-minimap 的 create 钩子要求宿主自备容器）。 */
+function makeMinimapDom(): HTMLElement {
+  const d = document.createElement("div");
+  d.className = "vs-minimap";
+  return d;
+}
 
 /**
  * 跨挂载常驻的「活编辑器视图」：键 = 槽号，值 = 当前挂载的 EditorView 与其所在路径。
@@ -73,17 +140,31 @@ if (typeof window !== "undefined") {
  * 位置持久化：`initialView` 传入该文件上次的滚动位置与光标偏移，建视图时还原；
  * 滚动 / 光标变化通过 @view 回传父组件（父组件按路径暂存并节流落盘）。
  */
-import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import { onBeforeUnmount, onMounted, nextTick, ref, shallowRef, watch, computed } from "vue";
 import { EditorView, type ViewUpdate } from "@codemirror/view";
 import { EditorState, Compartment } from "@codemirror/state";
 import { basicSetup } from "codemirror";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { indentSelection } from "@codemirror/commands";
+import {
+  search,
+  setSearchQuery,
+  SearchQuery,
+  findNext,
+  findPrevious,
+  replaceNext,
+  replaceAll,
+} from "@codemirror/search";
+import { showMinimap } from "@replit/codemirror-minimap";
 import { languageExtensionFor } from "./langResolver";
+import { t } from "../../../composables/core/i18n";
+import { formatCss, formatXml } from "../../../composables/domain/reformat";
+import { prefs } from "../../../composables/core/settings";
 import {
   getEditorStateCache,
   getEditorUpdateSink,
   setEditorUpdateSink,
+  getVSCodeStore,
 } from "../../../stores/vscode";
 
 const props = defineProps<{
@@ -125,9 +206,127 @@ const langCompartment = new Compartment();
 const themeCompartment = new Compartment();
 const roCompartment = new Compartment();
 const editableCompartment = new Compartment();
+const minimapCompartment = new Compartment();
 let gen = 0;
 /** 当前视图的滚动监听器（随视图销毁一并摘除）。 */
 let scrollHandler: (() => void) | null = null;
+
+/* ---------- 查找 / 替换浮层（自绘 UI，搜索与高亮交给 @codemirror/search） ---------- */
+const findOpen = ref(false);
+const replaceOpen = ref(false);
+const findQ = ref("");
+const replaceQ = ref("");
+const optCase = ref(false);
+const optRe = ref(false);
+const optWord = ref(false);
+const matchTotal = ref(0);
+const matchIndex = ref(-1);
+const findInputRef = ref<HTMLInputElement | null>(null);
+
+const matchLabel = computed<string>(() => {
+  if (!findQ.value) return "";
+  if (matchTotal.value === 0) return t("vsFindNoMatch");
+  return `${matchIndex.value < 0 ? "?" : matchIndex.value}/${matchTotal.value}`;
+});
+
+function currentQuery(): SearchQuery {
+  return new SearchQuery({
+    search: findQ.value,
+    replace: replaceQ.value,
+    caseSensitive: optCase.value,
+    regexp: optRe.value,
+    wholeWord: optWord.value,
+  });
+}
+
+/** 把查询条件下发到编辑器（搜索扩展据此高亮全部命中）并重算匹配计数。 */
+function pushQuery(): void {
+  const v = view.value;
+  if (!v) return;
+  v.dispatch({ effects: setSearchQuery.of(currentQuery()) });
+  refreshMatches();
+}
+
+/** 重算「第几处 / 共几处」：以光标位置为基准取其后的第一个命中为当前项。 */
+function refreshMatches(): void {
+  const v = view.value;
+  if (!v || !findQ.value) {
+    matchTotal.value = 0;
+    matchIndex.value = -1;
+    return;
+  }
+  const q = currentQuery();
+  const head = v.state.selection.main.head;
+  let total = 0;
+  let idx = -1;
+  const cursor = q.getCursor(v.state.doc);
+  for (let r = cursor.next(); !r.done; r = cursor.next()) {
+    total += 1;
+    if (idx < 0 && r.value.from >= head) idx = total;
+  }
+  if (idx < 0 && total > 0) idx = 1; // 光标在最后一个命中之后：回到第一个
+  matchTotal.value = total;
+  matchIndex.value = idx;
+}
+
+function goNext(): void {
+  const v = view.value;
+  if (v) findNext(v);
+  refreshMatches();
+}
+function goPrev(): void {
+  const v = view.value;
+  if (v) findPrevious(v);
+  refreshMatches();
+}
+function findShift(back: boolean): void {
+  if (back) goPrev();
+  else goNext();
+}
+function doReplace(): void {
+  const v = view.value;
+  if (v) replaceNext(v);
+  refreshMatches();
+}
+function doReplaceAll(): void {
+  const v = view.value;
+  if (v) replaceAll(v);
+  refreshMatches();
+}
+function toggleOpt(k: "case" | "re" | "word"): void {
+  if (k === "case") optCase.value = !optCase.value;
+  else if (k === "re") optRe.value = !optRe.value;
+  else optWord.value = !optWord.value;
+  pushQuery();
+}
+
+function openFind(withReplace: boolean): void {
+  findOpen.value = true;
+  if (withReplace) replaceOpen.value = true;
+  // 有选中文本时以其作为初始查找词（单行、短文本才自动带入）。
+  const v = view.value;
+  if (v) {
+    const sel = v.state.selection.main;
+    if (!sel.empty && sel.to - sel.from <= 200) {
+      const text = v.state.doc.sliceString(sel.from, sel.to);
+      if (!text.includes("\n")) findQ.value = text;
+    }
+  }
+  pushQuery();
+  void nextTick(() => findInputRef.value?.select());
+}
+function closeFind(): boolean {
+  const was = findOpen.value;
+  findOpen.value = false;
+  replaceOpen.value = false;
+  matchTotal.value = 0;
+  matchIndex.value = -1;
+  const v = view.value;
+  // 清除高亮：下发空查询。
+  if (v && was) v.dispatch({ effects: setSearchQuery.of(new SearchQuery({ search: "" })) });
+  v?.focus();
+  return was;
+}
 
 /**
  * 每个路径一份 EditorState，切 tab 时按 key 取出复用 —— 不销毁重建视图，
@@ -159,6 +358,8 @@ function handleUpdate(raw: unknown): void {
     emit("change", u.state.doc.toString());
     // 用户编辑后实时把最新状态写回缓存，下次切回该文件即恢复（含撤销栈）。
     if (props.path) docCache.set(props.path, u.state);
+    // 查找面板打开时文档被编辑（含「全部替换」）：刷新匹配计数。
+    if (findOpen.value) refreshMatches();
   }
   if (u.selectionSet || u.docChanged) {
     const head = u.state.selection.main.head;
@@ -166,6 +367,11 @@ function handleUpdate(raw: unknown): void {
     emit("cursor", line.number, head - line.from + 1);
     reportView();
   }
+}
+
+/** minimap 扩展（块状缩略渲染）；prefs.vsMinimap 为 false 时不配置。 */
+function minimapExtension() {
+  return showMinimap.of({ create: () => ({ dom: makeMinimapDom() }), displayText: "blocks" });
 }
 
 function buildState(doc: string): EditorState {
@@ -176,6 +382,12 @@ function buildState(doc: string): EditorState {
     selection: { anchor },
     extensions: [
       basicSetup,
+      // 搜索状态与命中高亮：自绘浮层只负责 UI，setSearchQuery 驱动它（不打开其自带面板）。
+      search(),
+      // Ctrl+F / Ctrl+H / Escape 接管（见模块作用域 findKeymapExt 注释）。
+      findKeymapExt,
+      // 右侧 minimap（块状显示），可在设置 / 编辑器右键菜单中开关。
+      minimapCompartment.of(prefs.vsMinimap ? minimapExtension() : []),
       langCompartment.of([]),
       themeCompartment.of(props.dark ? oneDark : []),
       roCompartment.of(EditorState.readOnly.of(!!props.readonly)),
@@ -216,8 +428,8 @@ function restoreScroll(v: EditorView): void {
 }
 
 /**
- * 把当前主题 / 只读态重新对齐到一个视图。
- * 缓存的 EditorState 可能带着**上次挂载时**的 compartment 值，重建后需按当前 props 复位。
+ * 把当前主题 / 只读态 / minimap 重新对齐到一个视图。
+ * 缓存的 EditorState 可能带着**上次挂载时**的 compartment 值，重建后需按当前 props/prefs 复位。
  */
 function applyEnv(v: EditorView): void {
   v.dispatch({
@@ -225,6 +437,7 @@ function applyEnv(v: EditorView): void {
       themeCompartment.reconfigure(props.dark ? oneDark : []),
       roCompartment.reconfigure(EditorState.readOnly.of(!!props.readonly)),
       editableCompartment.reconfigure(EditorView.editable.of(!props.readonly)),
+      minimapCompartment.reconfigure(prefs.vsMinimap ? minimapExtension() : []),
     ],
   });
 }
@@ -285,7 +498,18 @@ function swapTo(oldPath: string, newPath: string): void {
   const v = view.value;
   if (!v) return;
   // 把「切换前」那一路的最新状态写回缓存（含用户编辑后的文档与选区），键 = 旧路径。
-  if (oldPath && oldPath !== newPath) docCache.set(oldPath, v.state);
+  // ⛔ 但旧路径若是刚被「不保存关闭」的标签（已不在 openTabs 里），绝不能写回 ——
+  // 否则用户丢弃的内容会留在缓存里，重开同路径时被 stateFor 复用，看起来就像「不保存却被保存了」。
+  if (oldPath && oldPath !== newPath) {
+    let open = true; // 找不到所属 store（独立调试等）时保守地保留原行为
+    try {
+      open = getVSCodeStore(slot).state.openTabs.includes(oldPath);
+    } catch {
+      /* ignore */
+    }
+    if (open) docCache.set(oldPath, v.state);
+    else docCache.delete(oldPath);
+  }
   gen++;
   v.setState(stateFor(newPath));
   applyEnv(v);
@@ -344,38 +568,70 @@ function restructure(text: string): string | null {
 }
 
 /**
- * 格式化当前文档：
- *  - JSON：结构化重排（2 空格缩进）；解析失败时退回缩进；
- *  - 其它语言：交给 CodeMirror 自身的语言缩进服务（全选 + `indentSelection`），
- *    由已加载的语言包（JS/HTML/CSS/Python…）按语法重排缩进。
+ * 按扩展名选择轻量格式化器（零依赖、失败返回 null 交给语法缩进兜底）：
+ *  - CSS 系（css/scss/less）：花括号层级重排；
+ *  - HTML/XML 系（html/htm/xhtml/xml/svg/vue）：标签层级重排（svg/xml 不启用 void/内联 HTML 规则）。
+ */
+function lightFormatterFor(ext: string): ((text: string) => string | null) | null {
+  if ([".css", ".scss", ".less"].includes(ext)) return formatCss;
+  if ([".html", ".htm", ".xhtml", ".xml", ".svg", ".vue"].includes(ext)) {
+    return (text: string) => formatXml(text, ext !== ".xml" && ext !== ".svg");
+  }
+  return null;
+}
+
+/**
+ * 格式化当前文档，按格式分级处理：
+ *  ① JSON：结构化重排（2 空格缩进）；
+ *  ② CSS 系 / HTML·XML 系：轻量层级重排（见 lightFormatterFor）；
+ *  ③ 其它语言（JS/TS/Python/Java…）：CodeMirror 语言缩进兜底（全选 + indentSelection，
+ *     由已加载的语言包按语法重排缩进）。
  * @returns 是否执行成功（视图未就绪 / 只读时为 false）。
  */
 function format(): boolean {
   const v = view.value;
   if (!v || props.readonly) return false;
   const text = v.state.doc.toString();
-  const next = restructure(text);
-  if (next !== null) {
-    if (next === text) return true;
-    v.dispatch({ changes: { from: 0, to: text.length, insert: next } });
-    return true;
+  const ext = props.path.slice(props.path.lastIndexOf(".")).toLowerCase();
+  // ① JSON 结构化重排
+  if (ext === ".json") {
+    const next = restructure(text);
+    if (next !== null) {
+      if (next === text) return true;
+      v.dispatch({ changes: { from: 0, to: text.length, insert: next } });
+      return true;
+    }
+  } else {
+    // ② 轻量层级重排（异常结构返回 null，落到 ③）
+    const light = lightFormatterFor(ext)?.(text);
+    if (light !== null && light !== undefined) {
+      if (light === text) return true;
+      v.dispatch({ changes: { from: 0, to: text.length, insert: light } });
+      return true;
+    }
   }
-  // 整篇选中后按语言的缩进规则重排（indentUnit 由各语言包提供）。
+  // ③ 兜底：整篇选中后按语言的缩进规则重排（indentUnit 由各语言包提供）。
   v.dispatch({ selection: { anchor: 0, head: text.length } });
   indentSelection(v);
   return true;
 }
 
-defineExpose({ focus, format, revealLine });
+defineExpose({ focus, format, revealLine, openFind });
 
 onMounted(() => {
-  // 先登记本实例的更新分发器，再建视图：跨挂载复用的 EditorState 的 listener 会按槽找到它。
+  // 先登记本实例的更新分发器与查找控制器，再建视图：跨挂载复用的 EditorState 的
+  // listener / keymap 都按槽（模块级表）找到「当前实例」。
   setEditorUpdateSink(props.slot ?? 0, handleUpdate);
+  activeFindApi = {
+    openFind: (w) => openFind(w),
+    closeFind: () => closeFind(),
+  };
   createView();
 });
 onBeforeUnmount(() => {
-  // 注销本实例的分发器（重建时会登记新实例的）。
+  // 注销本实例的分发器与查找控制器（重建时会登记新实例的）。
   setEditorUpdateSink(slot, null);
+  if (activeFindApi) activeFindApi = null;
   detachScroll();
   // 真正关闭该编辑器 tab（tab.signal 中止 → disposedEditorSlots 已登记）时销毁视图，释放内存。
   if (disposedEditorSlots.has(slot)) {
@@ -433,18 +689,125 @@ watch(
     view.value?.dispatch({ effects: themeCompartment.reconfigure(props.dark ? oneDark : []) });
   },
 );
+// Minimap 开关（设置 / 编辑器右键菜单）：即时重配置当前视图。
+watch(
+  () => prefs.vsMinimap,
+  () => {
+    view.value?.dispatch({ effects: minimapCompartment.reconfigure(prefs.vsMinimap ? minimapExtension() : []) });
+  },
+);
 </script>
 
 <style scoped>
+.vs-ce-root {
+  position: relative;
+  display: flex;
+  height: 100%;
+  width: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
 .vs-code-editor {
+  flex: 1 1 auto;
+  min-width: 0;
   height: 100%;
   width: 100%;
   min-height: 0;
   overflow: hidden;
 }
+/* minimap 容器：包一层弱化边框，主题色跟随 */
+.vs-ce-root :deep(.vs-minimap) {
+  border-left: 1px solid var(--dsh-border, #30363d);
+  background: var(--dsh-bg, #0d1117);
+  opacity: 0.85;
+}
+/* ── 查找 / 替换浮层 ── */
+.vs-find {
+  position: absolute;
+  top: 6px;
+  right: 12px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--dsh-border, #30363d);
+  border-radius: 6px;
+  background: var(--dsh-bg2, #161b22);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  animation: vs-find-in 0.12s ease-out;
+}
+@keyframes vs-find-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.vs-find-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.vs-find-input {
+  width: 200px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--dsh-border, #30363d);
+  border-radius: 4px;
+  background: var(--dsh-bg, #0d1117);
+  color: var(--dsh-fg, #c9d1d9);
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+  outline: none;
+  box-sizing: border-box;
+}
+.vs-find-input:focus {
+  border-color: var(--dsh-accent, #2f81f7);
+}
+.vs-find-count {
+  flex: 0 0 auto;
+  min-width: 40px;
+  text-align: center;
+  color: var(--dsh-fg-weak, #8b949e);
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
+  white-space: nowrap;
+}
+.vs-find-btn {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsh-fg-weak, #8b949e);
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.vs-find-btn:hover {
+  background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
+  color: var(--dsh-fg, #c9d1d9);
+}
+.vs-find-btn.on {
+  color: var(--dsh-accent, #2f81f7);
+  background: var(--dsh-accent-weak, rgba(47, 129, 247, 0.14));
+}
+.vs-find-vsep {
+  width: 1px;
+  height: 14px;
+  background: var(--dsh-border, #30363d);
+  margin: 0 2px;
+}
 .vs-code-editor :deep(.cm-editor) {
   height: 100%;
-  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "Courier New", monospace;
+  font-family: var(--dsh-mono, "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", Menlo, monospace);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -457,6 +820,7 @@ watch(
 }
 /* revealLine 跳转行的短暂高亮 */
 .vs-code-editor :deep(.cm-flash-line) {
-  background: var(--dsh-accent-weak, rgba(35, 134, 54, 0.3));
+  background: var(--dsh-accent-weak, rgba(47, 129, 247, 0.14));
+  transition: background 0.4s ease;
 }
 </style>

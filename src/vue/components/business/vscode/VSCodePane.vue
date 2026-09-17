@@ -7,99 +7,83 @@
         <span class="vs-topbar-txt">{{ t("vsBrand") }}</span>
       </span>
       <span class="vs-sep"></span>
-      <!-- 「文件」菜单：打开文件夹 / 保存 / 另存为 / 全部保存（对齐 VS Code 的菜单组织方式） -->
+      <!-- 「文件」菜单：打开文件夹 / 最近项目（子菜单）/ 克隆检出 / 保存（对齐 VS Code 的菜单组织方式）。
+           顶栏不再放「项目路径」「最近项目」两个按钮 —— 路径移到左栏头部、最近项目并入本菜单。 -->
       <button ref="fileBtnRef" class="vs-btn vs-btn-menu" :class="{ open: fileMenuOpen }" :title="t('vsMenuFile')" @click="openFileMenu">
         <icon class="vs-topbar-ico" name="folder" :size="13" />
         <span class="vs-topbar-txt">{{ t("vsMenuFile") }}</span>
         <span class="vs-caret"></span>
       </button>
-      <span class="vs-proj" :title="vsState.projectDir ?? ''">{{ projectLabel }}</span>
       <span class="vs-spacer"></span>
-      <!-- 快速打开：按文件名搜索当前项目内的文件（Ctrl+P），结果下拉可键盘上下选择 -->
-      <div class="vs-search">
-        <input
-          ref="searchInputRef"
-          v-model="searchQ"
-          class="vs-search-input"
-          :placeholder="indexLoading ? t('vsSearchIndexing') : t('vsQuickOpenPlaceholder')"
-          :disabled="!vsState.projectDir"
-          @focus="onSearchFocus"
-          @input="onSearchInput"
-          @blur="onSearchBlur"
-          @keydown.down.prevent="moveSearch(1)"
-          @keydown.up.prevent="moveSearch(-1)"
-          @keydown.enter.prevent="openSearchResult()"
-          @keydown.esc.prevent="closeSearch"
-        />
-        <div v-if="searchOpen && searchResults.length > 0" class="vs-search-pop">
-          <div
-            v-for="(r, i) in searchResults"
-            :key="r.abs"
-            class="vs-search-row"
-            :class="{ active: i === searchActive }"
-            :title="r.abs"
-            @mousedown.prevent="openSearchResult(i)"
-            @mouseenter="searchActive = i"
-          >
-            <span class="vs-search-name">{{ r.name }}</span>
-            <span class="vs-search-dir">{{ r.dir }}</span>
-          </div>
-          <div v-if="indexTruncated" class="vs-search-note">{{ t("vsSearchTruncated") }}</div>
-        </div>
-        <div v-else-if="searchOpen && searchQ.trim() && !indexLoading" class="vs-search-pop">
-          <div class="vs-search-note">{{ t("vsSearchNoResult") }}</div>
-        </div>
-      </div>
-      <!-- 最近项目：一键切回打开过的项目目录（当前项目标记并置灰） -->
-      <button ref="recentBtnRef" class="vs-btn vs-btn-menu" :class="{ open: recentMenuOpen }" :title="t('vsRecentProjects')" @click="openRecentMenu">
-        <icon class="vs-topbar-ico" name="clock" :size="13" />
-        <span class="vs-topbar-txt">{{ t("vsRecentProjects") }}</span>
-        <span class="vs-caret"></span>
+      <!-- 快速打开：假输入框（按钮），点击 / Ctrl+P 弹出居中搜索浮层（对齐 VS Code 的 Quick Open） -->
+      <button
+        class="vs-quickopen-trigger"
+        :title="t('vsQuickOpenPlaceholder')"
+        :disabled="!vsState.projectDir"
+        @click="openQuickOpen"
+      >
+        <icon name="search" :size="13" />
+        <span class="vs-quickopen-ph">{{ indexLoading ? t("vsSearchIndexing") : t("vsQuickOpenPlaceholder") }}</span>
+        <span class="vs-quickopen-kbd">Ctrl+P</span>
       </button>
     </div>
 
-    <div class="vs-body" :class="{ 'right-folded': rightFolded }">
-      <!-- 左栏：顶部「文件 / 搜索」tab + 项目目录树 + 底部 Git 提交记录栏（只占左栏） -->
+    <div class="vs-body" :class="{ 'right-folded': rightFolded, 'side-right': vsState.sidebarSide === 'right' }">
+      <!-- 左栏 = 40px 竖向图标条（Activity Bar）+ 内容区。图标条可右键：隐藏/显示视图、
+           图标置顶/置底、侧栏整体移到左/右侧（仿 VS Code）；位置与隐藏项持久化。 -->
       <div class="vs-left" :style="leftStyle">
-        <!-- 左栏 tab：默认「文件」（目录树），可切「搜索」（全局内容搜索，点击命中行跳转） -->
-        <div class="vs-left-tabs">
-          <button class="vs-left-tab" :class="{ active: leftTab === 'files' }" :title="t('vsLeftTabFiles')" @click="leftTab = 'files'">
-            <icon name="folder" :size="12" />
-            <span>{{ t("vsLeftTabFiles") }}</span>
-          </button>
-          <!-- 未打开项目目录时搜索不可用（置灰禁用）；title 说明原因 -->
+        <div
+          class="vs-activity"
+          :class="{ btm: vsState.activityBar.position === 'bottom' }"
+          @contextmenu.prevent="openActBarMenu"
+        >
           <button
-            class="vs-left-tab"
-            :class="{ active: leftTab === 'search' }"
-            :disabled="!vsState.projectDir"
-            :title="vsState.projectDir ? t('vsLeftTabSearch') : t('vsSearchNeedsProject')"
-            @click="leftTab = 'search'"
+            v-for="v in actBarItems"
+            :key="v.id"
+            class="vs-act-btn"
+            :class="{ active: leftTab === v.id }"
+            :disabled="v.disabled"
+            :title="v.title"
+            @click="leftTab = v.id"
+            @contextmenu.prevent.stop="openActViewMenu(v, $event)"
           >
-            <icon name="search" :size="12" />
-            <span>{{ t("vsLeftTabSearch") }}</span>
-          </button>
-          <!-- 右栏被自动折叠时的手动恢复入口（点击文件也会自动展开编辑区） -->
-          <button v-if="rightFolded" class="vs-left-tab vs-unfold-btn" :title="t('vsUnfoldEditor')" @click="rightFolded = false">
-            <icon name="code" :size="12" />
-            <span>{{ t("vsUnfoldEditor") }}</span>
+            <icon v-if="hasIcon(v.icon ?? '')" :name="v.icon ?? ''" :size="17" />
+            <span v-else class="vs-act-letter">{{ v.title.slice(0, 1) }}</span>
           </button>
         </div>
-        <ProjectTree
-          v-show="leftTab === 'files'"
-          ref="treeRef"
-          :root="vsState.projectDir"
-          :active-path="vsState.activeTab"
-          @open-file="openFile"
-          @file-removed="onFileRemoved"
-          @file-renamed="onFileRenamed"
-          @project-missing="handleProjectMissing"
-          @remove-project="removeProject"
-        />
-        <!-- 全局内容搜索：按文件分组展示命中行，点击打开文件并跳到对应行 -->
-        <VSSearchPanel v-if="leftTab === 'search'" :project-dir="vsState.projectDir || ''" @open="onSearchOpen" />
-        <!-- Git 提交记录栏：非 git 仓库时整个不渲染；文件详情按钮 → 右栏展示 diff -->
-        <vs-git-bar @open-diff="showDiffPane" />
+        <!-- 内容区：头部是项目目录（SSH 远端显示「主机名 · 路径」），下面是当前视图 -->
+        <div class="vs-left-main">
+          <div class="vs-left-head" :title="vsState.projectDir ?? t('vsNoProject')">
+            <span class="vs-left-head-txt">{{ projectLabel }}</span>
+            <button class="vs-left-head-open" :title="t('vsOpenFolder')" @click="selectProject">
+              <icon name="folderOpen" :size="13" />
+            </button>
+          </div>
+          <ProjectTree
+            v-show="leftTab === 'files'"
+            ref="treeRef"
+            :root="vsState.projectDir"
+            :active-path="vsState.activeTab"
+            @open-file="openFile"
+            @file-removed="onFileRemoved"
+            @file-renamed="onFileRenamed"
+            @project-missing="handleProjectMissing"
+            @remove-project="removeProject"
+          />
+          <!-- 全局内容搜索：按文件分组展示命中行，点击打开文件并跳到对应行 -->
+          <VSSearchPanel v-if="leftTab === 'search'" :project-dir="vsState.projectDir || ''" @open="onSearchOpen" />
+          <!-- Git 提交记录视图（原左栏底部横条，现作为独立视图占满内容区；非 git 仓库时组件自隐藏） -->
+          <vs-git-bar v-show="leftTab === 'git'" class="vs-git-view" @open-diff="showDiffPane" />
+          <!-- 非 Git/SVN 仓库（分支探测无结果）时给空态提示，避免 Git 视图一片空白 -->
+          <div v-if="leftTab === 'git' && !statusBranch" class="fw-empty vs-git-empty">{{ t("vsGitNoRepo") }}</div>
+          <!-- 外部插件扩展视图：动态挂载（mount(el, ctx)，框架无关） -->
+          <div v-if="activeExtView" ref="extHostRef" class="vs-ext-view"></div>
+        </div>
       </div>
+      <!-- 右栏被折叠时：分隔条与右栏隐藏，左栏右缘出现竖排把手，点击展开编辑区 -->
+      <button v-if="rightFolded" class="vs-unfold-handle" :title="t('vsUnfoldEditor')" @click="rightFolded = false">
+        <icon name="chevronRight" :size="12" />
+      </button>
       <!-- 拖拽分隔条 -->
       <div
         class="vs-split"
@@ -127,8 +111,13 @@
             <GitDiffView :lines="diffPane.lines" :empty="t('gitDiffEmpty')" />
           </div>
           <div v-else-if="!vsState.activeTab" class="vs-empty">
+            <icon class="vs-empty-ico" name="code" :size="44" />
+            <div class="vs-empty-title">{{ t("vsEmptyTitle") }}</div>
             <div class="vs-empty-hint">{{ t("vsEmptyHint") }}</div>
-            <button class="vs-btn" @click="selectProject">{{ t("vsOpenFolder") }}</button>
+            <div class="vs-empty-actions">
+              <button class="vs-btn" @click="selectProject">{{ t("vsOpenFolder") }}</button>
+              <button class="vs-btn" @click="openClone('git')">{{ t("menuCloneGit") }}</button>
+            </div>
           </div>
           <div v-else-if="activeLoading" class="vs-loading-big">
             <span class="vs-loading-spin" aria-hidden="true"></span>
@@ -156,8 +145,17 @@
             @contextmenu="onEditorMenu"
           />
         </div>
-        <!-- 状态栏：行/列 + 编码 + 行尾 + 语言（编码与行尾可点击切换，对齐 VS Code） -->
+        <!-- 状态栏：左组（分支 / 只读 / 冲突）+ 右组（行列 / 编码 / 行尾 / 语言），对齐 VS Code -->
         <div class="vs-status">
+          <button
+            v-if="statusBranch"
+            class="vs-status-seg vs-status-btn"
+            :title="vsState.projectDir ?? ''"
+            @click="leftTab = 'git'"
+          >
+            <icon name="git" :size="11" />
+            {{ statusBranch }}
+          </button>
           <span v-if="readonlyActive" class="vs-status-readonly">{{ t("vsReadonly") }}</span>
           <!-- 外部改动冲突：本地有未保存改动且磁盘已被改写；点击可选择以磁盘版本覆盖 -->
           <button v-if="activeConflict" class="vs-status-conflict" @click="resolveConflict">
@@ -187,24 +185,40 @@
       :y="fileMenuY"
       @close="fileMenuOpen = false"
     />
-    <!-- 顶栏「最近项目」菜单：列表限高缩短、底部「打开文件夹…」固定不滚动 -->
-    <ContextMenu
-      v-if="recentMenuOpen"
-      :items="recentMenuItems"
-      :x="recentMenuX"
-      :y="recentMenuY"
-      max-height="min(42vh, 330px)"
-      :footer-items="recentFooterItems"
-      @close="recentMenuOpen = false"
-    >
-      <template #header>
-        <span class="vs-recent-title">{{ t("vsRecentProjects") }}</span>
-        <button class="vs-recent-clear" :disabled="vsState.recentProjects.length === 0" :title="t('vsRecentClearAll')" @click="confirmClearAll">
-          <icon name="trash" :size="13" />
-          <span>{{ t("vsRecentClearAll") }}</span>
-        </button>
-      </template>
-    </ContextMenu>
+    <!-- 快速打开浮层：居中（上 12%），backdrop 点击 / Esc 关闭，方向键 + 回车选择（对齐 VS Code Quick Open） -->
+    <div v-if="searchOpen" class="vs-quickopen-backdrop" @mousedown.self="closeSearch">
+      <div class="vs-quickopen" @mousedown.stop>
+        <input
+          ref="searchInputRef"
+          v-model="searchQ"
+          class="vs-quickopen-input"
+          :placeholder="indexLoading ? t('vsSearchIndexing') : t('vsQuickOpenPlaceholder')"
+          @input="onSearchInput"
+          @keydown.down.prevent="moveSearch(1)"
+          @keydown.up.prevent="moveSearch(-1)"
+          @keydown.enter.prevent="openSearchResult()"
+          @keydown.esc.prevent="closeSearch"
+        />
+        <div class="vs-quickopen-list">
+          <template v-if="searchResults.length > 0">
+            <div
+              v-for="(r, i) in searchResults"
+              :key="r.abs"
+              class="vs-search-row"
+              :class="{ active: i === searchActive }"
+              :title="r.abs"
+              @mousedown.prevent="openSearchResult(i)"
+              @mouseenter="searchActive = i"
+            >
+              <span class="vs-search-name">{{ r.name }}</span>
+              <span class="vs-search-dir">{{ r.dir }}</span>
+            </div>
+            <div v-if="indexTruncated" class="vs-search-note">{{ t("vsSearchTruncated") }}</div>
+          </template>
+          <div v-else-if="searchQ.trim() && !indexLoading" class="vs-search-note">{{ t("vsSearchNoResult") }}</div>
+        </div>
+      </div>
+    </div>
     <!-- 状态栏：编码选择器 -->
     <ContextMenu
       v-if="encMenuOpen"
@@ -223,6 +237,8 @@
     />
     <!-- 编辑器右键菜单（格式化内容等） -->
     <ContextMenu v-if="edMenuOpen" :items="edMenuItems" :x="edMenuX" :y="edMenuY" @close="edMenuOpen = false" />
+    <!-- Activity Bar 右键菜单：单个视图（隐藏…）或空白处（显示清单 + 置顶/置底 + 侧栏左右） -->
+    <ContextMenu v-if="actMenuOpen" :items="actMenuItems" :x="actMenuX" :y="actMenuY" @close="actMenuOpen = false" />
 
     <!-- 全局确认 / 输入弹窗（project tree 的 confirmDialog 渲染所需） -->
     <confirm-dialog />
@@ -271,7 +287,7 @@ const indexPrefetched = new Set<string>();
 </script>
 
 <script setup lang="ts">
-import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, watchEffect } from "vue";
 import ProjectTree from "./ProjectTree.vue";
 import TabBar, { type TabInfo } from "./TabBar.vue";
 import CodeEditor from "./CodeEditor.vue";
@@ -282,6 +298,7 @@ import GitDiffView from "../git/GitDiffView.vue";
 import Icon from "../../common/Icon.vue";
 import ConfirmDialog from "../../common/ConfirmDialog.vue";
 import ContextMenu from "../../common/ContextMenu.vue";
+import { useContextMenu } from "../../../composables/ui/useContextMenu";
 import type { EolStyle, MenuItem, TextEncoding } from "../../../../shared/types";
 import {
   VS_STORE_KEY,
@@ -294,13 +311,16 @@ import {
 } from "../../../stores/vscode";
 import * as api from "../../../composables/core/useApi";
 import { clearPendingEditorProject, floatTab, openNewEditorTab, takePendingEditorFile, takePendingEditorProject } from "../../../composables/core/sidebarRight";
-import { confirmDialog } from "../../../composables/core/dialog";
+import { confirmDialog, choiceDialog } from "../../../composables/core/dialog";
 import { toast, openNewTerminal } from "../../../stores/workbench";
 import { t } from "../../../composables/core/i18n";
 import { openCloneDialog } from "../../../composables/core/cloneDialog";
 import { clearWatchPaths, onMtimeChange, setWatchPaths } from "../../../composables/core/push";
 import { useTheme } from "../../../composables/core/theme";
-import { prefs } from "../../../composables/core/settings";
+import { prefs, savePrefs } from "../../../composables/core/settings";
+import { diffLines } from "../../../composables/domain/lineDiff";
+import { hasIcon } from "../../../composables/ui/icons";
+import { listActivityViews, ACTIVITY_API_VERSION, type ActivityContext } from "../../../stores/activityBar";
 import { languageLabelFor } from "./langResolver";
 import { sshParentOf, sshProjectLabelOf } from "../../../stores/ssh";
 
@@ -383,15 +403,36 @@ const saveAsDir = ref<string | null>(null);
 const saveAsName = ref("");
 /** 目录树实例（挂载后显式重建一次，兜住「切回面板内容为空」）。 */
 const treeRef = ref<InstanceType<typeof ProjectTree> | null>(null);
-/** 左栏 tab：'files' = 目录树（默认），'search' = 全局内容搜索。 */
-const leftTab = ref<"files" | "search">("files");
+/** 左栏视图（Activity Bar 图标条切换）：'files' / 'search' / 'git' 为内置，其余为外部插件注册的 id。 */
+const leftTab = ref<string>("files");
 
-// 项目目录被清空（关闭项目 / 空白窗口）时，若正停在搜索 tab 则退回文件 tab（搜索按钮已禁用）。
+// 项目目录被清空（关闭项目 / 空白窗口）时，若停在搜索 / Git 视图则退回文件视图（对应按钮已禁用）。
 watch(
   () => vsState.projectDir,
   (dir) => {
-    if (!dir && leftTab.value === "search") leftTab.value = "files";
+    if (!dir && leftTab.value !== "files") leftTab.value = "files";
   },
+);
+
+/* ---------- 状态栏分支名（git 优先，svn 兜底；与 VSGitBar 同一探测口径） ---------- */
+const statusBranch = ref<string>("");
+watch(
+  () => vsState.projectDir,
+  async (dir) => {
+    statusBranch.value = "";
+    if (!dir) return;
+    try {
+      const p = await api.gitPanel(dir);
+      if (p.inRepo && p.repo) statusBranch.value = p.branch || "HEAD";
+      else {
+        const s = await api.svnInfo(dir);
+        if (s.inRepo && s.svnAvailable) statusBranch.value = s.revision ? `r${s.revision}` : "svn";
+      }
+    } catch {
+      /* 探测失败（离线等）不在状态栏显示分支 */
+    }
+  },
+  { immediate: true },
 );
 
 /** 左栏搜索结果点击：相对路径 → 绝对路径后打开并跳行。 */
@@ -517,15 +558,15 @@ const encodingLabel = computed<string>(() => {
   return b.hasBom && supportsBom ? `${base} BOM` : base;
 });
 
-const encMenuOpen = ref(false);
-const encMenuX = ref(0);
-const encMenuY = ref(0);
+// 四组菜单（文件/编码/行尾/编辑器）的开关与坐标统一收敛到公共 composable，
+// 仅条目由各自的 computed 生成；锚定在元素矩形上的用 openMenuAt。
+const {
+  cmOpen: encMenuOpen, cmX: encMenuX, cmY: encMenuY, openMenuAt: openEncMenuAt,
+} = useContextMenu();
 /** 状态栏菜单锚定在被点的段上；ContextMenu 会自行把菜单收敛进视口。 */
 function openEncMenu(e: MouseEvent): void {
   const r = (e.currentTarget as HTMLElement | null)?.getBoundingClientRect();
-  encMenuX.value = r?.left ?? 0;
-  encMenuY.value = r?.top ?? 0;
-  encMenuOpen.value = true;
+  openEncMenuAt(r?.left ?? 0, r?.top ?? 0);
 }
 const encMenuItems = computed<MenuItem[]>(() => {
   const b = activeBuffer.value;
@@ -537,14 +578,12 @@ const encMenuItems = computed<MenuItem[]>(() => {
   }));
 });
 
-const eolMenuOpen = ref(false);
-const eolMenuX = ref(0);
-const eolMenuY = ref(0);
+const {
+  cmOpen: eolMenuOpen, cmX: eolMenuX, cmY: eolMenuY, openMenuAt: openEolMenuAt,
+} = useContextMenu();
 function openEolMenu(e: MouseEvent): void {
   const r = (e.currentTarget as HTMLElement | null)?.getBoundingClientRect();
-  eolMenuX.value = r?.left ?? 0;
-  eolMenuY.value = r?.top ?? 0;
-  eolMenuOpen.value = true;
+  openEolMenuAt(r?.left ?? 0, r?.top ?? 0);
 }
 const eolMenuItems = computed<MenuItem[]>(() => {
   const b = activeBuffer.value;
@@ -586,17 +625,15 @@ async function reopenWithEncoding(encoding: TextEncoding, hasBom: boolean): Prom
 /* ---------- 顶栏「文件」菜单 ---------- */
 
 const fileBtnRef = ref<HTMLElement | null>(null);
-const fileMenuOpen = ref(false);
-const fileMenuX = ref(0);
-const fileMenuY = ref(0);
+const {
+  cmOpen: fileMenuOpen, cmX: fileMenuX, cmY: fileMenuY, openMenuAt: openFileMenuAt,
+} = useContextMenu();
 
 function openFileMenu(): void {
   const r = fileBtnRef.value?.getBoundingClientRect();
-  fileMenuX.value = r?.left ?? 0;
-  fileMenuY.value = (r?.bottom ?? 0) + 2;
   // 菜单打开时其全屏 backdrop 会盖住整个面板，点击按钮区域实际是「点 backdrop 关闭」，
   // 所以这里只需负责打开。
-  fileMenuOpen.value = true;
+  openFileMenuAt(r?.left ?? 0, (r?.bottom ?? 0) + 2);
 }
 
 /** 当前文件是否可保存（非只读、非二进制、有缓冲区）。 */
@@ -606,6 +643,40 @@ const dirtyPaths = computed<string[]>(() => vsState.openTabs.filter((p) => buffe
 
 const fileMenuItems = computed<MenuItem[]>(() => [
   { label: t("vsOpenFolder"), icon: "folderOpen", onClick: selectProject },
+  {
+    // 新建文件 / 新建文件夹：落在项目根（目录树中也可在任意目录右键新建）。
+    label: t("vsNewFile"),
+    icon: "fileOut",
+    disabled: !vsState.projectDir,
+    onClick: () => treeRef.value?.createFileAtRoot(),
+  },
+  {
+    label: t("vsNewFolder"),
+    icon: "folder",
+    disabled: !vsState.projectDir,
+    onClick: () => treeRef.value?.createFolderAtRoot(),
+  },
+  {
+    // 打开最近项目：子菜单列出历史记录（当前项目打勾并置灰），底部「清空全部」。
+    // 取代旧的顶栏独立「最近项目」按钮（顶栏瘦身）。
+    label: t("vsMenuRecent"),
+    icon: "clock",
+    disabled: vsState.recentProjects.length === 0,
+    children: [
+      ...vsState.recentProjects.map((p) => ({
+        label: basename(p) || p,
+        checked: p === vsState.projectDir,
+        disabled: p === vsState.projectDir,
+        onClick: () => void onPickFolder(p),
+      })),
+      { separator: true },
+      { label: t("vsRecentClearAll"), icon: "trash", disabled: vsState.recentProjects.length === 0, onClick: () => void confirmClearAll() },
+    ],
+  },
+  { separator: true },
+  // 克隆 / 检出仓库：目标默认「项目目录的父目录」，完成后以 onPickFolder 打开（含未保存确认）。
+  { label: t("menuCloneGit"), icon: "git", onClick: () => void openClone("git") },
+  { label: t("menuCloneSvn"), icon: "svn", onClick: () => void openClone("svn") },
   { separator: true },
   // 多窗口：在当前分栏的 tab 条上**平级**再开一个编辑器 / 把本编辑器弹出为浮窗。
   { label: t("vsNewWindow"), icon: "panellayout", onClick: newEditorWindow },
@@ -632,50 +703,16 @@ const fileMenuItems = computed<MenuItem[]>(() => [
     disabled: dirtyPaths.value.length === 0,
     onClick: () => void saveAll(),
   },
+  {
+    // 查看本地改动：未保存缓冲区 vs 磁盘内容，以伪标签 diff 展示（host 无法 diff 内存内容，客户端计算）。
+    label: t("vsMenuLocalDiff"),
+    icon: "fileOut",
+    disabled: !(activeBuffer.value?.dirty && !activeBuffer.value.binary),
+    onClick: () => void showLocalDiff(),
+  },
 ]);
 
-/* ---------- 顶栏「最近项目」菜单 ---------- */
-
-const recentBtnRef = ref<HTMLElement | null>(null);
-const recentMenuOpen = ref(false);
-const recentMenuX = ref(0);
-const recentMenuY = ref(0);
-
-/** 路径尾部片段（菜单右侧提示：从左侧截断，保留辨识度最高的尾部）。 */
-function shortenDir(p: string, max = 32): string {
-  if (!p) return "";
-  return p.length <= max ? p : `…${p.slice(p.length - max + 1)}`;
-}
-
-/**
- * 最近项目菜单：列出打开过的项目目录（当前项目标记并置灰），每条记录右侧带「✕ 单条清除」按钮；
- * 菜单头部右侧另有「全部清除」按钮（见模板 #header 插槽）。「打开文件夹…」固定在底部（footerItems），
- * 不随列表滚动、始终可见（见模板 :footer-items）。单条清除 / 全部清除均先关下拉再弹确认框。
- * 切换复用 `onPickFolder`——它已经带有未保存改动的确认与标签清理。
- */
-const recentMenuItems = computed<MenuItem[]>(() =>
-  vsState.recentProjects.map((p) => ({
-    label: basename(p) || p,
-    hint: shortenDir(dirnameOf(p)),
-    checked: p === vsState.projectDir,
-    disabled: p === vsState.projectDir,
-    onClick: () => void onPickFolder(p),
-    trailing: {
-      icon: "close",
-      title: t("vsRecentForgetTitle"),
-      onClick: () => void forgetRecent(p),
-    },
-  })),
-);
-
-/** 固定在菜单底部、始终可见，不随最近项目列表滚动。 */
-const recentFooterItems: MenuItem[] = [
-  { label: t("vsOpenFolder"), icon: "folderOpen", onClick: selectProject },
-  { separator: true },
-  // 克隆 / 检出仓库：目标默认「项目目录的父目录」，完成后以 onPickFolder 打开（含未保存确认）。
-  { label: t("menuCloneGit"), icon: "git", onClick: () => void openClone("git") },
-  { label: t("menuCloneSvn"), icon: "svn", onClick: () => void openClone("svn") },
-];
+/* ---------- 「最近项目」（已并入顶栏文件菜单的子菜单） ---------- */
 
 /**
  * 打开克隆 / 检出弹窗（文件编辑器入口）。
@@ -698,11 +735,10 @@ function openClone(kind: "git" | "svn"): void {
 }
 
 /**
- * 头部「全部清除」：先关掉下拉，再弹确认框；确认才清空全部记录并落盘。
- * 关下拉在弹框之前，避免确认框与菜单浮层叠在一起。
+ * 「清空全部最近项目」：弹确认框，确认才清空全部记录并落盘。
+ * 入口在文件菜单的「打开最近」子菜单底部。
  */
 async function confirmClearAll(): Promise<void> {
-  recentMenuOpen.value = false;
   if (vsState.recentProjects.length === 0) return;
   const ok = await confirmDialog({
     title: t("vsRecentClearAllTitle"),
@@ -711,23 +747,6 @@ async function confirmClearAll(): Promise<void> {
   if (ok) {
     store.clearRecentProjects();
     toast("ok", t("vsRecentCleared"));
-  }
-}
-
-/**
- * 单条清除某个最近项目记录：先关下拉，再弹确认框；确认才将该记录从列表移除并落盘。
- * 关下拉在弹框之前，避免确认框被菜单浮层（高 z-index）遮住。
- */
-async function forgetRecent(p: string): Promise<void> {
-  recentMenuOpen.value = false;
-  const name = basename(p) || p;
-  const ok = await confirmDialog({
-    title: t("vsRecentForgetTitle"),
-    message: t("vsRecentForgetConfirm", { name }),
-  });
-  if (ok) {
-    store.forgetProject(p);
-    toast("ok", t("vsRecentForgot", { name }));
   }
 }
 
@@ -770,15 +789,7 @@ function forgetAndClose(dir: string): void {
   }
 }
 
-function openRecentMenu(): void {
-  const r = recentBtnRef.value?.getBoundingClientRect();
-  // 传按钮右缘作 x：ContextMenu 会自行向左收进视口，视觉上等价于右对齐。
-  recentMenuX.value = r?.right ?? 0;
-  recentMenuY.value = (r?.bottom ?? 0) + 2;
-  recentMenuOpen.value = true;
-}
-
-/* ---------- 快速打开（按文件名搜索项目内文件，Ctrl+P） ---------- */
+/* ---------- 快速打开（居中浮层：按文件名搜索项目内文件，Ctrl+P） ---------- */
 
 /** 结果条数上限（够用即可，避免长列表拖慢渲染）。 */
 const SEARCH_LIMIT = 50;
@@ -870,24 +881,22 @@ async function ensureFileIndex(): Promise<void> {
   }
 }
 
-function onSearchFocus(): void {
+/** 打开快速打开浮层：建立索引 + 聚焦输入框（顶栏假输入框点击 / Ctrl+P 两个入口）。 */
+function openQuickOpen(): void {
+  if (!vsState.projectDir) return;
   searchOpen.value = true;
   searchActive.value = 0;
   void ensureFileIndex();
+  void nextTick(() => searchInputRef.value?.focus());
 }
 
 function onSearchInput(): void {
-  searchOpen.value = true;
   searchActive.value = 0;
-}
-
-function onSearchBlur(): void {
-  searchOpen.value = false;
 }
 
 function closeSearch(): void {
   searchOpen.value = false;
-  searchInputRef.value?.blur();
+  searchQ.value = "";
 }
 
 /** 上下键移动高亮（循环）。 */
@@ -910,9 +919,7 @@ function openSearchResult(index?: number): void {
 
 /* ---------- 编辑器右键菜单 ---------- */
 const editorRef = ref<InstanceType<typeof CodeEditor> | null>(null);
-const edMenuOpen = ref(false);
-const edMenuX = ref(0);
-const edMenuY = ref(0);
+const { cmOpen: edMenuOpen, cmX: edMenuX, cmY: edMenuY, openMenuAt: openEdMenuAt } = useContextMenu();
 
 const edMenuItems = computed<MenuItem[]>(() => [
   {
@@ -931,12 +938,23 @@ const edMenuItems = computed<MenuItem[]>(() => [
   },
   { label: t("vsSaveAs"), icon: "save", disabled: !canSave.value, onClick: () => saveAs() },
   { label: t("vsSaveAll"), disabled: dirtyPaths.value.length === 0, onClick: () => void saveAll() },
+  { separator: true },
+  // Minimap（右侧块状缩略渲染）开关：与设置弹窗中的开关同一偏好，即时生效。
+  {
+    label: t("vsMinimap"),
+    checked: prefs.vsMinimap,
+    onClick: () => {
+      prefs.vsMinimap = !prefs.vsMinimap;
+      savePrefs();
+    },
+  },
+  { separator: true },
+  // 编辑技巧提示（不可点击）：多光标是 CodeMirror 原生能力，零成本提示给用户。
+  { label: t("vsMultiCursorHint"), disabled: true },
 ]);
 
 function onEditorMenu(pos: { x: number; y: number }): void {
-  edMenuX.value = pos.x;
-  edMenuY.value = pos.y;
-  edMenuOpen.value = true;
+  openEdMenuAt(pos.x, pos.y);
 }
 
 /**
@@ -1196,11 +1214,212 @@ function showDiffPane(p: { title: string; lines: string[] }): void {
   diffPane.value = p;
 }
 
+/**
+ * 查看本地改动：重读磁盘内容与未保存缓冲区做行级 diff（客户端 LCS，见 domain/lineDiff），
+ * 以伪标签 diff 视图展示 —— 对齐 VS Code 的「与磁盘版本对比」。
+ */
+async function showLocalDiff(): Promise<void> {
+  const path = vsState.activeTab;
+  const b = path ? buffers[path] : undefined;
+  if (!path || !b || b.binary) return;
+  try {
+    const disk = await api.readFile(path);
+    const r = diffLines(disk.content, b.content);
+    showDiffPane({
+      title: `${basename(path)} · ${t("vsLocalDiffTitle")}`,
+      lines: r ? r.lines : [t("vsLocalDiffTooBig")],
+    });
+  } catch (e) {
+    toast("error", (e as Error).message);
+  }
+}
+
+/* ---------- 自动保存（设置开关；编辑停顿 1 秒后静默写入） ---------- */
+const AUTO_SAVE_DELAY_MS = 1000;
+const autoSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleAutoSave(path: string): void {
+  if (!prefs.autoSave) return;
+  const t0 = autoSaveTimers.get(path);
+  if (t0) clearTimeout(t0);
+  autoSaveTimers.set(
+    path,
+    setTimeout(() => {
+      autoSaveTimers.delete(path);
+      if (buffers[path]?.dirty) void savePath(path, { quiet: true });
+    }, AUTO_SAVE_DELAY_MS),
+  );
+}
+
+function cancelAutoSave(path: string): void {
+  const t0 = autoSaveTimers.get(path);
+  if (t0) clearTimeout(t0);
+  autoSaveTimers.delete(path);
+}
+
+/* ---------- 外部插件扩展视图（Activity Bar 注册表消费，见 stores/activityBar.ts） ---------- */
+const extViews = computed(listActivityViews); // 注册表 ref → 注册/注销（含热更新）会触发重渲染
+const extHostRef = ref<HTMLElement | null>(null);
+/** 当前激活的扩展视图（leftTab 命中插件 id 时）。 */
+const activeExtView = computed(() => extViews.value.find((v) => v.id === leftTab.value));
+
+/* ---------- Activity Bar 右键控制（隐藏/显示视图、图标置顶/置底、侧栏左/右侧，仿 VS Code） ---------- */
+interface ActBarView {
+  id: string;
+  title: string;
+  icon?: string;
+  disabled?: boolean;
+}
+/** Activity Bar 上的**全部**视图（内置 + 插件；插件按 when() 过滤），供渲染与右键菜单共用。 */
+const allActViews = computed<ActBarView[]>(() => [
+  { id: "files", title: t("vsLeftTabFiles"), icon: "folder" },
+  { id: "search", title: t("vsLeftTabSearch"), icon: "search", disabled: !vsState.projectDir },
+  { id: "git", title: t("vsLeftTabGit"), icon: "git", disabled: !vsState.projectDir },
+  ...extViews.value.filter((v) => !v.when || v.when(extCtx)).map((v) => ({ id: v.id, title: v.title, icon: v.icon })),
+]);
+/** 实际渲染的图标：全部视图去掉被隐藏的。 */
+const actBarItems = computed<ActBarView[]>(() => allActViews.value.filter((v) => !vsState.activityBar.hidden.includes(v.id)));
+
+function hideActView(id: string): void {
+  if (!vsState.activityBar.hidden.includes(id)) vsState.activityBar.hidden.push(id);
+  // 隐藏的正是当前视图：退回文件视图（files 自身被隐藏时内容区仍显示树，仅图标消失）。
+  if (leftTab.value === id) leftTab.value = "files";
+  persistVSCode();
+}
+function showActView(id: string): void {
+  vsState.activityBar.hidden = vsState.activityBar.hidden.filter((x) => x !== id);
+  persistVSCode();
+}
+function toggleActView(id: string): void {
+  if (vsState.activityBar.hidden.includes(id)) showActView(id);
+  else hideActView(id);
+}
+
+const actMenuOpen = ref(false);
+const actMenuX = ref(0);
+const actMenuY = ref(0);
+/** 'view' = 在某个图标上右键；'bar' = 图标条空白处右键（完整清单）。 */
+const actMenuMode = ref<"view" | "bar">("bar");
+const actMenuTarget = ref<ActBarView | null>(null);
+
+/** 图标条位置切换：图标组对齐顶部 / 底部。 */
+const actPositionItem = computed<MenuItem>(() => ({
+  label: vsState.activityBar.position === "top" ? t("vsActBarBottom") : t("vsActBarTop"),
+  icon: "panellayout",
+  onClick: () => {
+    vsState.activityBar.position = vsState.activityBar.position === "top" ? "bottom" : "top";
+    persistVSCode();
+  },
+}));
+/** 侧栏整体左/右侧切换（仿 VS Code 的 Side Bar 位置）。 */
+const actSideItem = computed<MenuItem>(() => ({
+  label: vsState.sidebarSide === "left" ? t("vsSideRight") : t("vsSideLeft"),
+  icon: "float",
+  onClick: () => {
+    vsState.sidebarSide = vsState.sidebarSide === "left" ? "right" : "left";
+    persistVSCode();
+  },
+}));
+
+const actMenuItems = computed<MenuItem[]>(() => {
+  if (actMenuMode.value === "view" && actMenuTarget.value) {
+    const v = actMenuTarget.value;
+    return [
+      { label: t("vsActHide", { name: v.title }), icon: "close", onClick: () => hideActView(v.id) },
+      { separator: true },
+      actPositionItem.value,
+      actSideItem.value,
+    ];
+  }
+  return [
+    ...allActViews.value.map((v) => ({
+      label: v.title,
+      icon: v.icon ?? "",
+      checked: !vsState.activityBar.hidden.includes(v.id),
+      onClick: () => toggleActView(v.id),
+    })),
+    { separator: true },
+    actPositionItem.value,
+    actSideItem.value,
+  ];
+});
+
+function openActViewMenu(v: ActBarView, e: MouseEvent): void {
+  const r = (e.currentTarget as HTMLElement | null)?.getBoundingClientRect();
+  actMenuX.value = r?.right ?? e.clientX;
+  actMenuY.value = r?.bottom ?? e.clientY;
+  actMenuMode.value = "view";
+  actMenuTarget.value = v;
+  actMenuOpen.value = true;
+}
+function openActBarMenu(e: MouseEvent): void {
+  actMenuX.value = e.clientX;
+  actMenuY.value = e.clientY;
+  actMenuMode.value = "bar";
+  actMenuTarget.value = null;
+  actMenuOpen.value = true;
+}
+
+const projectListeners = new Set<(dir: string | null) => void>();
+const themeListeners = new Set<(t: "dark" | "light") => void>();
+watch(
+  () => vsState.projectDir,
+  (d) => projectListeners.forEach((f) => f(d)),
+);
+watch(theme, (t) => themeListeners.forEach((f) => f(t)));
+
+/** 传给插件的上下文门面：getter 保证插件读到的 projectDir / theme 永远是最新值。 */
+const extCtx: ActivityContext = {
+  apiVersion: ACTIVITY_API_VERSION,
+  get projectDir() {
+    return vsState.projectDir;
+  },
+  get theme() {
+    return theme.value;
+  },
+  onProjectChange(fn) {
+    projectListeners.add(fn);
+    fn(vsState.projectDir);
+    return () => projectListeners.delete(fn);
+  },
+  onThemeChange(fn) {
+    themeListeners.add(fn);
+    fn(theme.value);
+    return () => themeListeners.delete(fn);
+  },
+  openFile: (path, opts) => openFile(path, opts),
+  openDiff: (title, lines) => showDiffPane({ title, lines }),
+  toast: (level, msg) => toast(level, msg),
+};
+
+// 切换视图 / 注册表变化 / when() 结论翻转时重挂载；离开视图（含面板卸载）走插件的清理函数。
+watchEffect(
+  (onCleanup) => {
+    const v = activeExtView.value;
+    const el = extHostRef.value;
+    if (!v || !el || (v.when && !v.when(extCtx))) return;
+    const cleanup = v.mount(el, extCtx);
+    onCleanup(() => {
+      if (typeof cleanup === "function") {
+        try {
+          cleanup();
+        } catch {
+          /* 插件清理抛错不阻断面板 */
+        }
+      }
+      el.replaceChildren();
+    });
+  },
+  { flush: "post" },
+);
+
 function onEditorChange(value: string): void {
   const b = vsState.activeTab ? buffers[vsState.activeTab] : undefined;
   if (!b) return;
   b.content = value;
   b.dirty = true;
+  // 自动保存（设置开关）：编辑停顿 1 秒后静默写入磁盘。
+  if (vsState.activeTab) scheduleAutoSave(vsState.activeTab);
 }
 
 function onCursor(line: number, col: number): void {
@@ -1437,12 +1656,27 @@ async function closeTab(path: string): Promise<void> {
   }
   const b = buffers[path];
   if (b?.dirty) {
-    const ok = await confirmDialog({ title: t("vsUnsavedTitle"), message: t("vsUnsavedMsg") });
-    if (!ok) return;
+    // VS Code 式三选：保存并关闭 / 不保存关闭 / 取消。保存失败（冲突被取消）时不关闭，内容不丢。
+    const c = await choiceDialog({
+      title: t("vsUnsavedTitle"),
+      message: t("vsUnsavedMsg"),
+      choices: [
+        { id: "save", text: t("vsCloseSave"), primary: true },
+        { id: "discard", text: t("vsCloseDiscard") },
+        { id: "cancel", text: t("cancel") },
+      ],
+    });
+    if (c === "save") {
+      const ok = await savePath(path, { quiet: true });
+      if (!ok) return;
+    } else if (c !== "discard") {
+      return;
+    }
   }
   delete buffers[path];
   delete errors[path];
   delete docRevs[path];
+  cancelAutoSave(path);
   // 同时丢弃该文件的编辑器文档缓存：重开时按磁盘内容重建，避免复用陈旧状态。
   clearEditorState(store.slot, path);
   vsState.openTabs = vsState.openTabs.filter((p) => p !== path);
@@ -1468,23 +1702,36 @@ async function closeSaveTab(path: string): Promise<void> {
  */
 async function closeMany(paths: string[]): Promise<void> {
   const dirty = paths.filter((p) => buffers[p]?.dirty);
+  const closeOne = (p: string): void => {
+    delete buffers[p];
+    delete errors[p];
+    delete docRevs[p];
+    cancelAutoSave(p);
+    clearEditorState(store.slot, p);
+    vsState.openTabs = vsState.openTabs.filter((q) => q !== p);
+  };
   if (dirty.length > 1) {
-    const ok = await confirmDialog({
+    // 多个脏标签：一次三选（全部保存并关闭 / 全部不保存关闭 / 取消），而不是逐个弹窗。
+    const c = await choiceDialog({
       title: t("vsUnsavedTitle"),
       message: t("vsCloseManyMsg", { n: String(dirty.length) }),
+      choices: [
+        { id: "save", text: t("vsCloseSaveAll"), primary: true },
+        { id: "discard", text: t("vsCloseDiscardAll") },
+        { id: "cancel", text: t("cancel") },
+      ],
     });
-    if (!ok) return;
+    if (c !== "save" && c !== "discard") return;
+    // 保存模式：保存失败的（冲突被取消）保留标签，不丢内容。
     const failed = new Set<string>();
-    for (const p of dirty) {
-      if (!(await savePath(p, { quiet: true }))) failed.add(p);
+    if (c === "save") {
+      for (const p of dirty) {
+        if (!(await savePath(p, { quiet: true }))) failed.add(p);
+      }
     }
     for (const p of paths) {
-      if (failed.has(p)) continue;
-      delete buffers[p];
-      delete errors[p];
-      delete docRevs[p];
-      clearEditorState(store.slot, p);
-      vsState.openTabs = vsState.openTabs.filter((q) => q !== p);
+      if (c === "save" && failed.has(p)) continue;
+      closeOne(p);
     }
     if (vsState.activeTab && !vsState.openTabs.includes(vsState.activeTab)) {
       vsState.activeTab = vsState.openTabs[vsState.openTabs.length - 1] ?? null;
@@ -1519,6 +1766,9 @@ function onFileRemoved(path: string): void {
   delete buffers[path];
   delete errors[path];
   delete docRevs[path];
+  cancelAutoSave(path);
+  // 文件已删除：同步丢弃其编辑器文档缓存，避免随后 swapTo 把已删路径的状态写回缓存。
+  clearEditorState(store.slot, path);
   vsState.openTabs = vsState.openTabs.filter((p) => p !== path);
   if (vsState.activeTab === path) vsState.activeTab = vsState.openTabs[vsState.openTabs.length - 1] ?? null;
   persistVSCode();
@@ -1563,7 +1813,9 @@ function onMove(e: MouseEvent): void {
   if (!dragging.value || !rootRef.value) return;
   const rect = rootRef.value.getBoundingClientRect();
   if (rect.width <= 0) return;
-  const f = (e.clientX - rect.left) / rect.width;
+  let f = (e.clientX - rect.left) / rect.width;
+  // 侧栏在右侧时布局是 row-reverse：分隔条从右侧算，占比取反。
+  if (vsState.sidebarSide === "right") f = 1 - f;
   vsState.split = Math.min(0.85, Math.max(0.15, f));
 }
 function onUp(): void {
@@ -1599,13 +1851,11 @@ function isTextEntryFocused(el: EventTarget | null): boolean {
 function onKeydown(e: KeyboardEvent): void {
   if (!(e.ctrlKey || e.metaKey)) return;
   const key = e.key.toLowerCase();
-  // Ctrl+P：快速打开（对齐 VS Code）。须拦截浏览器打印，并把焦点交给搜索框。
+  // Ctrl+P：快速打开（对齐 VS Code）。须拦截浏览器打印，并弹出居中搜索浮层。
   if (key === "p") {
     if (isTextEntryFocused(e.target)) return;
     e.preventDefault();
-    if (!vsState.projectDir) return;
-    searchInputRef.value?.focus();
-    void ensureFileIndex();
+    openQuickOpen();
     return;
   }
   if (key !== "s") {
@@ -1762,6 +2012,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .vs-pane {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -1796,60 +2047,110 @@ onBeforeUnmount(() => {
 .vs-topbar.compact .vs-topbar-ico { display: inline-flex; }
 .vs-topbar.compact .vs-topbar-txt { display: none; }
 .vs-topbar.compact .vs-sep { display: none; }
-.vs-topbar.compact .vs-search-input { width: 120px; }
+.vs-topbar.compact .vs-quickopen-trigger { width: 28px; padding: 0; justify-content: center; }
+.vs-topbar.compact .vs-quickopen-ph,
+.vs-topbar.compact .vs-quickopen-kbd { display: none; }
 .vs-sep {
   width: 1px;
   height: 16px;
   background: var(--dsh-border, #30363d);
 }
-.vs-proj {
-  color: var(--dsh-fg-weak, #8b949e);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 40%;
-}
 .vs-spacer {
   flex: 1;
 }
-/* ---------- 快速打开（顶栏搜索框 + 结果下拉） ---------- */
-.vs-search {
-  position: relative;
-  flex: 0 0 auto;
-}
-.vs-search-input {
-  width: 190px;
+/* ---------- 快速打开（顶栏假输入框 + 居中浮层） ---------- */
+/* 触发器：长得像输入框的按钮，右侧带 Ctrl+P 键位提示 */
+.vs-quickopen-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   height: 24px;
+  width: 220px;
+  max-width: 34vw;
   padding: 0 8px;
   border: 1px solid var(--dsh-border, #30363d);
   border-radius: 4px;
   background: var(--dsh-bg, #0d1117);
-  color: var(--dsh-fg, #c9d1d9);
-  font-size: 12px;
-  outline: none;
-  transition: width 0.12s ease;
+  color: var(--dsh-fg-weak, #8b949e);
+  cursor: pointer;
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
 }
-.vs-search-input:focus {
-  width: 280px;
+.vs-quickopen-trigger:hover:not(:disabled) {
   border-color: var(--dsh-accent, #2f81f7);
+  color: var(--dsh-fg, #c9d1d9);
 }
-.vs-search-input:disabled {
+.vs-quickopen-trigger:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
-.vs-search-pop {
+.vs-quickopen-ph {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.vs-quickopen-kbd {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  height: 16px;
+  line-height: 15px;
+  border: 1px solid var(--dsh-border, #30363d);
+  border-radius: 3px;
+  font-size: calc(10px * var(--dsh-fs-scale, 1));
+  opacity: 0.8;
+}
+/* 浮层：面板内居中（顶部 12%），backdrop 半透明遮罩点击关闭 */
+.vs-quickopen-backdrop {
   position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
+  inset: 0;
   z-index: 400;
-  width: 380px;
-  max-height: 300px;
+  background: rgba(0, 0, 0, 0.32);
+}
+.vs-quickopen {
+  position: absolute;
+  top: 12%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(560px, 86%);
+  border: 1px solid var(--dsh-border, #30363d);
+  border-radius: 8px;
+  background: var(--dsh-bg2, #161b22);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  animation: vs-quickopen-in 0.12s ease-out;
+}
+@keyframes vs-quickopen-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+.vs-quickopen-input {
+  width: 100%;
+  height: 32px;
+  padding: 0 12px;
+  border: none;
+  border-bottom: 1px solid var(--dsh-border, #30363d);
+  background: var(--dsh-bg, #0d1117);
+  color: var(--dsh-fg, #c9d1d9);
+  font-size: calc(13px * var(--dsh-fs-scale, 1));
+  outline: none;
+  box-sizing: border-box;
+}
+.vs-quickopen-input:focus {
+  border-bottom-color: var(--dsh-accent, #2f81f7);
+}
+.vs-quickopen-list {
+  max-height: 320px;
   overflow: auto;
   padding: 4px;
-  border: 1px solid var(--dsh-border, #30363d);
-  border-radius: 6px;
-  background: var(--dsh-bg2, #161b22);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 .vs-search-row {
   display: flex;
@@ -1863,8 +2164,7 @@ onBeforeUnmount(() => {
 }
 .vs-search-row.active {
   background: var(--dsh-accent-soft, rgba(47, 129, 247, 0.18));
-}
-.vs-search-name {
+}.vs-search-name {
   color: var(--dsh-fg, #c9d1d9);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1893,10 +2193,12 @@ onBeforeUnmount(() => {
   background: var(--dsh-bg, #0d1117);
   color: var(--dsh-fg, #c9d1d9);
   cursor: pointer;
-  font-size: 12px;
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
 .vs-btn:hover:not(:disabled) {
   background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
+  border-color: var(--dsh-accent, #2f81f7);
 }
 .vs-btn:disabled {
   opacity: 0.5;
@@ -1911,7 +2213,7 @@ onBeforeUnmount(() => {
 }
 .vs-btn-menu.open {
   background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
-  border-color: var(--dsh-accent, #238636);
+  border-color: var(--dsh-accent, #2f81f7);
 }
 .vs-caret {
   width: 0;
@@ -1921,43 +2223,25 @@ onBeforeUnmount(() => {
   border-top: 4px solid currentColor;
   opacity: 0.75;
 }
-/* 最近项目菜单头部：标题居左、操作居右（布局在 ContextMenu 的 .fw-cm-header 上） */
-.vs-recent-title {
-  font-weight: 600;
-  color: var(--dsh-fg, #c9d1d9);
-  font-size: calc(12px * var(--dsh-fs-scale, 1));
-  white-space: nowrap;
-}
-/* 最近项目菜单头部右侧的「全部清除」按钮：紧凑文字按钮，悬停显形 */
-.vs-recent-clear {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 22px;
-  padding: 0 8px;
-  border: 1px solid var(--dsh-border, #30363d);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--dsh-fg-weak, #8b949e);
-  font-size: calc(11px * var(--dsh-fs-scale, 1));
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.12s, color 0.12s, border-color 0.12s;
-}
-.vs-recent-clear:hover:not(:disabled) {
-  color: #f85149;
-  border-color: #f85149;
-  background: rgba(248, 81, 73, 0.12);
-}
-.vs-recent-clear:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
 .vs-body {
   display: flex;
   align-items: stretch;
   flex: 1;
   min-height: 0;
+}
+/* 侧栏在右侧：整体行方向反转（编辑区在左、侧栏在右），边框方向随之对调 */
+.vs-body.side-right {
+  flex-direction: row-reverse;
+}
+/* 侧栏在右侧时其内部也反转：活动栏贴最外侧（右缘），内容区朝编辑区一侧。 */
+.vs-body.side-right .vs-left {
+  flex-direction: row-reverse;
+  border-right: none;
+  border-left: none;
+}
+.vs-body.side-right .vs-activity {
+  border-right: none;
+  border-left: 1px solid var(--dsh-border, #30363d);
 }
 /* 右栏自动折叠：面板拖窄时收起编辑区（含分隔条），项目树占满整栏；拖宽自动恢复。 */
 .vs-body.right-folded .vs-split,
@@ -1974,65 +2258,188 @@ onBeforeUnmount(() => {
   height: 100%;
   overflow: hidden;
   display: flex;
-  flex-direction: column;
   background: var(--dsh-bg2, #161b22);
   border-right: 1px solid var(--dsh-border, #30363d);
 }
-/* 左栏顶部 tab：文件 / 搜索 —— 分段控件样式（两端等宽胶囊，明显可切换） */
-.vs-left-tabs {
-  flex: 0 0 auto;
+/* ── Activity Bar：40px 竖向图标条（对齐 VS Code），active 态左侧 accent 竖条 ── */
+.vs-activity {
+  flex: 0 0 40px;
+  width: 40px;
   display: flex;
+  flex-direction: column;
+  align-items: center;
   gap: 2px;
-  margin: 4px 6px;
-  padding: 2px;
-  border: 1px solid var(--dsh-border, #30363d);
-  border-radius: 6px;
+  padding: 6px 0;
+  border-right: 1px solid var(--dsh-border, #30363d);
   background: var(--dsh-bg, #0d1117);
   user-select: none;
 }
-/* 右栏折叠时的「展开编辑器」恢复按钮：推到 tab 条最右。 */
-.vs-unfold-btn {
-  margin-left: auto;
+/* 图标组对齐底部（右键菜单「活动栏移到底部」） */
+.vs-activity.btm {
+  justify-content: flex-end;
 }
-.vs-left-tab:disabled {
-  opacity: 0.38;
-  cursor: not-allowed;
-}
-.vs-left-tab:disabled:hover {
-  background: transparent;
-}
-.vs-left-tab {
-  flex: 1 1 0;
+.vs-act-btn {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  height: 22px;
-  padding: 0 8px;
+  width: 32px;
+  height: 32px;
   border: none;
-  border-radius: 4px;
+  border-radius: 6px;
   background: transparent;
   color: var(--dsh-fg-weak, #8b949e);
-  font-size: calc(11px * var(--dsh-fs-scale, 1));
   cursor: pointer;
-  white-space: nowrap;
   transition: background 0.12s, color 0.12s;
 }
-.vs-left-tab:hover {
+.vs-act-btn:hover:not(:disabled) {
   background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
   color: var(--dsh-fg, #c9d1d9);
 }
-.vs-left-tab.active {
-  color: var(--dsh-accent, #3fb950);
-  background: var(--dsh-accent-weak, rgba(63, 185, 80, 0.15));
+.vs-act-btn.active {
+  color: var(--dsh-fg, #c9d1d9);
+}
+.vs-act-btn.active::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--dsh-accent, #2f81f7);
+}
+.vs-act-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+/* 无合法图标名的扩展：显示 title 首字符 */
+.vs-act-letter {
+  font-size: 14px;
   font-weight: 600;
 }
-/* 搜索 tab 时目录树隐藏，搜索面板吃掉剩余高度（.vs-sp 自带 flex:1） */
-/* 目录树吃掉剩余高度，Git 记录栏固定在左栏底部。 */
-.vs-left :deep(.vs-tree) {
+/* 外部插件视图容器：占满内容区 */
+.vs-ext-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+/* 插件运行时注入的 DOM 没有 scoped 标记，必须 :deep() 穿透（dev 演示插件用） */
+.vs-ext-view :deep(.vs-ext-demo) {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  padding: 16px;
+  text-align: center;
+}
+.vs-ext-view :deep(.vs-ext-demo-title) {
+  color: var(--dsh-fg, #c9d1d9);
+  font-weight: 600;
+}
+.vs-ext-view :deep(.vs-ext-demo-info) {
+  color: var(--dsh-fg-weak, #8b949e);
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
+  word-break: break-all;
+  max-width: 100%;
+}
+.vs-ext-view :deep(.vs-ext-demo-tip) {
+  color: var(--dsh-fg-muted, #6e7681);
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
+}
+/* ── 内容区：头部为项目路径，下面是当前视图（树 / 搜索 / Git 记录） ── */
+.vs-left-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.vs-left-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 4px 0 10px;
+  color: var(--dsh-fg-weak, #8b949e);
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
+  border-bottom: 1px solid var(--dsh-border, #30363d);
+  background: var(--dsh-bg2, #161b22);
+  user-select: none;
+}
+.vs-left-head-txt {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* 超长路径从左侧截断，保留最有辨识度的尾部 */
+  text-align: left;
+}
+.vs-left-head-open {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: background 0.12s, opacity 0.12s;
+}
+.vs-left-head-open:hover {
+  opacity: 1;
+  background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
+}
+/* 目录树 / 搜索 / Git 视图吃掉头部以下全部高度 */
+.vs-left-main :deep(.vs-tree) {
   flex: 1 1 auto;
   min-height: 0;
   height: auto;
+}
+/* Git 提交记录视图化：占满内容区（原本是左栏底部限高 260px 的横条） */
+.vs-left-main :deep(.vs-git-view.vs-gitbar) {
+  flex: 1 1 auto;
+  max-height: none;
+  border-top: none;
+}
+/* 非 Git/SVN 仓库时的空态：占满内容区垂直居中 */
+.vs-git-empty {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* 右栏折叠后的展开把手：骑在左栏右缘中部的竖条按钮 */.vs-unfold-handle {
+  position: relative;
+  z-index: 6;
+  flex: 0 0 auto;
+  align-self: center;
+  width: 14px;
+  height: 56px;
+  margin-left: -7px;
+  margin-right: -7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--dsh-border, #30363d);
+  border-radius: 7px;
+  background: var(--dsh-bg2, #161b22);
+  color: var(--dsh-fg-weak, #8b949e);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.vs-unfold-handle:hover {
+  background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
+  color: var(--dsh-accent, #2f81f7);
 }
 .vs-split {
   flex: 0 0 6px;
@@ -2054,7 +2461,7 @@ onBeforeUnmount(() => {
 }
 .vs-split:hover::after,
 .vs-split.dragging::after {
-  background: var(--dsh-accent, #238636);
+  background: var(--dsh-accent, #2f81f7);
 }
 .vs-right {
   flex: 1 1 0;
@@ -2084,7 +2491,22 @@ onBeforeUnmount(() => {
   text-align: center;
 }
 .vs-error {
-  color: #f85149;
+  color: var(--dsh-danger, #f85149);
+}
+/* 空态：大图标 + 主标题 + 副提示 + 操作按钮组（用户没打开文件时看得最久的界面） */
+.vs-empty-ico {
+  color: var(--dsh-fg-muted, #6e7681);
+  opacity: 0.8;
+}
+.vs-empty-title {
+  color: var(--dsh-fg, #c9d1d9);
+  font-size: calc(15px * var(--dsh-fs-scale, 1));
+  font-weight: 600;
+}
+.vs-empty-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
 }
 /*
  * 打开文件的加载动画：内容到位前编辑器区域是空的，只给文字会像「卡住了」。
@@ -2095,7 +2517,7 @@ onBeforeUnmount(() => {
   height: 22px;
   flex: 0 0 auto;
   border: 2px solid var(--dsh-border, #30363d);
-  border-top-color: var(--dsh-accent, #238636);
+  border-top-color: var(--dsh-accent, #2f81f7);
   border-radius: 50%;
   box-sizing: border-box;
   animation: vs-loading-spin 0.7s linear infinite;
@@ -2108,15 +2530,15 @@ onBeforeUnmount(() => {
 .vs-status {
   display: flex;
   align-items: center;
-  height: 22px;
+  height: 24px;
   padding: 0 6px;
   background: var(--dsh-bg2, #161b22);
   border-top: 1px solid var(--dsh-border, #30363d);
-  font-size: 12px;
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
   color: var(--dsh-fg-weak, #8b949e);
 }
 .vs-status-readonly {
-  color: #d29922;
+  color: var(--dsh-warn, #d29922);
   padding: 0 4px;
 }
 /* 外部改动冲突徽标：可点击（选择以磁盘版本覆盖本地改动） */
@@ -2124,15 +2546,16 @@ onBeforeUnmount(() => {
   height: 18px;
   padding: 0 7px;
   margin-left: 6px;
-  border: 1px solid #d29922;
+  border: 1px solid var(--dsh-warn, #d29922);
   border-radius: 9px;
   background: transparent;
-  color: #d29922;
-  font-size: 11px;
+  color: var(--dsh-warn, #d29922);
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
   cursor: pointer;
+  transition: background 0.12s;
 }
 .vs-status-conflict:hover {
-  background: rgba(210, 153, 34, 0.14);
+  background: color-mix(in srgb, var(--dsh-warn, #d29922) 14%, transparent);
 }
 .vs-status-spacer {
   flex: 1;
@@ -2153,7 +2576,7 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 .vs-status-btn:hover:not(:disabled) {
-  background: var(--dsh-hover, rgba(255, 255, 255, 0.1));
+  background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
   color: var(--dsh-fg, #c9d1d9);
 }
 .vs-status-btn:disabled {

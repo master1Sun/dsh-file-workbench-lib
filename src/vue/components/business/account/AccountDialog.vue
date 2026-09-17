@@ -44,32 +44,35 @@
         </div>
         <div v-if="!accounts.length" class="fw-acc-empty">{{ t("accEmpty") }}</div>
         <div v-else class="fw-acc-railist">
-          <button
-            v-for="a in accounts"
-            :key="a.id"
-            type="button"
-            class="fw-acc-item"
-            :class="{ on: !isNew && a.id === editingId }"
-            @click="select(a)"
-          >
-            <span class="fw-acc-kind" :data-kind="a.kind">{{ a.kind === "svn" ? "SVN" : "Git" }}</span>
-            <span class="fw-acc-itemtext">
-              <span class="fw-acc-itemname" :title="a.name">{{ a.name }}</span>
-              <span class="fw-acc-itemsub" :title="`${a.username}@${a.host}`">{{ a.username }}@{{ a.host }}</span>
-            </span>
-            <!-- 凭据状态用一个小圆点，标题里给文字说明（列表宽度有限，不塞整句） -->
-            <span
-              class="fw-acc-dot"
-              :class="{ on: a.hasSecret }"
-              :title="a.hasSecret ? t('accHasSecret') : t('accNoSecret')"
-            ></span>
-          </button>
+          <!-- 按 Git / SVN 分节展示（kind 顺序稳定，账号多时也好找） -->
+          <template v-for="g in groupedAccounts" :key="g.kind">
+            <div v-if="g.list.length" class="fw-acc-group">{{ g.kind === "svn" ? "SVN" : "Git" }}</div>
+            <button
+              v-for="a in g.list"
+              :key="a.id"
+              type="button"
+              class="fw-acc-item"
+              :class="{ on: !isNew && a.id === editingId }"
+              @click="select(a)"
+              @contextmenu.prevent.stop="openAccountMenu($event, a)"
+            >
+              <span class="fw-acc-kind" :data-kind="a.kind">{{ a.kind === "svn" ? "SVN" : "Git" }}</span>
+              <span class="fw-acc-itemtext">
+                <span class="fw-acc-itemname" :title="a.name">{{ a.name }}</span>
+                <span class="fw-acc-itemsub" :title="`${a.username}@${a.host}`">{{ a.username }}@{{ a.host }}</span>
+              </span>
+              <!-- 凭据状态：已存凭据 = 盾形图标（accent 色），仅配置 = 空心点 -->
+              <icon v-if="a.hasSecret" class="fw-acc-lock" name="shield" :size="13" :title="t('accHasSecret')" />
+              <span v-else class="fw-acc-dot" :title="t('accNoSecret')"></span>
+            </button>
+          </template>
         </div>
         <!-- 生效预览：显示的就是执行期真正会注入的那条账号（与 host 侧同一套匹配规则） -->
         <div v-if="accountDialog.url" class="fw-acc-effective" :title="accountDialog.url">
           <span class="fw-acc-efflabel">{{ t("accEffective") }}</span>
           <span v-if="effective" class="fw-acc-effval">{{ effective.name }}（{{ effective.username }}@{{ effective.host }}）</span>
           <span v-else class="fw-acc-effnone">{{ t("accEffectiveNone") }}</span>
+          <span class="fw-acc-effhint">{{ t("accMatchHint") }}</span>
         </div>
       </div>
 
@@ -131,6 +134,11 @@
           </div>
 
           <div v-if="errText" class="fw-clone-error">{{ errText }}</div>
+          <!-- 最近一次测试结果：留在界面上（toast 一闪就没了），反复调凭据时不用凭记忆 -->
+          <div v-if="lastTest" class="fw-acc-testres" :class="lastTest.ok ? 'is-ok' : 'is-fail'">
+            <icon :name="lastTest.ok ? 'check' : 'warning'" :size="13" />
+            <span>{{ lastTest.ok ? t("accTestOk") : t("accTestFail") }} · {{ lastTest.detail }}</span>
+          </div>
 
           <!-- 行内动作：都作用于「当前右栏这条」。未保存的草稿没有已存凭据，
                测试只能内联验、写入系统与删除也无对象，故只在编辑态出现。 -->
@@ -151,6 +159,9 @@
       </div>
     </div>
 
+    <!-- 左栏账号行的右键菜单：不选中也能就地测试 / 写系统 / 删除 -->
+    <ContextMenu v-if="cmOpen" :items="cmItems" :x="cmX" :y="cmY" @close="closeMenu" />
+
     <template #footer>
       <el-button size="small" @click="close">{{ t("accCancel") }}</el-button>
       <el-button size="small" type="primary" :loading="busy" :disabled="!hasTarget" @click="save">
@@ -165,6 +176,9 @@ import { computed, reactive, ref, watch } from "vue";
 import { useI18n } from "../../../composables/core/i18n";
 import { toastError, toastOk, toastWarning } from "../../../composables/core/toast";
 import Icon from "../../common/Icon.vue";
+import ContextMenu from "../../common/ContextMenu.vue";
+import { useContextMenu } from "../../../composables/ui/useContextMenu";
+import type { MenuItem } from "../../../../shared/types";
 import * as api from "../../../composables/core/useApi";
 import { accounts, accountDialog, closeAccountDialog, refreshAccounts } from "../../../stores/accounts";
 
@@ -213,6 +227,51 @@ async function loadEffective(): Promise<void> {
   effective.value = r?.account ?? null;
 }
 
+/** 左栏账号按类型分节（Git 在前，SVN 在后；空节不渲染）。 */
+const groupedAccounts = computed(() => {
+  const kinds: api.AccountKind[] = ["git", "svn"];
+  return kinds.map((kind) => ({ kind, list: accounts.value.filter((a) => a.kind === kind) }));
+});
+
+/** 最近一次「测试」的沉淀结果（ok + 详情），测试动作后写入，切换账号时清空。 */
+const lastTest = ref<{ ok: boolean; detail: string } | null>(null);
+
+/* ── 左栏右键菜单：作用对象是被右键的那条（不要求先选中） ── */
+const { cmOpen, cmX, cmY, cmItems, openMenu, closeMenu } = useContextMenu();
+function openAccountMenu(e: MouseEvent, a: api.AccPublic): void {
+  const items: MenuItem[] = [
+    { label: t("accTest"), icon: "refresh", onClick: () => testAccount(a) },
+    { label: t("accApply"), icon: "check", onClick: () => void applyOne(a) },
+    { separator: true },
+    { label: t("accDelete"), icon: "trash", onClick: () => void removeOne(a) },
+    { separator: true },
+    { label: t("accCopyIdent"), icon: "copy", onClick: () => void copyIdent(a) },
+  ];
+  openMenu(e, items);
+}
+
+/** 菜单动作前先选中该条（右栏表单同步），避免「菜单操作的是 A，右栏还显示 B」。 */
+async function testAccount(a: api.AccPublic): Promise<void> {
+  select(a);
+  await testDraft();
+}
+async function applyOne(a: api.AccPublic): Promise<void> {
+  select(a);
+  await applySelected();
+}
+async function removeOne(a: api.AccPublic): Promise<void> {
+  select(a);
+  await removeSelected();
+  confirmDelete.value = null; // 菜单路径直接删除，不保留两击确认中间态
+}
+async function copyIdent(a: api.AccPublic): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(`${a.username}@${a.host}`);
+  } catch {
+    /* 剪贴板失败静默（低频操作） */
+  }
+}
+
 /** 强调色跟随右栏正在看的那条（新草稿跟随其类型），与克隆弹窗同一套变量。 */
 const accentClass = computed(() => {
   const kind = isNew.value ? form.kind : (current.value?.kind ?? form.kind);
@@ -244,6 +303,7 @@ function select(a: api.AccPublic): void {
   editingId.value = a.id;
   confirmDelete.value = null;
   errText.value = "";
+  lastTest.value = null;
   fillForm(a);
 }
 
@@ -370,6 +430,7 @@ async function testDraft(): Promise<void> {
             secretKind: form.secretKind,
           },
     );
+    lastTest.value = { ok: r.ok, detail: r.detail };
     if (r.ok) toastOk(`${t("accTestOk")} · ${r.detail}`);
     else toastError(`${t("accTestFail")} · ${r.detail}`);
   });
@@ -529,6 +590,26 @@ async function save(): Promise<void> {
   font-weight: 600;
   letter-spacing: 0.4px;
 }
+.fw-acc-group {
+  padding: 6px 9px 2px;
+  font-size: calc(10px * var(--dsh-fs-scale, 1));
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: var(--dsh-fg-muted, #6e7681);
+  user-select: none;
+}
+.fw-acc-lock { flex: 0 0 auto; color: var(--clone-accent); }
+.fw-acc-testres {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  border-radius: var(--dsh-radius-sm, 4px);
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
+}
+.fw-acc-testres.is-ok { color: var(--dsh-success, #3fb950); background: color-mix(in srgb, var(--dsh-success, #3fb950) 10%, transparent); }
+.fw-acc-testres.is-fail { color: var(--dsh-danger, #f85149); background: color-mix(in srgb, var(--dsh-danger, #f85149) 10%, transparent); }
+.fw-acc-effhint { color: var(--dsh-fg-muted, #6e7681); }
 .fw-acc-empty {
   padding: 18px 0;
   text-align: center;
@@ -623,65 +704,19 @@ async function save(): Promise<void> {
    （inner 高 = 该值 - 2px，wrapper 再各加 1px padding），而 `.el-select__wrapper` 的 min-height
    是**写死的**（非 small 32px / small 24px），**不吃这个变量** → 下拉必须单独覆盖（见下），
    两者缺一不可，只改一处仍会留下三种高度。 */
-:global(.fw-acc-dlg.el-dialog) { --el-component-size-small: 32px; }
-
-/* Element Plus 控件按项目令牌着色（浮层挂 body，必须 :global） */
-:global(.fw-acc-dlg .el-input__wrapper) {
-  background: var(--dsh-bg, #0d1117);
-  border-radius: 8px;
-  box-shadow: 0 0 0 1px var(--dsh-border, #30363d) inset;
-  transition: box-shadow 0.15s;
-}
-:global(.fw-acc-dlg .el-input__wrapper:hover:not(.is-focus)) {
-  box-shadow: 0 0 0 1px var(--dsh-fg-weak, #8b949e) inset;
-}
-:global(.fw-acc-dlg .el-input__wrapper.is-focus) {
-  box-shadow: 0 0 0 1px var(--clone-accent) inset, 0 0 0 3px var(--clone-accent-weak);
-}
-:global(.fw-acc-dlg .el-input__inner) { color: var(--dsh-fg, #c9d1d9); }
-:global(.fw-acc-dlg .el-input__inner::placeholder) { color: var(--dsh-fg-weak, #8b949e); opacity: 0.7; }
-:global(.fw-acc-dlg .el-select--small .el-select__wrapper) {
-  min-height: 32px;
-  background: var(--dsh-bg, #0d1117);
-  border-radius: 8px;
-  box-shadow: 0 0 0 1px var(--dsh-border, #30363d) inset;
-}
-:global(.fw-acc-dlg .el-select--small .el-select__wrapper.is-focused) {
-  box-shadow: 0 0 0 1px var(--clone-accent) inset, 0 0 0 3px var(--clone-accent-weak);
-}
-:global(.fw-acc-dlg .el-dialog__footer) { display: flex; justify-content: flex-end; gap: 10px; }
-:global(.fw-acc-dlg .el-button--small) {
-  --el-button-size: 32px;
-  height: 32px;
-  min-width: 68px;
-  border-radius: 8px;
-  background: var(--dsh-bg, #0d1117);
-  border: 1px solid var(--dsh-border, #30363d);
-  color: var(--dsh-fg, #c9d1d9);
-  font-weight: 500;
-}
-:global(.fw-acc-dlg .el-button--small:not(.el-button--primary):hover) {
-  border-color: var(--clone-accent);
-  color: var(--clone-accent);
-  background: var(--dsh-bg, #0d1117);
-}
-:global(.fw-acc-dlg .el-button--small.el-button--primary) {
-  background: var(--clone-accent);
-  border-color: var(--clone-accent);
-  color: #fff;
-  font-weight: 600;
-}
-/* 左栏那个纯图标按钮：上面的 min-width:68px 是给文字按钮的，图标按钮要收窄 */
-:global(.fw-acc-dlg .el-button--small.fw-acc-iconbtn) {
+/* 控件 32px + 输入/下拉/按钮主题化规则已上移到 clone-shared.css（.fw-clone-dialog 域），
+   与克隆弹窗共用同一份；此处只保留账号管理特有的样式。 */
+/* 左栏那个纯图标按钮：clone-shared 里文字按钮 min-width:68px，图标按钮要收窄 */
+:global(.fw-clone-dialog .el-button--small.fw-acc-iconbtn) {
   min-width: 0;
   padding: 0 8px;
 }
 /* 两击删除的确认态：点亮为危险色，二次点击才真删 */
-:global(.fw-acc-dlg .el-button--small.fw-acc-danger),
-:global(.fw-acc-dlg .el-button--small.fw-acc-danger:hover) {
-  border-color: #f85149;
-  color: #f85149;
-  background: rgba(248, 81, 73, 0.12);
+:global(.fw-clone-dialog .el-button--small.fw-acc-danger),
+:global(.fw-clone-dialog .el-button--small.fw-acc-danger:hover) {
+  border-color: var(--dsh-danger, #f85149);
+  color: var(--dsh-danger, #f85149);
+  background: color-mix(in srgb, var(--dsh-danger, #f85149) 12%, transparent);
 }
 /* el-select 下拉面板 Teleport 到 body：抬升层级并沿用项目主题色 */
 :global(.fw-acc-popper) {

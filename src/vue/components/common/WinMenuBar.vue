@@ -1,10 +1,11 @@
 <template>
   <!-- 顶部工具栏（Win11 文件夹风格：左侧 导航按钮 + 刷新/设置，中间 路径地址栏，右侧 搜索）。 -->
-  <header class="fw-toolbar">
-    <el-button text size="small" :title="t('goBack')" :disabled="!canGoBack" @click="doBack">
+  <header ref="toolbarRef" class="fw-toolbar">
+    <!-- 面板收窄时隐藏后退/前进（历史不丢，展开即恢复），把宽度让给地址栏与搜索 -->
+    <el-button v-show="!narrow" text size="small" :title="t('goBack')" :disabled="!canGoBack" @click="doBack">
       <icon name="arrowLeft" :size="16" />
     </el-button>
-    <el-button text size="small" :title="t('goForward')" :disabled="!canGoForward" @click="doForward">
+    <el-button v-show="!narrow" text size="small" :title="t('goForward')" :disabled="!canGoForward" @click="doForward">
       <icon name="arrowRight" :size="16" />
     </el-button>
     <el-button text size="small" :title="t('goUp')" :disabled="!canGoUp" @click="goUp">
@@ -37,7 +38,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { useI18n } from "../../composables/core/i18n";
 import {
   canGoBack,
@@ -60,12 +61,37 @@ const emit = defineEmits<{ (e: "open-settings"): void }>();
 
 const { t } = useI18n();
 
-/** 刷新按钮：加载期间旋转图标，保证动画可见。 */
+/* ── 窄面板自适应：工具栏宽度不足时隐藏后退/前进 ──
+ * 工作台停靠在 DSH 右侧栏，宽度由宿主拖拽决定（无 window resize），必须观察自身元素。
+ * 阈值以下隐藏这两个低频按钮（历史记录保留，恢复宽度即重新出现），保证地址栏 + 搜索完整可见。 */
+const toolbarRef = ref<HTMLElement | null>(null);
+const narrow = ref(false);
+const NARROW_BELOW = 640; // 与命令栏紧凑档（680）同量级：再窄就放不下完整地址栏+搜索
+let toolbarRO: ResizeObserver | null = null;
+onMounted(() => {
+  if (!toolbarRef.value) return;
+  toolbarRO = new ResizeObserver(() => {
+    narrow.value = (toolbarRef.value?.clientWidth ?? 0) < NARROW_BELOW;
+  });
+  toolbarRO.observe(toolbarRef.value);
+});
+onBeforeUnmount(() => {
+  toolbarRO?.disconnect();
+  toolbarRO = null;
+});
+
+/** 手动补转：点击后至少完整转一圈（加载极快结束时动画也不「缺席」）。 */
+const manualSpin = ref(false);
+let spinTimer: ReturnType<typeof setTimeout> | undefined;
+/** 刷新按钮：加载期间旋转图标；点击时再保底转 650ms，动画始终可见。 */
 function doRefresh(): void {
   void refreshListing();
+  manualSpin.value = true;
+  if (spinTimer) clearTimeout(spinTimer);
+  spinTimer = setTimeout(() => (manualSpin.value = false), 650);
 }
-/** 仅当目录刷新/加载真正执行时旋转，平时静止。 */
-const spinnerOn = computed(() => explorer.loading);
+/** 仅当目录刷新/加载真正执行或刚点击时旋转，平时静止。 */
+const spinnerOn = computed(() => explorer.loading || manualSpin.value);
 
 function doBack(): void {
   goBack();
@@ -88,12 +114,18 @@ let searchTimer: ReturnType<typeof setTimeout> | undefined;
 const searchScope = computed(() => (isBrowsablePath(currentListingPath.value) ? currentListingPath.value : wb.root || ""));
 
 function onSearchInput(): void {
-  // 输入即同步“搜索态”，让列表区立刻切到结果面板（不依赖更新链路延迟）。
-  setSearchTerm(searchValue.value);
   if (searchTimer) clearTimeout(searchTimer);
+  const v = searchValue.value;
+  // 清空立即回文件列表；输入时“搜索态”与检索一起防抖——避免打第一个字就整栏闪切成结果面板。
+  if (!v.trim()) {
+    setSearchTerm("");
+    void runSearch("").catch((e) => toast("error", (e as Error).message));
+    return;
+  }
   searchTimer = setTimeout(() => {
+    setSearchTerm(v);
     // 搜索始终限定在当前浏览目录内递归检索。
-    void runSearch(searchValue.value, searchScope.value).catch((e) => toast("error", (e as Error).message));
+    void runSearch(v, searchScope.value).catch((e) => toast("error", (e as Error).message));
   }, 350);
 }
 function clearSearch(): void {
@@ -125,8 +157,11 @@ watch(searchTerm, (v) => {
   align-items: center;
   line-height: 1;
 }
-.fw-refresh-ic { display: block; transition: color 0.15s; }
-.fw-refresh-ic.spinning { animation: fw-spin 0.8s linear infinite; }
+.fw-refresh-ic { display: block; transition: color 0.15s, transform 0.2s; }
+.fw-refresh-ic.spinning {
+  animation: fw-spin 0.8s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+  color: var(--dsh-accent, #2f81f7);
+}
 @keyframes fw-spin { to { transform: rotate(360deg); } }
 .fw-search-input {
   min-width: 140px;

@@ -40,7 +40,7 @@
         <div v-if="history.length" class="fw-bg-task-group">
           <div class="fw-bg-task-grouplbl">{{ t('taskHistory') }}</div>
           <div v-for="(t2, i) in history" :key="t2.startedAt + '-' + i" class="fw-bg-task-row" :class="t2.status" @click="openTask(t2)">
-            <span class="fw-bg-task-ico">{{ t2.status === 'done' ? '✓' : '✕' }}</span>
+            <span class="fw-bg-task-ico"><icon :name="t2.status === 'done' ? 'check' : 'close'" :size="13" /></span>
             <span class="fw-bg-task-label">{{ t2.label }}</span>
             <span v-if="t2.detail" class="fw-bg-task-detail">{{ t2.detail }}</span>
             <span class="fw-bg-task-see">{{ t('taskViewLog') }}</span>
@@ -57,12 +57,23 @@
   <!-- 单任务日志详情：独立居中弹窗 -->
   <el-dialog
     v-model="showDetail"
-    :width="580"
-    :title="t('taskLogTitle')"
-    custom-class="fw-tasklog-dialog"
+    class="fw-clone-dialog fw-tasklog-dialog"
+    width="580px"
+    align-center
+    modal-class="fw-blur-overlay"
+    :close-on-click-modal="false"
     :modal-append-to-body="false"
     :append-to-body="false"
   >
+    <template #header>
+      <div class="fw-dlg-head">
+        <span class="fw-dlg-badge"><icon name="tasks" :size="20" /></span>
+        <span class="fw-dlg-headtext">
+          <span class="fw-dlg-headtitle">{{ t('taskLogTitle') }}</span>
+          <span class="fw-dlg-headsub">{{ sel?.label }}</span>
+        </span>
+      </div>
+    </template>
     <template v-if="sel">
       <!-- 概要：操作名 / 目标 / 起止时间 / 总耗时 / 状态 -->
       <div class="fw-tlog-head">
@@ -109,12 +120,23 @@
   <!-- 归档浏览器：左日期 → 中记录 → 右详情列（内嵌展示，不弹日志弹窗） -->
   <el-dialog
     v-model="showArchive"
-    :width="880"
-    :title="t('taskArchiveTitle')"
-    custom-class="fw-taskarc-dialog"
+    class="fw-clone-dialog fw-taskarc-dialog"
+    width="880px"
+    align-center
+    modal-class="fw-blur-overlay"
+    :close-on-click-modal="false"
     :modal-append-to-body="false"
     :append-to-body="false"
   >
+    <template #header>
+      <div class="fw-dlg-head">
+        <span class="fw-dlg-badge"><icon name="archive" :size="20" /></span>
+        <span class="fw-dlg-headtext">
+          <span class="fw-dlg-headtitle">{{ t('taskArchiveTitle') }}</span>
+          <span class="fw-dlg-headsub">{{ archiveSel ?? t('taskArchiveOpen') }}</span>
+        </span>
+      </div>
+    </template>
     <div class="fw-taskarc">
       <div class="fw-taskarc-dates">
         <button
@@ -137,7 +159,7 @@
           :class="{ [rec.status]: true, active: archiveSelRec === rec }"
           @click="selectArchiveRec(rec)"
         >
-          <span class="fw-taskarc-ico">{{ rec.status === 'done' ? '✓' : '✕' }}</span>
+          <span class="fw-taskarc-ico"><icon :name="rec.status === 'done' ? 'check' : 'close'" :size="13" /></span>
           <span class="fw-taskarc-label">{{ rec.label }}</span>
           <span v-if="rec.detail" class="fw-taskarc-recdetail">{{ rec.detail }}</span>
           <span class="fw-taskarc-time">{{ fmtClock(rec.startedAt) }}</span>
@@ -454,6 +476,7 @@ function onDocDown(e: MouseEvent): void {
 }
 </script>
 
+<style src="../repo/clone-shared.css"></style>
 <style scoped>
 .fw-bg-task-fab {
   position: relative;
@@ -486,7 +509,7 @@ function onDocDown(e: MouseEvent): void {
   height: 15px;
   padding: 0 3px;
   border-radius: 8px;
-  background: var(--el-color-danger, #f85149);
+  background: var(--dsh-danger, #f85149);
   color: #fff;
   font-size: 10px;
   line-height: 15px;
@@ -611,15 +634,16 @@ function onDocDown(e: MouseEvent): void {
 .fw-bg-task-ico {
   width: 14px;
   flex: 0 0 auto;
-  text-align: center;
-  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .fw-bg-task-row.done .fw-bg-task-ico {
   color: var(--dsh-accent, #238636);
 }
 .fw-bg-task-row.error .fw-bg-task-ico,
 .fw-bg-task-row.error .fw-bg-task-label {
-  color: var(--el-color-danger, #f85149);
+  color: var(--dsh-danger, #f85149);
 }
 .fw-bg-task-label {
   white-space: nowrap;
@@ -670,37 +694,19 @@ function onDocDown(e: MouseEvent): void {
 
 <style>
 /* 任务日志弹窗（append-to-body 渲染在 body 下，需全局样式 + 随主题 --dsh 变量） */
-.fw-tasklog-dialog .el-dialog,
-.fw-tasklog-dialog .el-dialog__header,
-.fw-tasklog-dialog .el-dialog__body {
-  background: var(--dsh-bg2, #1c2128);
-  color: var(--dsh-fg, #c9d1d9);
-}
-.fw-tasklog-dialog .el-dialog {
-  border: 1px solid var(--dsh-border, #30363d);
-  border-radius: 10px;
-  /* 收起时抽屉无 transform，弹窗 fixed 相对视口；限制整体高度避免长日志溢出视口底部 */
-  margin-top: 12vh;
-  margin-bottom: 12vh;
+/* 壳层（背景/圆角/阴影/头部）由 clone-shared.css 的 .fw-clone-dialog 统一提供；
+   此处只保留任务日志特有的高度管理（长日志不得溢出视口）。 */
+.fw-tasklog-dialog.el-dialog {
+  /* align-center 居中布局下限制整体高度，弹窗内部自行滚动 */
   max-height: 76vh;
   display: flex;
   flex-direction: column;
 }
-.fw-tasklog-dialog .el-dialog__header {
-  flex-shrink: 0;
-}
+.fw-tasklog-dialog .el-dialog__header { flex-shrink: 0; }
 .fw-tasklog-dialog .el-dialog__body {
   flex-shrink: 1;
   min-height: 0;
   overflow-y: auto;
-}
-.fw-tasklog-dialog .el-dialog__title {
-  color: var(--dsh-fg, #c9d1d9);
-  font-size: 14px;
-  font-weight: 600;
-}
-.fw-tasklog-dialog .el-dialog__headerbtn .el-dialog__close {
-  color: var(--dsh-fg-weak, #8b949e);
 }
 /* ── 概要头部 ─────────────────────────────── */
 .fw-tlog-head {
@@ -739,7 +745,7 @@ function onDocDown(e: MouseEvent): void {
   color: var(--dsh-accent, #238636);
 }
 .fw-tlog-st-head.error {
-  color: var(--el-color-danger, #f85149);
+  color: var(--dsh-danger, #f85149);
 }
 /* ── 竖向时间轴 ───────────────────────────── */
 .fw-tlog-timeline {
@@ -779,8 +785,8 @@ function onDocDown(e: MouseEvent): void {
   background: var(--dsh-accent, #238636);
 }
 .fw-tlog-dot.error {
-  border-color: var(--el-color-danger, #f85149);
-  background: var(--el-color-danger, #f85149);
+  border-color: var(--dsh-danger, #f85149);
+  background: var(--dsh-danger, #f85149);
 }
 @keyframes fw-tlog-pulse {
   50% {
@@ -791,7 +797,8 @@ function onDocDown(e: MouseEvent): void {
   flex: 1 1 auto;
   width: 2px;
   min-height: 8px;
-  background: var(--dsh-border, #30363d);
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--dsh-border, #30363d) 70%, transparent);
 }
 .fw-tlog-ct {
   flex: 1 1 auto;
@@ -802,9 +809,10 @@ function onDocDown(e: MouseEvent): void {
 .fw-tlog-bubble {
   border: 1px solid var(--dsh-border, #30363d);
   border-left-width: 3px;
-  border-radius: 8px;
-  background: var(--dsh-bg2, #1c2128);
+  border-radius: var(--dsh-radius-md, 8px);
+  background: var(--dsh-bg, #0d1117);
   padding: 7px 10px;
+  transition: border-color 0.15s;
 }
 .fw-tlog-bubble.running {
   border-left-color: var(--dsh-accent, #58a6ff);
@@ -813,7 +821,7 @@ function onDocDown(e: MouseEvent): void {
   border-left-color: var(--dsh-accent, #238636);
 }
 .fw-tlog-bubble.error {
-  border-left-color: var(--el-color-danger, #f85149);
+  border-left-color: var(--dsh-danger, #f85149);
 }
 .fw-tlog-brow {
   display: flex;
@@ -843,8 +851,8 @@ function onDocDown(e: MouseEvent): void {
   background: color-mix(in srgb, var(--dsh-accent, #238636) 14%, transparent);
 }
 .fw-tlog-st.error {
-  color: var(--el-color-danger, #f85149);
-  background: color-mix(in srgb, var(--el-color-danger, #f85149) 14%, transparent);
+  color: var(--dsh-danger, #f85149);
+  background: color-mix(in srgb, var(--dsh-danger, #f85149) 14%, transparent);
 }
 .fw-tlog-dur-tip {
   margin-left: auto;
@@ -875,36 +883,17 @@ function onDocDown(e: MouseEvent): void {
   word-break: break-word;
 }
 /* ── 归档浏览器弹窗 ───────────────────────────── */
-.fw-taskarc-dialog .el-dialog,
-.fw-taskarc-dialog .el-dialog__header,
-.fw-taskarc-dialog .el-dialog__body {
-  background: var(--dsh-bg2, #1c2128);
-  color: var(--dsh-fg, #c9d1d9);
-}
-.fw-taskarc-dialog .el-dialog {
-  border: 1px solid var(--dsh-border, #30363d);
-  border-radius: 10px;
-  margin-top: 12vh;
-  margin-bottom: 12vh;
-  max-height: 76vh;
+/* 壳层由 .fw-clone-dialog 统一提供；此处只保留归档三列布局的高度管理。 */
+.fw-taskarc-dialog.el-dialog {
+  max-height: 80vh;
   display: flex;
   flex-direction: column;
 }
-.fw-taskarc-dialog .el-dialog__header {
-  flex-shrink: 0;
-}
+.fw-taskarc-dialog .el-dialog__header { flex-shrink: 0; }
 .fw-taskarc-dialog .el-dialog__body {
   flex-shrink: 1;
   min-height: 0;
   overflow: hidden;
-}
-.fw-taskarc-dialog .el-dialog__title {
-  color: var(--dsh-fg, #c9d1d9);
-  font-size: 14px;
-  font-weight: 600;
-}
-.fw-taskarc-dialog .el-dialog__headerbtn .el-dialog__close {
-  color: var(--dsh-fg-weak, #8b949e);
 }
 .fw-taskarc {
   display: flex;
@@ -939,8 +928,11 @@ function onDocDown(e: MouseEvent): void {
   background: var(--dsh-hover, rgba(48, 54, 61, 0.4));
 }
 .fw-taskarc-date.active {
-  border-color: var(--dsh-accent, #58a6ff);
-  background: color-mix(in srgb, var(--dsh-accent, #58a6ff) 14%, transparent);
+  border-color: color-mix(in srgb, var(--dsh-accent, #2f81f7) 45%, transparent);
+  background: var(--dsh-accent-weak);
+  box-shadow: inset 2px 0 0 var(--dsh-accent);
+  color: var(--dsh-accent);
+  font-weight: 600;
 }
 .fw-taskarc-cnt {
   font-size: 11px;
@@ -970,21 +962,23 @@ function onDocDown(e: MouseEvent): void {
 }
 /* 中列选中记录高亮（与左列日期选中一致） */
 .fw-taskarc-row.active {
-  border-color: var(--dsh-accent, #58a6ff);
-  background: color-mix(in srgb, var(--dsh-accent, #58a6ff) 14%, transparent);
+  border-color: color-mix(in srgb, var(--dsh-accent, #2f81f7) 45%, transparent);
+  background: var(--dsh-accent-weak);
+  box-shadow: inset 2px 0 0 var(--dsh-accent);
 }
 .fw-taskarc-ico {
   flex: 0 0 auto;
   width: 14px;
-  text-align: center;
-  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .fw-taskarc-row.done .fw-taskarc-ico {
   color: var(--dsh-accent, #238636);
 }
 .fw-taskarc-row.error .fw-taskarc-ico,
 .fw-taskarc-row.error .fw-taskarc-label {
-  color: var(--el-color-danger, #f85149);
+  color: var(--dsh-danger, #f85149);
 }
 .fw-taskarc-label {
   white-space: nowrap;

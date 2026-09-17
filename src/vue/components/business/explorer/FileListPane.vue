@@ -15,7 +15,11 @@
       </el-input>
     </div>
 
-    <div v-if="explorer.loadErr" class="fw-err">{{ explorer.loadErr }}</div>
+    <div v-if="explorer.loadErr" class="fw-error">
+      <span class="fw-error-ico"><icon name="warning" :size="16" /></span>
+      <span>{{ explorer.loadErr }}</span>
+      <button class="fw-retry" @click="refreshListing()">{{ t("retry") }}</button>
+    </div>
     <div v-else-if="explorer.listing" ref="wrapRef" class="fw-table-wrap" tabindex="0" @scroll="v.onScroll" @click="onWrapClick" @contextmenu.prevent="onBlankCtx" @dragover.prevent="dragOverBody" @drop.prevent="dropMove($event, null)" @mousedown="onWrapMouseDown">
       <!-- 拉框多选的半透明选择框 -->
       <div v-if="bandBox" class="fw-band" :style="{ left: bandBox.x + 'px', top: bandBox.y + 'px', width: bandBox.w + 'px', height: bandBox.h + 'px' }"></div>
@@ -227,20 +231,29 @@
     <!-- 右键菜单 -->
     <ContextMenu v-if="cmOpen" :items="cmItems" :x="cmX" :y="cmY" @close="cmOpen = false" />
 
-    <!-- 属性对话框 -->
+    <!-- 属性对话框：品牌头 + 类型徽标 + 键值卡片（与全应用弹窗同一观感） -->
     <el-dialog
       v-model="propOpen"
-      class="fw-prop-dialog"
-      :title="t('menuProperties')"
+      class="fw-prop-dialog fw-clone-dialog"
       width="420px"
+      align-center
+      modal-class="fw-blur-overlay"
       :close-on-click-modal="false"
     >
+      <template #header>
+        <div class="fw-dlg-head">
+          <span class="fw-dlg-badge"><icon :name="propData?.isDir ? 'folder' : 'file'" :size="20" /></span>
+          <span class="fw-dlg-headtext">
+            <span class="fw-dlg-headtitle">{{ t('menuProperties') }}</span>
+            <span class="fw-dlg-headsub">{{ propData?.name }}</span>
+          </span>
+        </div>
+      </template>
       <div v-if="propData" class="fw-prop-body">
-        <div class="fw-prop-row"><span class="k">{{ t('propName') }}</span><span class="v">{{ propData.name }}</span></div>
-        <div class="fw-prop-row"><span class="k">{{ t('propPath') }}</span><span class="v">{{ propData.path }}</span></div>
         <div class="fw-prop-row"><span class="k">{{ t('propKind') }}</span><span class="v">{{ propData.isDir ? t('typeFolder') : (propData.ext || t('typeFile')) }}</span></div>
         <div class="fw-prop-row"><span class="k">{{ t('propSize') }}</span><span class="v">{{ formatSize({ isDir: propData.isDir, size: propData.size }) }}</span></div>
         <div class="fw-prop-row"><span class="k">{{ t('propModified') }}</span><span class="v">{{ formatDate({ mtime: propData.mtime }) }}</span></div>
+        <div class="fw-prop-row fw-prop-row-wide"><span class="k">{{ t('propPath') }}</span><span class="v mono" :title="propData.path">{{ propData.path }}</span></div>
       </div>
       <template #footer>
         <el-button type="primary" @click="propOpen = false">{{ t('confirmOk') }}</el-button>
@@ -304,6 +317,7 @@ import {
   type RepoMenuActions,
 } from "../../../composables/domain/repoMenu";
 import ContextMenu from "../../common/ContextMenu.vue";
+import { useContextMenu } from "../../../composables/ui/useContextMenu";
 import Icon from "../../common/Icon.vue";
 import QuickCommit from "../git/QuickCommit.vue";
 import GitPanel from "../git/GitPanel.vue";
@@ -311,6 +325,7 @@ import SvnPanel from "../git/SvnPanel.vue";
 import TxtEditor from "./TxtEditor.vue";
 import { useUniformVirtual } from "../../../composables/ui/virtual";
 import { startTask } from "../../../composables/session/tasks";
+import { emptyRecycleBin } from "../../../composables/session/recycle";
 import { sessionSse } from "../../../composables/session/sessionSse";
 import { fileExtType } from "../../../composables/core/fileTaskMeta";
 import type { FsEntry, FileDetail, GitFileStatus, MenuItem, ViewMode } from "../../../../shared/types";
@@ -411,10 +426,8 @@ watch(
   },
 );
 
-const cmOpen = ref(false);
-const cmX = ref(0);
-const cmY = ref(0);
-const cmItems = ref<MenuItem[]>([]);
+// 右键菜单状态收敛到公共 composable（与 NavPane / ProjectTree 等共用）
+const { cmOpen, cmX, cmY, cmItems, openMenu } = useContextMenu();
 const propOpen = ref(false);
 const propData = ref<FileDetail | null>(null);
 const gitDiffOpen = ref(false);
@@ -1018,14 +1031,6 @@ async function open(e: FsEntry): Promise<void> {
   }
 }
 
-/** 打开位置（弹出菜单）。 */
-function openMenu(e: MouseEvent, items: MenuItem[]): void {
-  cmItems.value = items;
-  cmX.value = e.clientX;
-  cmY.value = e.clientY;
-  cmOpen.value = true;
-}
-
 // —— Git / SVN 操作（右键菜单） ——
 // 菜单项构建统一走共享模块 composables/domain/repoMenu，保证与 VS Code 面板的项目树完全一致。
 const repoMenuAct: RepoMenuActions = {
@@ -1164,7 +1169,8 @@ function onFileCtx(e: MouseEvent, entry: FsEntry): void {
   const isTxt = /\.txt$/i.test(entry.name);
   const items: MenuItem[] = [
     { label: t("menuOpen"), icon: "arrowRight", onClick: () => open(entry) },
-    { label: t("menuOpenExternal"), icon: "monitor", onClick: () => systemOpen(entry.path) },
+    // SSH 远程文件无法用「系统默认程序」打开：隐藏而非点了报错
+    ...(api.isRemoteRef(entry.path) ? [] : [{ label: t("menuOpenExternal"), icon: "monitor", onClick: () => systemOpen(entry.path) }]),
   ];
   if (isTxt) {
     items.push({ label: t("menuEdit"), icon: "edit", disabled: ro, onClick: () => openTxtEditor(entry.path) });
@@ -1467,8 +1473,16 @@ async function doPaste(destDir: string): Promise<void> {
   try {
     for (const src of clip.paths) {
       const name = src.slice(Math.max(src.lastIndexOf("/"), src.lastIndexOf("\\")) + 1);
-      const dest = await uniqueInDirFor(name, destDir);
       const meta = await statMeta(src);
+      // 剪切移动前先探测源：列表可能过期（文件已被移动/删除），此时明确提示并刷新，
+      // 而不是把晦涩的 realpath ENOENT 抛给用户。
+      if (clip.op === "cut" && !meta.fileType) {
+        toast("error", t("taskSrcMissing", { name }));
+        h.fail(t("taskSrcMissing", { name }));
+        await refreshListing();
+        return;
+      }
+      const dest = await uniqueInDirFor(name, destDir);
       h.step(clip.op === "cut" ? t("taskMoving") : t("taskCopying"), src, `→ ${destDir}`, meta.fileType, meta.fileSize);
       if (clip.op === "cut") await api.rename(src, dest, wb.key);
       else await api.copyEntry(src, destDir, wb.key);
@@ -1558,46 +1572,15 @@ async function recycleDeleteSel(paths: string[]): Promise<void> {
   await refreshRecycle();
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
-/** 清空回收站：确认 + 后台任务 + 轮询计数推进右下角进度。 */
+/** 清空回收站：共享实现（确认 + 后台任务 + 轮询计数）+ 清空当前列表选中态。 */
 async function emptyBin(): Promise<void> {
-  if ((explorer.recycleItems?.length ?? 0) === 0) return;
-  const ok = await confirmDialog({ title: t("recycleEmpty"), message: t("recycleEmptyConfirm") });
-  if (!ok) return;
-  const task = startTask(t("recycleEmptying"), "");
-  try {
-    await api.recycleEmpty();
-    let count = explorer.recycleItems?.length ?? 0;
-    // 最多轮询约 2 分钟；计数归零即视为完成。
-    for (let i = 0; i < 120; i += 1) {
-      await sleep(1000);
-      try {
-        count = (await api.recycleCount()).count;
-      } catch {
-        /* 计数接口瞬时失败，忽略并继续 */
-      }
-      task.step(t("recycleEmptyProgress", { count }));
-      if (count <= 0) break;
-    }
-    task.updateLabel(t("recycleEmptyDone"));
-    task.done(t("recycleEmptyDone"));
-    clearSel();
-    await refreshRecycle();
-  } catch (err) {
-    task.fail((err as Error).message);
-    toast("error", (err as Error).message);
-  }
+  await emptyRecycleBin();
+  clearSel();
 }
 
 // —— 压缩 / 解压 ——
 async function compressOne(entry: FsEntry): Promise<void> {
   if (!guardOperable(entry.path)) return;
-  // 远端目录：压缩依赖本地归档管线，首版不支持。
-  if (api.isRemoteRef(entry.path)) {
-    toast("error", t("remoteNoArchive"));
-    return;
-  }
   const m = entryMeta(entry);
   const h = startTask(t("taskCompressing"), entry.name, m.fileType, m.fileSize);
   try {
@@ -1614,10 +1597,6 @@ async function extractOne(entry: FsEntry): Promise<void> {
   const destDir = explorer.listing?.path ?? "";
   if (!destDir) return;
   if (!guardOperable(destDir)) return;
-  if (api.isRemoteRef(entry.path) || api.isRemoteRef(destDir)) {
-    toast("error", t("remoteNoArchive"));
-    return;
-  }
   const m = entryMeta(entry);
   const h = startTask(t("taskExtracting"), entry.name, m.fileType, m.fileSize);
   try {
@@ -1668,11 +1647,6 @@ async function multiOp(op: "cut" | "copy" | "delete" | "compress"): Promise<void
       toast("ok", t("deleted"));
       h.done();
     } else if (op === "compress") {
-      // 远端项整批不支持：先拦下，避免逐项请求后拿到一串 501。
-      if (sel.some((p) => api.isRemoteRef(p))) {
-        toast("error", t("remoteNoArchive"));
-        return;
-      }
       for (const p of sel) {
         try {
           const meta = await statMeta(p);
@@ -1827,7 +1801,6 @@ async function newEntry(kind: "folder" | "file"): Promise<void> {
 .fw-git-badge.st-modified { color: #d29922; border: 1px solid #d29922; }
 .fw-git-badge.st-deleted { color: #f85149; border: 1px solid #f8514988; }
 .fw-broken-tag { margin-left: 6px; font-size: calc(9px * var(--dsh-fs-scale, 1)); color: #f85149; border: 1px solid #f85149; border-radius: 3px; padding: 0 3px; }
-.fw-err { color: #b62324; font-size: calc(12px * var(--dsh-fs-scale, 1)); padding: 8px 12px; }
 .fw-empty-small { padding: 16px; text-align: center; color: var(--dsh-fg-weak, #8b949e); font-size: calc(12px * var(--dsh-fs-scale, 1)); }
 
 /* —— 刷新/加载动画遮罩 —— */
@@ -1953,33 +1926,32 @@ async function newEntry(kind: "folder" | "file"): Promise<void> {
 .fw-tile2 .fw-t2-size { font-size: calc(11px * var(--dsh-fs-scale, 1)); color: var(--dsh-fg-weak, #8b949e); }
 
 /* —— 属性对话框（el-dialog，自持项目主题调色板） —— */
-:global(.fw-prop-dialog.el-dialog) {
-  --el-dialog-bg-color: var(--dsh-bg2, #161b22);
-  --el-text-color-primary: var(--dsh-fg, #c9d1d9);
-  --el-text-color-regular: var(--dsh-fg, #c9d1d9);
-  --el-border-color: var(--dsh-border, #30363d);
-  --el-border-color-light: var(--dsh-border, #30363d);
-  --el-border-radius-base: 8px;
+/* 属性对话框：外壳交给 fw-clone-dialog 基类（头部/遮罩/控件统一），此处只留键值卡片 */
+:global(.fw-prop-dialog .el-dialog__title) { display: none; }
+:global(.fw-prop-dialog .el-dialog__headerbtn) { top: 14px; color: var(--dsh-fg-weak, #8b949e); }
+.fw-prop-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
   border: 1px solid var(--dsh-border, #30363d);
-  border-radius: 8px;
+  border-radius: var(--dsh-radius-md, 8px);
   overflow: hidden;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
-:global(.fw-prop-dialog .el-dialog__header) {
-  margin-right: 0;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--dsh-border, #30363d);
+.fw-prop-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 8px 12px;
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+  background: var(--dsh-bg2, #161b22);
 }
-:global(.fw-prop-dialog .el-dialog__body) {
-  padding: 14px 16px;
-}
-:global(.fw-prop-dialog .el-dialog__footer) {
-  padding: 10px 16px 14px;
-}
-.fw-prop-body { display: flex; flex-direction: column; gap: 10px; }
-.fw-prop-row { display: flex; justify-content: space-between; gap: 12px; font-size: calc(12px * var(--dsh-fs-scale, 1)); }
+.fw-prop-row:nth-child(odd) { background: color-mix(in srgb, var(--dsh-bg, #0d1117) 55%, var(--dsh-bg2, #161b22)); }
 .fw-prop-row .k { color: var(--dsh-fg-weak, #8b949e); flex-shrink: 0; }
 .fw-prop-row .v { word-break: break-all; text-align: right; }
+.fw-prop-row-wide { flex-direction: column; gap: 4px; }
+.fw-prop-row-wide .v { text-align: left; }
+.fw-prop-row .v.mono { font-family: var(--dsh-mono, ui-monospace, sfmono-regular, consolas, monospace); font-size: calc(11px * var(--dsh-fs-scale, 1)); }
 
 /* —— Git 改动对话框 —— */
 :global(.fw-gitdiff-dialog.el-dialog) {

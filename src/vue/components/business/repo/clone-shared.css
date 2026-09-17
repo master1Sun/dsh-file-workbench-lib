@@ -59,14 +59,25 @@
   gap: 16px;
 }
 
-/* 顶部品牌区：左侧彩色徽标 + 右侧标题/副标题，一眼区分 Git / SVN */
-.fw-clone-head {
+/* 顶部品牌区：左侧彩色徽标 + 右侧标题/副标题，一眼区分 Git / SVN。
+ * 通用别名 .fw-dlg-head 系列供设置等非 clone 弹窗复用同一套头部观感
+ * （徽标颜色由弹窗根节点上的 --clone-accent 三件套决定，默认走主题强调色）。 */
+.fw-clone-head,
+.fw-dlg-head {
   display: flex;
   align-items: center;
   gap: 12px;
   padding-bottom: 4px;
 }
-.fw-clone-badge {
+/* 通用别名默认走主题强调色；clone 弹窗的 Git 橙 / SVN 蓝定义在更高层级
+   （.fw-clone-dialog.fw-clone-git/svn），不会被这里的默认值覆盖。 */
+.fw-dlg-head {
+  --clone-accent: var(--dsh-accent, #2f81f7);
+  --clone-accent-weak: color-mix(in srgb, var(--dsh-accent, #2f81f7) 14%, transparent);
+  --clone-accent-border: color-mix(in srgb, var(--dsh-accent, #2f81f7) 45%, transparent);
+}
+.fw-clone-badge,
+.fw-dlg-badge {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -78,19 +89,22 @@
   border: 1px solid var(--clone-accent-border);
   color: var(--clone-accent);
 }
-.fw-clone-headtext {
+.fw-clone-headtext,
+.fw-dlg-headtext {
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
 }
-.fw-clone-headtitle {
+.fw-clone-headtitle,
+.fw-dlg-headtitle {
   font-size: calc(15px * var(--dsh-fs-scale, 1));
   font-weight: 600;
   color: var(--dsh-fg, #c9d1d9);
   letter-spacing: 0.3px;
 }
-.fw-clone-headsub {
+.fw-clone-headsub,
+.fw-dlg-headsub {
   font-size: calc(12px * var(--dsh-fs-scale, 1));
   color: var(--dsh-fg-weak, #8b949e);
 }
@@ -292,4 +306,54 @@
 /* 页脚的取消/主按钮：给最小宽度，两个按钮视觉重量均衡 */
 .fw-clone-dialog .el-dialog__footer .fw-clone-btn {
   min-width: 84px;
+}
+
+/* ── Element Plus 控件主题化（32px 规范，一处定义）────────────────
+   此前「克隆弹窗 / 账号管理 / SSH 主机」各写一遍：--el-component-size-small 默认 24px
+   正是输入框比下拉矮的根因；el-select__wrapper 的 min-height 不吃该变量，需单独覆盖。 */
+.fw-clone-dialog.el-dialog { --el-component-size-small: 32px; }
+.fw-clone-dialog .el-input__wrapper {
+  background: var(--dsh-bg, #0d1117);
+  border-radius: var(--dsh-radius-md, 8px);
+  box-shadow: 0 0 0 1px var(--dsh-border, #30363d) inset;
+  transition: box-shadow 0.15s;
+}
+.fw-clone-dialog .el-input__wrapper:hover:not(.is-focus) {
+  box-shadow: 0 0 0 1px var(--dsh-fg-weak, #8b949e) inset;
+}
+.fw-clone-dialog .el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--clone-accent) inset, 0 0 0 3px var(--clone-accent-weak);
+}
+.fw-clone-dialog .el-input__inner { color: var(--dsh-fg, #c9d1d9); }
+.fw-clone-dialog .el-input__inner::placeholder { color: var(--dsh-fg-weak, #8b949e); opacity: 0.7; }
+.fw-clone-dialog .el-select--small .el-select__wrapper {
+  min-height: 32px;
+  background: var(--dsh-bg, #0d1117);
+  border-radius: var(--dsh-radius-md, 8px);
+  box-shadow: 0 0 0 1px var(--dsh-border, #30363d) inset;
+}
+.fw-clone-dialog .el-select--small .el-select__wrapper.is-focused {
+  box-shadow: 0 0 0 1px var(--clone-accent) inset, 0 0 0 3px var(--clone-accent-weak);
+}
+.fw-clone-dialog .el-dialog__footer { display: flex; justify-content: flex-end; align-items: center; gap: 10px; }
+.fw-clone-dialog .el-button--small {
+  --el-button-size: 32px;
+  height: 32px;
+  min-width: 68px;
+  border-radius: var(--dsh-radius-md, 8px);
+  background: var(--dsh-bg, #0d1117);
+  border: 1px solid var(--dsh-border, #30363d);
+  color: var(--dsh-fg, #c9d1d9);
+  font-weight: 500;
+}
+.fw-clone-dialog .el-button--small:not(.el-button--primary):hover {
+  border-color: var(--clone-accent);
+  color: var(--clone-accent);
+  background: var(--dsh-bg, #0d1117);
+}
+.fw-clone-dialog .el-button--small.el-button--primary {
+  background: var(--clone-accent);
+  border-color: var(--clone-accent);
+  color: #fff;
+  font-weight: 600;
 }
