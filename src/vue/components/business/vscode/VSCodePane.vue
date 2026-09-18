@@ -101,9 +101,9 @@
         </div>
       </div>
       <!-- 右栏被折叠时：分隔条与右栏隐藏，左栏右缘出现竖排把手，点击展开编辑区 -->
-      <button v-if="rightFolded" class="vs-unfold-handle" :title="t('vsUnfoldEditor')" @click="rightFolded = false">
+      <!-- <button v-if="rightFolded" class="vs-unfold-handle" :title="t('vsUnfoldEditor')" @click="rightFolded = false">
         <icon name="chevronRight" :size="12" />
-      </button>
+      </button> -->
       <!-- 拖拽分隔条 -->
       <div
         class="vs-split"
