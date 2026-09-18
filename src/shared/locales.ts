@@ -171,7 +171,6 @@ export const zh = {
   navGallery: "图库",
   navThisPc: "此电脑",
   externalInjection: "外部注入",
-  externalInjectionEmpty: "暂无注入内容",
   driveLabel: "本地磁盘 ({drive}:)",
   // 消息提示（右下角浮层）
   toastClose: "关闭提示",
@@ -1054,7 +1053,6 @@ export const en: Record<CopyKey, string> = {
   navGallery: "Gallery",
   navThisPc: "This PC",
   externalInjection: "External injections",
-  externalInjectionEmpty: "No injected content",
   driveLabel: "Local Disk ({drive}:)",
   // Message toast (bottom-right overlay)
   toastClose: "Close notification",

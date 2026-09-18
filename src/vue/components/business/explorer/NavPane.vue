@@ -31,33 +31,6 @@
     <!-- 分割线①：主文件夹 / 快速访问  ⇢  此电脑 -->
     <div class="fw-nav-div" aria-hidden="true"></div>
 
-    <!-- 外部注入：与「我的电脑」同属左侧列表，可单独折叠。 -->
-    <div v-if="externalViews.length" class="fw-nav-sec fw-nav-external" :class="{ collapsed: externalCollapsed }">
-      <button class="fw-sec-h" :aria-expanded="!externalCollapsed" @click="emit('toggle-external')">
-        <span class="fw-caret" :class="{ open: !externalCollapsed }"><icon :name="externalCollapsed ? 'chevronRight' : 'chevronDown'" :size="11" /></span>
-        <span class="fw-sec-txt">{{ t("externalInjection") }}</span>
-      </button>
-      <div v-if="!externalCollapsed" class="fw-sec-b">
-        <div v-if="!externalViews.length" class="fw-nav-empty">{{ t("externalInjectionEmpty") }}</div>
-        <button
-          v-for="view in externalViews"
-          :key="view.id"
-          class="fw-nav-item fw-nav-external-item"
-          :class="{ active: activeExternalId === view.id }"
-          :title="activityLabel(view)"
-          @click="emit('select-external', view.id)"
-        >
-          <span class="fw-nav-ico">
-            <icon v-if="hasIcon(view.icon ?? '')" :name="view.icon ?? ''" :size="14" />
-            <span v-else>{{ activityLabel(view).slice(0, 1) }}</span>
-          </span>
-          <span class="fw-nav-label">
-            <span>{{ activityLabel(view) }}</span>
-          </span>
-        </button>
-      </div>
-    </div>
-
     <!-- 此电脑：标题只负责展开/折叠，右键标题仍打开菜单。 -->
     <div class="fw-nav-sec" :class="{ collapsed: !open.myComputer, active: !externalActive && explorer.view === 'computer' }">
       <button class="fw-sec-h" :aria-expanded="open.myComputer" @click="toggleMyComputer" @contextmenu.prevent.stop="onThisPcCtx">
@@ -95,6 +68,32 @@
       <span class="fw-nav-ico"><icon name="trash" :size="14" /></span>
       <span class="fw-nav-label">{{ t("recycleBin") }}</span>
     </button>
+
+    <!-- 外部注入：置于回收站下方，无注册视图时整组不显示。 -->
+    <div v-if="externalViews.length" class="fw-nav-sec fw-nav-external" :class="{ collapsed: externalCollapsed }">
+      <button class="fw-sec-h" :aria-expanded="!externalCollapsed" @click="emit('toggle-external')">
+        <span class="fw-caret" :class="{ open: !externalCollapsed }"><icon :name="externalCollapsed ? 'chevronRight' : 'chevronDown'" :size="11" /></span>
+        <span class="fw-sec-txt">{{ t("externalInjection") }}</span>
+      </button>
+      <div v-if="!externalCollapsed" class="fw-sec-b">
+        <button
+          v-for="view in externalViews"
+          :key="view.id"
+          class="fw-nav-item fw-nav-external-item"
+          :class="{ active: activeExternalId === view.id }"
+          :title="activityLabel(view)"
+          @click="emit('select-external', view.id)"
+        >
+          <span class="fw-nav-ico">
+            <icon v-if="hasIcon(view.icon ?? '')" :name="view.icon ?? ''" :size="14" />
+            <span v-else>{{ activityLabel(view).slice(0, 1) }}</span>
+          </span>
+          <span class="fw-nav-label">
+            <span>{{ activityLabel(view) }}</span>
+          </span>
+        </button>
+      </div>
+    </div>
 
     <!-- 插件自有分组（SSH / 收藏）：靠分组标题自身分区，不再加分隔线 -->
     <!-- SSH 远端主机（插件自有分组：已配置主机各占一行，点击进入远端根浏览） -->
