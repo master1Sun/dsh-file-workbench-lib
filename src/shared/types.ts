@@ -409,6 +409,8 @@ declare global {
      * 各自持有一份模块状态，直接 import 会导致 Vue 侧读到永远为空的引用。
      */
     __DSH_SIDEBAR_RIGHT__?: SidebarRightBridge;
+    /** 临时：贡献点集成测试探针的加载 URL（见 main.ts，测完随该处引用一并删除）。 */
+    __dshTestProbeUrl?: string;
   }
 }
 

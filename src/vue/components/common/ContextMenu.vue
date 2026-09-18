@@ -4,6 +4,7 @@
       <div
         ref="menuEl"
         class="fw-cm"
+        :class="{ 'fw-cm-up': props.placement === 'top' }"
         :data-theme="currentTheme"
         :style="{ left: pos.x + 'px', top: pos.y + 'px' }"
         @mousedown.stop
@@ -101,6 +102,8 @@ interface Props {
   maxHeight?: string;
   /** 固定在列表底部、不随列表滚动的条目（如「打开文件夹…」），始终可见。 */
   footerItems?: MenuItem[];
+  /** 弹出方向：'bottom'（默认，向下）或 'top'（向上生长，供底部状态栏等贴底锚点用）。 */
+  placement?: "top" | "bottom";
 }
 
 const props = defineProps<Props>();
@@ -139,16 +142,28 @@ watch(
   },
 );
 
+// 条目注册表变化（如测试/插件在菜单打开期间 register/unregister）→ 重算位置，
+// 避免菜单高度变化后贴底锚点（placement=top）的向上位移失准、菜单漂到触发按钮上。
+watch(
+  () => props.items,
+  () => {
+    if (visible.value) requestAnimationFrame(clamp);
+  },
+);
+
 function clamp(): void {
   const el = menuEl.value;
   if (!el) return;
   const rw = window.innerWidth;
   const rh = window.innerHeight;
   const r = el.getBoundingClientRect();
+  // placement=top：菜单经 translateY(-100%) 升到锚点之上，getBoundingClientRect 已含该位移，
+  // 故此处按真实（上移后）尺寸夹取即可。
   let nx = pos.value.x;
   let ny = pos.value.y;
   if (nx + r.width > rw - 4) nx = Math.max(4, rw - r.width - 4);
   if (ny + r.height > rh - 4) ny = Math.max(4, rh - r.height - 4);
+  if (r.top < 4) ny = Math.max(4, ny + (4 - r.top));
   pos.value = { x: nx, y: ny };
 }
 
@@ -287,6 +302,24 @@ onBeforeUnmount(() => {
 .fw-cm-scroll {
   max-height: min(70vh, calc(100vh - 16px));
   overflow-y: auto;
+}
+/* placement=top：贴底锚点（如底部状态栏「扩展」）向上弹出。
+   top 给的是触发按钮上沿，用 translateY(-100%) 让菜单整体升到该点之上；
+   clamp() 仍按视口夹取 left/top，故超高时会被推回可见区、不会溢出屏幕。 */
+.fw-cm-up {
+  transform-origin: bottom left;
+  translate: 0 -100%;
+  animation: fw-cm-in-up 0.1s ease-out;
+}
+@keyframes fw-cm-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(3px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 /* 底部固定区：与列表以分隔线区分，不随列表滚动，始终可见 */
 .fw-cm-footer {

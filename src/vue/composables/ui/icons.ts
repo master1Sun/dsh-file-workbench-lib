@@ -82,8 +82,12 @@ export const ICONS: Record<string, string> = {
     '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
   chevronLeft: '<polyline points="15 18 9 12 15 6"/>',
   chevronRight: '<polyline points="9 18 15 12 9 6"/>',
+  chevronsLeft: '<polyline points="11 17 6 12 11 7"/><polyline points="18 17 13 12 18 7"/>',
+  chevronsRight: '<polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/>',
   chevronUp: '<polyline points="18 15 12 9 6 15"/>',
   chevronDown: '<polyline points="6 9 12 15 18 9"/>',
+  chevronsUp: '<polyline points="17 11 12 6 7 11"/><polyline points="17 18 12 13 7 18"/>',
+  chevronsDown: '<polyline points="7 6 12 11 17 6"/><polyline points="7 13 12 18 17 13"/>',
   external:
     '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
   /** 文档 + 向左弹出的弧形箭头（在新窗口打开变更详情）。 */

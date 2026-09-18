@@ -13,9 +13,20 @@
  * 相同（能注册 = 宿主加载了该脚本），不引入新风险；id 建议带插件命名空间（如 "xxx.notes"）。
  */
 import { ref } from "vue";
+import { startTask, clearFinished, clearAll } from "../composables/session/tasks";
 
-/** API 契约版本：以后破坏性修改 ctx 结构时递增，插件据此降级/告警。 */
-export const ACTIVITY_API_VERSION = 1;
+/**
+ * API 契约版本：以后破坏性修改 ctx 结构时递增，插件据此降级/告警。
+ *
+ * v2：`ActivityContext` 增加 activeFile / listOpenFiles / onDidChangeActiveFile（当前激活文件感知），
+ * window API 增加 commands 命名空间（registerCommand / executeCommand / …，轻量命令贡献点）。
+ * v3：文件工作台 window API（`__dshFileWorkbenchWorkbench__`）增加 backgroundTasks 命名空间——
+ * 外部插件可把工作台的后台任务系统当作通用进度登记处使用（start / list / clear…）。
+ * v4：文件工作台 window API 增加 statusbar 命名空间（register / unregister / list）——工作台底部
+ * 「扩展」弹出菜单贡献点，与编辑器的状态栏/扩展菜单注册表**完全独立**（两套面板各一份）。
+ * 均为**向后兼容的增量**——低版本插件不受影响，可按 `apiVersion >= N` 探测新能力。
+ */
+export const ACTIVITY_API_VERSION = 4;
 
 /** 注入视图文案：可传普通字符串，也可按 locale 提供多语言文本。 */
 export type ActivityText = string | Readonly<Record<string, string>>;
@@ -36,12 +47,18 @@ export interface ActivityContext {
   readonly projectDir: string | null;
   /** 当前主题（getter）。 */
   readonly theme: "dark" | "light";
+  /** 当前激活标签对应的文件绝对路径（getter；无激活文件时为 null）。 */
+  readonly activeFile: string | null;
   /** 订阅项目切换；立即回调一次当前值，返回取消订阅函数。 */
   onProjectChange(fn: (dir: string | null) => void): () => void;
   /** 订阅主题切换；立即回调一次当前值，返回取消订阅函数。 */
   onThemeChange(fn: (t: "dark" | "light") => void): () => void;
+  /** 订阅激活文件切换；立即回调一次当前值，返回取消订阅函数。 */
+  onDidChangeActiveFile(fn: (path: string | null) => void): () => void;
   /** 在编辑器中打开文件（加入标签、加载内容，可跳行）。 */
   openFile(path: string, opts?: { line?: number }): Promise<void>;
+  /** 当前已打开的文件标签绝对路径列表（按打开顺序）。 */
+  listOpenFiles(): string[];
   /** 在编辑器 diff 伪标签中展示文本行（+/-/@@ 前缀，复用 GitDiffView 着色）。 */
   openDiff(title: string, lines: string[]): void;
   /** 统一右下角消息提示。 */
@@ -102,12 +119,266 @@ export function listWorkbenchActivityViews(): ActivityView[] {
   return workbenchRegistry.value;
 }
 
+/* ---- 外部注入视图的「滚动兜底」 ---- */
+
+/**
+ * 修复插件注入内容「过长却无法用鼠标滚动」的问题。
+ *
+ * 症状根因：插件 DOM 不带 scoped 标记，其自带 / 全局样式（Tailwind preflight、reset.css 等）
+ * 常把某个包裹层设成 `overflow:hidden`。此时内容溢出被那层裁掉，而外层注入容器又因
+ * scrollHeight==clientHeight 不出现滚动条 —— 表现为滚轮 / 拖动滚动条都无反应。
+ *
+ * 「是否溢出」是运行时量（scrollHeight>clientHeight），CSS 选择器无法表达，故在插件挂载后
+ * 做一次轻量遍历：只对**确实溢出却被 hidden/clip 裁切**的元素改回可滚动；未溢出的元素不动，
+ * 避免给内部布局强加滚动条。插件若异步撑高内容，由调用点的 ResizeObserver 再触发一次即可。
+ */
+export function ensureInjectedViewScrollable(host: HTMLElement): void {
+  if (!host) return;
+  host.style.overflowY = "auto"; // 保证宿主容器自身可滚（幂等，与 CSS 一致）
+  const walker = document.createTreeWalker(host, NodeFilter.SHOW_ELEMENT);
+  for (let node = walker.firstChild(); node; node = walker.nextSibling()) {
+    const el = node as HTMLElement;
+    if (el.scrollHeight <= el.clientHeight + 1) continue; // 无纵向溢出 → 无需处理
+    const oy = getComputedStyle(el).overflowY;
+    if (oy === "hidden" || oy === "clip") el.style.overflowY = "auto";
+  }
+}
+
+/* ---- 轻量命令贡献点：插件注册可被调用的动作，宿主 / 其他插件按 id 触发 ---- */
+
+/** 一个已注册命令的处理器；返回值原样回传给 executeCommand 调用方。 */
+export type CommandHandler = (...args: unknown[]) => unknown | Promise<unknown>;
+
+/**
+ * 模块级命令表（跨面板卸载重建存活，与视图注册表同生命周期）。
+ *
+ * 刻意**只存不自动接线**：注册后由其他脚本 / 面板主动 `executeCommand` 才生效——
+ * 相当于 VS Code 的 `commands.registerCommand` + 需要别处挂触发的组合，避免向编辑器
+ * 内部注入未经请求的行为。id 建议带命名空间（如 "myPlugin.revealInTree"）。
+ */
+const commandRegistry = new Map<string, CommandHandler>();
+
+/** 注册命令（幂等：同 id 覆盖，支持热更新）。 */
+export function registerCommand(id: string, handler: CommandHandler): void {
+  commandRegistry.set(id, handler);
+}
+
+/** 注销命令（返回是否存在并被移除）。 */
+export function unregisterCommand(id: string): boolean {
+  return commandRegistry.delete(id);
+}
+
+/** 是否已注册某命令。 */
+export function hasCommand(id: string): boolean {
+  return commandRegistry.has(id);
+}
+
+/** 当前已注册命令 id 列表。 */
+export function listCommands(): string[] {
+  return [...commandRegistry.keys()];
+}
+
+/**
+ * 执行命令：未注册的 id 静默返回 undefined（对齐 VS Code「无处理器则 no-op」）。
+ * 处理器抛错会向上冒泡给调用方，由其决定提示方式。
+ */
+export function executeCommand<T = unknown>(id: string, ...args: unknown[]): T | undefined {
+  const h = commandRegistry.get(id);
+  if (!h) return undefined;
+  return h(...args) as T | undefined;
+}
+
+/* ---- 状态栏项贡献点：插件在编辑器底部状态栏放一个可点击按钮，点击即触发某命令 ---- */
+
+/** 传给命令处理器的上下文（状态栏项点击时由面板注入）。 */
+export interface StatusCommandContext {
+  /** 当前激活文件绝对路径；无激活文件时为 null。 */
+  path: string | null;
+  /** 当前项目目录；未打开项目时为 null。 */
+  projectDir: string | null;
+}
+
+/** 一个状态栏扩展项的注册契约。 */
+export interface StatusBarItem {
+  /** 唯一 id（建议带命名空间）；同 id 覆盖。 */
+  id: string;
+  /** 按钮文案。 */
+  text: string;
+  /** 点击时执行的命令 id（须已通过 commands.register 注册，否则点击为 no-op）。 */
+  commandId: string;
+  /** 悬浮提示；缺省用 commandId。 */
+  tooltip?: string;
+  /** 排序权重（小的靠前；内置只读/冲突徽标之后按此排序）。 */
+  order?: number;
+  /** 可见性谓词（如「有激活文件才显示」），入参为当前状态上下文；缺省恒显示。 */
+  when?(ctx: StatusCommandContext): boolean;
+}
+
+/** 已注册的状态栏项（reactive ref → 面板渲染随注册/注销实时更新）。 */
+const statusBarRegistry = ref<StatusBarItem[]>([]);
+
+/** 注册状态栏项（幂等：同 id 覆盖）。 */
+export function registerStatusBarItem(item: StatusBarItem): void {
+  unregisterStatusBarItem(item.id);
+  statusBarRegistry.value = [...statusBarRegistry.value, item].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+}
+
+/** 注销状态栏项（不存在时静默）。 */
+export function unregisterStatusBarItem(id: string): void {
+  statusBarRegistry.value = statusBarRegistry.value.filter((i) => i.id !== id);
+}
+
+/** 只读列表（面板消费）。 */
+export function listStatusBarItems(): StatusBarItem[] {
+  return statusBarRegistry.value;
+}
+
+/* ---- 扩展菜单项贡献点：插件在编辑器顶栏「扩展」下拉里放一个可点击条目，点击即触发某命令 ---- */
+
+/**
+ * 扩展菜单项。契约与 StatusBarItem 完全一致（id/text/commandId/tooltip/order/when），
+ * 独立注册表：状态栏是平铺按钮、空间有限；顶栏「扩展」菜单是展开列表，可容纳全部注册项。
+ */
+export type ExtensionMenuItem = StatusBarItem;
+
+/** 已注册的扩展菜单项（reactive ref → 菜单渲染随注册/注销实时更新）。 */
+const extensionMenuRegistry = ref<ExtensionMenuItem[]>([]);
+
+/** 注册扩展菜单项（幂等：同 id 覆盖，按 order 升序）。 */
+export function registerExtensionMenuItem(item: ExtensionMenuItem): void {
+  unregisterExtensionMenuItem(item.id);
+  extensionMenuRegistry.value = [...extensionMenuRegistry.value, item].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+}
+
+/** 注销扩展菜单项（不存在时静默）。 */
+export function unregisterExtensionMenuItem(id: string): void {
+  extensionMenuRegistry.value = extensionMenuRegistry.value.filter((i) => i.id !== id);
+}
+
+/** 只读列表（面板消费）。 */
+export function listExtensionMenuItems(): ExtensionMenuItem[] {
+  return extensionMenuRegistry.value;
+}
+
+/* ---- 工作台底部「扩展」菜单贡献点：与编辑器的两套注册表完全独立 ---- */
+
+/**
+ * 传给工作台扩展菜单命令处理器的上下文。工作台没有「编辑器激活标签」概念，
+ * 故 path 恒为 null；projectDir = 当前工作区根目录（wb.root）。
+ */
+export interface WorkbenchStatusContext {
+  /** 保留字段以对齐编辑器契约；工作台恒为 null。 */
+  path: string | null;
+  /** 当前工作区根目录；未打开时为 null。 */
+  projectDir: string | null;
+}
+
+/** 一个工作台扩展菜单项的注册契约（结构同 StatusBarItem，但走独立注册表 + 独立 window API）。 */
+export interface WorkbenchStatusBarItem {
+  id: string;
+  text: string;
+  commandId: string;
+  tooltip?: string;
+  order?: number;
+  when?(ctx: WorkbenchStatusContext): boolean;
+}
+
+/** 已注册的工作台扩展菜单项（reactive ref → StatusBar 渲染随注册/注销实时更新）。 */
+const workbenchStatusRegistry = ref<WorkbenchStatusBarItem[]>([]);
+
+/** 注册工作台扩展菜单项（幂等：同 id 覆盖，按 order 升序）。 */
+export function registerWorkbenchStatusBarItem(item: WorkbenchStatusBarItem): void {
+  unregisterWorkbenchStatusBarItem(item.id);
+  workbenchStatusRegistry.value = [...workbenchStatusRegistry.value, item].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+}
+
+/** 注销工作台扩展菜单项（不存在时静默）。 */
+export function unregisterWorkbenchStatusBarItem(id: string): void {
+  workbenchStatusRegistry.value = workbenchStatusRegistry.value.filter((i) => i.id !== id);
+}
+
+/** 只读列表（StatusBar 消费）。 */
+export function listWorkbenchStatusBarItems(): WorkbenchStatusBarItem[] {
+  return workbenchStatusRegistry.value;
+}
+
+/* ---- 后台任务贡献点：把工作台既有的长任务登记处开放给外部插件复用 ---- */
+
+/** startTask 的可选参数：与内部 FileListPane 等调用方同一套语义。 */
+export interface TaskStartOptions {
+  /** 目标详情（文件/目录路径或计数），显示在任务行右侧。 */
+  detail?: string;
+  /** 操作文件的类型名称（如 `.png` / 「文件夹」），用于日志概要聚合。 */
+  fileType?: string;
+  /** 操作文件大小（字节，仅文件）。 */
+  fileSize?: number;
+}
+
+/**
+ * 发起任务后返回的句柄：插件据此推进 / 收尾自己的长任务。
+ * 与内部 `TaskHandle` 同结构；这里显式声明以隔离实现细节。
+ */
+export interface PluginTaskHandle {
+  /** 记录一个中间步骤（仅运行中生效）。 */
+  step(msg: string, file?: string, detail?: string, fileType?: string, fileSize?: number): void;
+  /** 修改任务描述文案。 */
+  updateLabel(label: string): void;
+  /** 标记成功（可带补充消息）。 */
+  done(msg?: string): void;
+  /** 标记失败（带原因）。 */
+  fail(msg?: string): void;
+}
+
+/** 暴露给外部插件的后台任务门面。 */
+export interface BackgroundTasks {
+  /** 发起一个后台任务，返回句柄用于 step / done / fail。 */
+  start(label: string, opts?: TaskStartOptions): PluginTaskHandle;
+  /** 清除已结束任务（活跃历史先归档再清空）。 */
+  clearFinished(): Promise<void>;
+  /** 清空全部任务（含运行中）。 */
+  clearAll(): Promise<void>;
+}
+
+/**
+ * 桥接到 workbench 的任务实现（composables/session/tasks）。
+ *
+ * 静态导入安全：tasks → useApi 的模块副作用只是建 reactive store / 定义函数，无 eager 网络调用；
+ * 且 activityBar 不在 tasks/useApi 的依赖链上，无循环。这样 `start()` 同步建任务、立即出现在面板。
+ */
+const backgroundTasks: BackgroundTasks = {
+  start(label, opts) {
+    return startTask(label, opts?.detail, opts?.fileType, opts?.fileSize);
+  },
+  clearFinished() {
+    return clearFinished();
+  },
+  clearAll() {
+    return clearAll();
+  },
+};
+
 /* ---- window 全局 API（跨 bundle 注入入口） ---- */
 interface WorkbenchVSCodeAPI {
   apiVersion: number;
   activityBar: {
     register: typeof registerActivityView;
     unregister: typeof unregisterActivityView;
+  };
+  commands: {
+    register: typeof registerCommand;
+    unregister: typeof unregisterCommand;
+    execute: typeof executeCommand;
+    list: typeof listCommands;
+    has: typeof hasCommand;
+  };
+  statusbar: {
+    register: typeof registerStatusBarItem;
+    unregister: typeof unregisterStatusBarItem;
+    list: typeof listStatusBarItems;
+    /** 顶栏「扩展」下拉菜单贡献点：条目契约同 StatusBarItem，独立注册表。 */
+    registerMenu: typeof registerExtensionMenuItem;
+    unregisterMenu: typeof unregisterExtensionMenuItem;
+    listMenu: typeof listExtensionMenuItems;
   };
 }
 
@@ -117,6 +388,81 @@ interface WorkbenchActivityAPI {
     register: typeof registerWorkbenchActivityView;
     unregister: typeof unregisterWorkbenchActivityView;
   };
+  statusbar: {
+    register: typeof registerWorkbenchStatusBarItem;
+    unregister: typeof unregisterWorkbenchStatusBarItem;
+    list: typeof listWorkbenchStatusBarItems;
+  };
+  backgroundTasks: BackgroundTasks;
+}
+
+/* ---- 早注册代理的认领端（生产端见 src/client/contributionProxy.ts） ---- */
+
+/** client 桥接预置的占位代理：真实实现就绪后由本模块 rebind + flush。 */
+interface ContributionProxy {
+  /** 把三个命名空间的真实实现挂上（命令 / 视图 / 状态栏项）。 */
+  rebindVSCode(h: {
+    registerView: typeof registerActivityView;
+    unregisterView: typeof unregisterActivityView;
+    registerCommand: typeof registerCommand;
+    executeCommand: typeof executeCommand;
+    hasCommand: typeof hasCommand;
+    listCommands: typeof listCommands;
+    unregisterCommand: typeof unregisterCommand;
+    registerStatus: typeof registerStatusBarItem;
+    unregisterStatus: typeof unregisterStatusBarItem;
+    listStatus: typeof listStatusBarItems;
+    registerMenu: typeof registerExtensionMenuItem;
+    unregisterMenu: typeof unregisterExtensionMenuItem;
+    listMenu: typeof listExtensionMenuItems;
+  }): void;
+  rebindWorkbench(h: {
+    registerView: typeof registerWorkbenchActivityView;
+    unregisterView: typeof unregisterWorkbenchActivityView;
+    registerStatus: typeof registerWorkbenchStatusBarItem;
+    unregisterStatus: typeof unregisterWorkbenchStatusBarItem;
+    listStatus: typeof listWorkbenchStatusBarItems;
+    backgroundTasks: BackgroundTasks;
+  }): void;
+  /** 冲刷缓冲队列并停止缓冲；此后 window 上的对象即真实 API。 */
+  flush(): void;
+}
+
+/**
+ * 尝试认领已存在的早注册代理并把真实实现接上、冲刷缓冲。
+ * @returns true = 认领成功（window 已由代理持有，调用方无需再赋值）；false = 无代理（独立 dev）。
+ */
+function adoptContributionProxy(): boolean {
+  const w = window as unknown as Record<string, unknown>;
+  // __proxy 只存在于 client 预置的占位代理上（见 contributionProxy.ts）；真实 API 没有该字段。
+  const proxy = (w.__dshFileWorkbenchVSCode__ as { __proxy?: ContributionProxy } | undefined)?.__proxy;
+  if (!proxy) return false;
+  proxy.rebindVSCode({
+    registerView: registerActivityView,
+    unregisterView: unregisterActivityView,
+    registerCommand: registerCommand,
+    executeCommand: executeCommand,
+    hasCommand: hasCommand,
+    listCommands: listCommands,
+    unregisterCommand: unregisterCommand,
+    registerStatus: registerStatusBarItem,
+    unregisterStatus: unregisterStatusBarItem,
+    listStatus: listStatusBarItems,
+    registerMenu: registerExtensionMenuItem,
+    unregisterMenu: unregisterExtensionMenuItem,
+    listMenu: listExtensionMenuItems,
+  });
+  proxy.rebindWorkbench({
+    registerView: registerWorkbenchActivityView,
+    unregisterView: unregisterWorkbenchActivityView,
+    registerStatus: registerWorkbenchStatusBarItem,
+    unregisterStatus: unregisterWorkbenchStatusBarItem,
+    listStatus: listWorkbenchStatusBarItems,
+    backgroundTasks,
+  });
+  // 微任务边界：让「同步紧跟着 register 的调用」先进队，再一次性 flush，保证顺序正确。
+  queueMicrotask(() => proxy.flush());
+  return true;
 }
 
 if (typeof window !== "undefined") {
@@ -124,16 +470,42 @@ if (typeof window !== "undefined") {
   const api: WorkbenchVSCodeAPI = {
     apiVersion: ACTIVITY_API_VERSION,
     activityBar: { register: registerActivityView, unregister: unregisterActivityView },
+    commands: {
+      register: registerCommand,
+      unregister: unregisterCommand,
+      execute: executeCommand,
+      list: listCommands,
+      has: hasCommand,
+    },
+    statusbar: {
+      register: registerStatusBarItem,
+      unregister: unregisterStatusBarItem,
+      list: listStatusBarItems,
+      registerMenu: registerExtensionMenuItem,
+      unregisterMenu: unregisterExtensionMenuItem,
+      listMenu: listExtensionMenuItems,
+    },
   };
-  // 幂等：重复执行（HMR / bundle 重注）直接覆盖，不留半初始化状态。
-  w.__dshFileWorkbenchVSCode__ = api;
-  w.__dshFileWorkbenchWorkbench__ = {
+  const wbApi: WorkbenchActivityAPI = {
     apiVersion: ACTIVITY_API_VERSION,
     activityBar: {
       register: registerWorkbenchActivityView,
       unregister: unregisterWorkbenchActivityView,
     },
-  } satisfies WorkbenchActivityAPI;
+    statusbar: {
+      register: registerWorkbenchStatusBarItem,
+      unregister: unregisterWorkbenchStatusBarItem,
+      list: listWorkbenchStatusBarItems,
+    },
+    backgroundTasks,
+  };
+  // 若 client 桥接已预置「早注册代理」（见 src/client/contributionProxy.ts），把真实实现接上、
+  // 冲刷其缓冲的注册；否则（独立 vite dev，无 client）直接自建全局对象。
+  // 幂等：HMR / bundle 重注时重复执行——rebind + flush 均为幂等，注册走同 id 覆盖语义。
+  if (!adoptContributionProxy()) {
+    w.__dshFileWorkbenchVSCode__ = api;
+    w.__dshFileWorkbenchWorkbench__ = wbApi;
+  }
 }
 
 declare global {
@@ -174,5 +546,45 @@ if (import.meta.env.DEV) {
         el.replaceChildren();
       };
     },
+  });
+
+  // 演示「命令 + 状态栏项」贡献点：状态栏出现一个按钮，点击弹 toast（仅 dev）。
+  registerCommand("demo.statusPing", (arg) => {
+    const path = (arg as StatusCommandContext | undefined)?.path ?? null;
+    // 直接引 toast 的底层实现（composables/core/toast），绕开 workbench store 避免循环依赖。
+    import("../composables/core/toast").then(({ toast }) =>
+      toast("ok", path ? `当前文件：${path}` : "无激活文件"),
+    );
+  });
+  registerStatusBarItem({
+    id: "demo.statusPing",
+    text: "◉ 示例状态栏",
+    commandId: "demo.statusPing",
+    tooltip: "示例插件：点击读取当前激活文件（仅 dev）",
+    order: 90,
+  });
+
+  // 演示「扩展菜单」贡献点：顶栏「扩展」下拉里出现一条，点击复用同一命令（仅 dev）。
+  registerExtensionMenuItem({
+    id: "demo.extMenuPing",
+    text: "◉ 示例扩展菜单项",
+    commandId: "demo.statusPing",
+    tooltip: "示例插件：顶栏扩展菜单条目，点击读取当前激活文件（仅 dev）",
+    order: 90,
+  });
+
+  // 演示「工作台扩展菜单」贡献点：文件工作台底栏「扩展」弹层里出现一条（仅 dev）。
+  registerCommand("demo.wbStatusPing", (arg) => {
+    const dir = (arg as WorkbenchStatusContext | undefined)?.projectDir ?? null;
+    import("../composables/core/toast").then(({ toast }) =>
+      toast("ok", dir ? `当前工作区：${dir}` : "未打开工作区"),
+    );
+  });
+  registerWorkbenchStatusBarItem({
+    id: "demo.wbStatusPing",
+    text: "◉ 示例工作台扩展项",
+    commandId: "demo.wbStatusPing",
+    tooltip: "示例插件：工作台底栏扩展菜单条目，点击读取当前工作区（仅 dev）",
+    order: 90,
   });
 }

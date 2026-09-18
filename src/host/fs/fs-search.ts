@@ -119,6 +119,99 @@ function makeMatcher(query: string, opts: { caseSensitive?: boolean; regex?: boo
 
 const normalize = (p: string): string => p.split(sep).join("/");
 
+/**
+ * 整词匹配：把已构造好的正则源串用「非单词字符」环视包住，使命中处前后不能再接 \w。
+ * 用lookahead/lookbehind 而非 \b，是因为查询本身可能以非单词字符开头/结尾（如 `foo(`），
+ * 此时 \b 语义会错位；`(?<!\w)…(?!\w)` 对任意源串都成立。
+ */
+function wrapWholeWord(source: string, wholeWord: boolean | undefined): string {
+  return wholeWord ? `(?<![\\p{L}\\p{N}_])${source}(?![\\p{L}\\p{N}_])` : source;
+}
+
+/** 「files to include/exclude」输入解析后的 glob 集合。 */
+interface GlobSet {
+  res: RegExp[];
+}
+
+/**
+ * 编译逗号分隔的 glob 串为正则数组（VS Code「包含/排除的文件」语义）。空串 → null（视为不过滤）。
+ * 匹配对象是相对搜索根、'/' 分隔的路径。支持：`*`（单段内）、`**`（跨段）、`?`、`{a,b}`、
+ * 前导 `./`、以及「无斜杠的模式同时匹配任意层级的文件名」。非法/不支持语法退化为字面量。
+ */
+function compileGlobPatterns(raw: string | undefined): GlobSet | null {
+  if (!raw) return null;
+  const parts = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (parts.length === 0) return null;
+  const res = parts.map(globToRegExp).filter((r): r is RegExp => r !== null);
+  return res.length ? { res } : null;
+}
+
+/** 单个 glob → 正则（失败返回 null）。 */
+function globToRegExp(pattern: string): RegExp | null {
+  let p = pattern.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!p) return null;
+  const anchored = p.includes("/"); // 含斜杠 → 从根锚定；纯文件名模式 → 匹配任意层级
+  if (!anchored) p = `**/${p}`;
+  let re = "";
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i];
+    if (c === "*") {
+      if (p[i + 1] === "*") {
+        // `**` 跨目录；`**/` 允许匹配零段
+        if (p[i + 2] === "/") {
+          re += "(?:.*/)?";
+          i += 2;
+        } else {
+          re += ".*";
+          i += 1;
+        }
+      } else {
+        re += "[^/]*";
+      }
+    } else if (c === "?") {
+      re += "[^/]";
+    } else if (c === "{") {
+      const close = p.indexOf("}", i);
+      if (close > i) {
+        const alts = p.slice(i + 1, close).split(",").map(escapeRegexLiteral);
+        re += `(?:${alts.join("|")})`;
+        i = close;
+      } else {
+        re += "\\{";
+      }
+    } else if (c === ".") {
+      re += "\\.";
+    } else if ("[|^$()+]/\\".includes(c)) {
+      re += `\\${c}`;
+    } else {
+      re += c;
+    }
+  }
+  try {
+    return new RegExp(`^${re}$`);
+  } catch {
+    return null;
+  }
+}
+
+/** glob 分支内的字面量转义（只处理正则元字符，保留其余文本）。 */
+function escapeRegexLiteral(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** relPath 是否命中 glob 集合中任一模式。集合为 null 时恒 true（不过滤）。 */
+function matchesGlob(set: GlobSet | null, relPath: string): boolean {
+  if (!set) return true;
+  const path = relPath.split(sep).join("/");
+  return set.res.some((re) => {
+    re.lastIndex = 0;
+    return re.test(path);
+  });
+}
+
 /** 批量替换的结果。 */
 export interface ReplaceOutcome {
   /** 实际被改写的文件相对路径（sep 归一为 "/"，排序去重）。 */
@@ -153,6 +246,13 @@ export async function replaceInFiles(
     maxFiles?: number;
     caseSensitive?: boolean;
     regex?: boolean;
+    wholeWord?: boolean;
+    /** 保留大小写：字面量模式下按命中词的大小写形态变换替换串（正则模式忽略）。 */
+    preserveCase?: boolean;
+    /** 「包含的文件」glob（逗号分隔，相对 root）。空 = 不过滤。 */
+    include?: string;
+    /** 「排除的文件」glob（逗号分隔，相对 root）。命中即跳过。 */
+    exclude?: string;
     write: (absPath: string, content: string) => Promise<void>;
   },
 ): Promise<ReplaceOutcome> {
@@ -162,20 +262,24 @@ export async function replaceInFiles(
   const maxVisited = opts.maxVisited ?? DEFAULT_MAX_VISITED;
   const maxContentReads = opts.maxContentReads ?? DEFAULT_MAX_CONTENT_READS;
   const maxFiles = opts.maxFiles ?? REPLACE_MAX_FILES;
+  const includeSet = compileGlobPatterns(opts.include);
+  const excludeSet = compileGlobPatterns(opts.exclude);
 
   // 匹配正则：regex 模式直接构造（非法正则退化为转义字面量）；字面量模式转义。
-  // 替换统一用函数式 replacer，replacement 永远按字面量插入。
+  // 整词开关统一经 wrapWholeWord 包裹源串。
+  // 替换默认按字面量插入；仅在「字面量 + 保留大小写」时按命中词形态变换。
   let re: RegExp;
   if (opts.regex) {
     try {
-      re = new RegExp(needle, opts.caseSensitive ? "g" : "gi");
+      re = new RegExp(wrapWholeWord(needle, opts.wholeWord), opts.caseSensitive ? "g" : "gi");
     } catch {
-      re = new RegExp(escapeRegex(needle), opts.caseSensitive ? "g" : "gi");
+      re = new RegExp(wrapWholeWord(escapeRegex(needle), opts.wholeWord), opts.caseSensitive ? "g" : "gi");
     }
   } else {
-    re = new RegExp(escapeRegex(needle), opts.caseSensitive ? "g" : "gi");
+    re = new RegExp(wrapWholeWord(escapeRegex(needle), opts.wholeWord), opts.caseSensitive ? "g" : "gi");
   }
-  const replacer = () => replacement;
+  const doPreserveCase = opts.preserveCase === true && !opts.regex;
+  const replacer = (match: string) => (doPreserveCase ? applyCase(match, replacement) : replacement);
 
   const changed: { rel: string; count: number }[] = [];
   let replacements = 0;
@@ -195,12 +299,17 @@ export async function replaceInFiles(
       }
       if (dirent.isDirectory() && SEARCH_SKIP_DIRS.has(dirent.name.toLowerCase())) continue;
       if (dirent.isFile() && !dirent.isSymbolicLink() && contentReads < maxContentReads && changed.length < maxFiles) {
-        contentReads += 1;
         const abs = join(dir, dirent.name);
-        const file = await tryReplaceFile(abs, re, replacer, opts.write).catch(() => null);
-        if (file !== null) {
-          changed.push(file);
-          replacements += file.count;
+        const rel = normalize(relative(root, abs));
+        if ((includeSet && !matchesGlob(includeSet, rel)) || (excludeSet && matchesGlob(excludeSet, rel))) {
+          // glob 过滤掉的文件不消耗内容读取预算
+        } else {
+          contentReads += 1;
+          const file = await tryReplaceFile(abs, re, replacer, opts.write).catch(() => null);
+          if (file !== null) {
+            changed.push(file);
+            replacements += file.count;
+          }
         }
       }
       if (dirent.isDirectory() && !dirent.isSymbolicLink()) {
@@ -219,11 +328,27 @@ export async function replaceInFiles(
   };
 }
 
+/**
+ * 保留大小写：按命中词 `match` 的大小写形态变换替换串 `repl`。
+ *  - 全大写（且含字母）→ repl 全大写；
+ *  - 首字母大写、其余小写 → repl 首字母大写；
+ *  - 其余 → 原样。
+ */
+function applyCase(match: string, repl: string): string {
+  const letters = match.replace(/[^\p{L}]/gu, "");
+  if (letters && letters === letters.toUpperCase()) return repl.toUpperCase();
+  const first = [...match].find((c) => /\p{L}/u.test(c));
+  if (first && first === first.toUpperCase() && letters !== letters.toLowerCase()) {
+    return repl.charAt(0).toUpperCase() + repl.slice(1);
+  }
+  return repl;
+}
+
 /** 单文件替换：大小/二进制校验后整体替换；无变化返回 null，否则返回相对路径与替换次数。 */
 async function tryReplaceFile(
   abs: string,
   re: RegExp,
-  replacer: () => string,
+  replacer: (match: string) => string,
   write: (absPath: string, content: string) => Promise<void>,
 ): Promise<{ rel: string; count: number } | null> {
   const s = await stat(abs);
@@ -234,9 +359,9 @@ async function tryReplaceFile(
   const text = buf.toString("utf8");
   re.lastIndex = 0;
   let count = 0;
-  const next = text.replace(re, () => {
+  const next = text.replace(re, (m: string) => {
     count += 1;
-    return replacer();
+    return replacer(m);
   });
   if (count === 0 || next === text) return null;
   await write(abs, next);
@@ -367,13 +492,24 @@ const GREP_LINE_MAX_CHARS = 400;
 export async function grepFiles(
   root: string,
   query: string,
-  opts: { caseSensitive?: boolean; regex?: boolean; maxFiles?: number; maxTotal?: number; maxVisited?: number } = {},
+  opts: {
+    caseSensitive?: boolean;
+    regex?: boolean;
+    wholeWord?: boolean;
+    include?: string;
+    exclude?: string;
+    maxFiles?: number;
+    maxTotal?: number;
+    maxVisited?: number;
+  } = {},
 ): Promise<GrepOutcome> {
   const needle = query.trim();
   if (needle.length < CONTENT_MIN_QUERY) return { files: [], total: 0, truncated: false };
   const maxFiles = opts.maxFiles ?? GREP_MAX_FILES;
   const maxTotal = opts.maxTotal ?? GREP_MAX_TOTAL;
   const maxVisited = opts.maxVisited ?? DEFAULT_MAX_VISITED;
+  const includeSet = compileGlobPatterns(opts.include);
+  const excludeSet = compileGlobPatterns(opts.exclude);
 
   // 内容判定统一走正则（字面量查询也已转义为正则），g 才能在一行内找多处。
   const flags = opts.caseSensitive ? "g" : "gi";
@@ -381,12 +517,12 @@ export async function grepFiles(
     opts.regex
       ? (() => {
           try {
-            return new RegExp(needle, flags);
+            return new RegExp(wrapWholeWord(needle, opts.wholeWord), flags);
           } catch {
-            return new RegExp(escapeRegex(needle), flags);
+            return new RegExp(wrapWholeWord(escapeRegex(needle), opts.wholeWord), flags);
           }
         })()
-      : new RegExp(escapeRegex(needle), flags);
+      : new RegExp(wrapWholeWord(escapeRegex(needle), opts.wholeWord), flags);
 
   const files: GrepFileHit[] = [];
   let total = 0;
@@ -437,6 +573,7 @@ export async function grepFiles(
         await walk(join(dir, dirent.name));
         if (truncated) return;
       } else if (dirent.isFile() && !dirent.isSymbolicLink()) {
+        if ((includeSet && !matchesGlob(includeSet, rel)) || (excludeSet && matchesGlob(excludeSet, rel))) continue;
         await scanFile(join(dir, dirent.name), rel);
         if (truncated) return;
       }

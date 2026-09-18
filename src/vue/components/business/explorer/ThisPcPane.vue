@@ -80,16 +80,6 @@
     <!-- 刷新/加载动画：与文件列表一致的遮罩 + 居中指示器 -->
     <div v-if="explorer.drivesLoading" class="fw-tp-loading"><div class="fw-tp-spinner"></div></div>
 
-    <!-- 底部状态栏：项目数 + 右侧视图切换（Win11 对齐） -->
-    <div class="fw-fl-status">
-      <span class="fw-status-left">{{ t('statusItemsCount', { count: drives.length }) }}</span>
-      <span class="fw-status-right">
-        <button class="fw-vs-btn" :class="{ on: view === 'details' }" :title="t('viewDetails')" @click="quickView('details')"><icon name="eye" :size="13" /></button>
-        <button class="fw-vs-btn" :class="{ on: view === 'list' }" :title="t('viewList')" @click="quickView('list')"><icon name="sort" :size="13" /></button>
-        <button class="fw-vs-btn" :class="{ on: view === 'large' }" :title="t('viewLarge')" @click="quickView('large')"><icon name="grid" :size="13" /></button>
-      </span>
-    </div>
-
     <!-- 右键菜单 -->
     <ContextMenu v-if="cmOpen" :items="cmItems" :x="cmX" :y="cmY" @close="cmOpen = false" />
 
@@ -119,7 +109,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watchEffect } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watchEffect } from "vue";
 import { useI18n } from "../../../composables/core/i18n";
 import { openProjectInEditor } from "../../../composables/core/sidebarRight";
 import { explorer, browseTo, refreshListing } from "../../../stores/explorer";
@@ -131,6 +121,7 @@ import {
   activeView,
 } from "../../../composables/core/settings";
 import { fileCmdState, setFileCmdRunner } from "../../../stores/fileCommands";
+import { listStatus, setListViewSwitcher, resetListStatus, type ListViewOption } from "../../../composables/session/listStatus";
 import { clipboardHas } from "../../../composables/ui/clipboard";
 import { driveName } from "../../../composables/domain/driveName";
 import { toast } from "../../../stores/workbench";
@@ -264,6 +255,25 @@ function onKeyNav(e: KeyboardEvent): void {
 function quickView(opt: ViewOption): void {
   setFolderView(VIEW_KEY, opt);
 }
+
+/*
+ * 把「此电脑」的底部信息并入全局 StatusBar（与文件列表同一套总线）：
+ * 此前本组件自绘一条 .fw-fl-status 底栏，和最底部 footer 上下重复占两行 —— 现改为
+ * 只往 listStatus 写状态、登记视图切换回调，由 StatusBar 统一渲染计数与视图按钮。
+ */
+watchEffect(() => {
+  listStatus.visible = true;
+  listStatus.canSwitchView = true;
+  listStatus.total = drives.value.length;
+  listStatus.selected = sel.value ? 1 : 0;
+  listStatus.text = "";
+  listStatus.view = view.value as ListViewOption;
+});
+onMounted(() => setListViewSwitcher((opt) => quickView(opt)));
+onBeforeUnmount(() => {
+  setListViewSwitcher(null);
+  resetListStatus();
+});
 
 /* ---------- 右键菜单（状态收敛到公共 composable） ---------- */
 const { cmOpen, cmX, cmY, cmItems, openMenu } = useContextMenu();
@@ -555,40 +565,6 @@ watchEffect(() => {
   animation: fw-tp-spin 0.8s linear infinite;
 }
 @keyframes fw-tp-spin { to { transform: rotate(360deg); } }
-
-/* —— 底部状态栏（与文件列表同款） —— */
-.fw-fl-status {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 2px 8px;
-  border-top: 1px solid var(--dsh-border, #30363d);
-  font-size: calc(11px * var(--dsh-fs-scale, 1));
-  color: var(--dsh-fg-weak, #8b949e);
-  white-space: nowrap;
-  overflow: hidden;
-  user-select: none;
-  height: 26px;
-}
-.fw-status-left { overflow: hidden; text-overflow: ellipsis; flex: 1 1 auto; min-width: 0; }
-.fw-status-right { display: inline-flex; align-items: center; gap: 2px; flex: 0 0 auto; }
-.fw-vs-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 20px;
-  padding: 0;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--dsh-fg-weak, #8b949e);
-  cursor: pointer;
-}
-.fw-vs-btn:hover { background: var(--dsh-hover, rgba(48, 54, 61, 0.5)); color: var(--dsh-fg, #c9d1d9); }
-.fw-vs-btn.on { background: var(--dsh-hover, rgba(48, 54, 61, 0.85)); color: var(--dsh-accent, #238636); }
 
 /* —— 属性对话框（复用文件列表的对话框外观，样式在本组件内自持） —— */
 :global(.fw-prop-dialog.el-dialog) {

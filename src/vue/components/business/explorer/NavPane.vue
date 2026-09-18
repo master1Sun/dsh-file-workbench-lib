@@ -13,9 +13,10 @@
       <span class="fw-nav-label">{{ itemLabel(homeItem) }}</span>
     </button>
 
-    <!-- 快速访问文件夹（Win11：直接列在顶层，右侧图钉表示已固定） -->
+    <!-- 快速访问文件夹（Win11：直接列在顶层，右侧图钉表示已固定）。
+         「下载」单独拎出来放到回收站之下，中间以分割线区分。 -->
     <button
-      v-for="it in quickFolders"
+      v-for="it in quickFolders.filter((i) => i.type !== 'download')"
       :key="it.path"
       class="fw-nav-item fw-nav-top fw-nav-leaf"
       :class="{ active: !externalActive && isActive(it) }"
@@ -28,13 +29,43 @@
       <span class="fw-nav-pin" :title="t('favoritePin')"><icon name="pin" :size="11" /></span>
     </button>
 
-    <!-- 分割线①：主文件夹 / 快速访问  ⇢  此电脑 -->
+    <!-- 回收站（虚拟位置：紧跟快速访问之下；清空入口在右键菜单）。 -->
+    <button
+      class="fw-nav-item fw-nav-top"
+      :class="{ active: !externalActive && explorer.view === 'recycle' }"
+      :title="t('recycleBin')"
+      @click="goRecycle"
+      @contextmenu.prevent.stop="onRecycleCtx"
+    >
+      <span class="fw-nav-ico"><icon name="trash" :size="14" /></span>
+      <span class="fw-nav-label">{{ t("recycleBin") }}</span>
+    </button>
+
+    <!-- 分割线：回收站 ⇢ 下载 -->
+    <div class="fw-nav-div" aria-hidden="true"></div>
+
+    <!-- 下载（原快速访问成员，按需求移至回收站下方）。 -->
+    <button
+      v-for="it in quickFolders.filter((i) => i.type === 'download')"
+      :key="it.path"
+      class="fw-nav-item fw-nav-top fw-nav-leaf"
+      :class="{ active: !externalActive && isActive(it) }"
+      :title="it.path"
+      @click="go(it)"
+      @contextmenu.prevent.stop="onItemCtx($event, it)"
+    >
+      <span class="fw-nav-ico"><icon :name="itemIcon(it)" :size="14" /></span>
+      <span class="fw-nav-label">{{ itemLabel(it) }}</span>
+      <span class="fw-nav-pin" :title="t('favoritePin')"><icon name="pin" :size="11" /></span>
+    </button>
+
+    <!-- 分割线：快速访问 / 回收站 / 下载  ⇢  此电脑 -->
     <div class="fw-nav-div" aria-hidden="true"></div>
 
     <!-- 此电脑：标题只负责展开/折叠，右键标题仍打开菜单。 -->
     <div class="fw-nav-sec" :class="{ collapsed: !open.myComputer, active: !externalActive && explorer.view === 'computer' }">
       <button class="fw-sec-h" :aria-expanded="open.myComputer" @click="toggleMyComputer" @contextmenu.prevent.stop="onThisPcCtx">
-        <span class="fw-caret" :class="{ open: open.myComputer }"><icon :name="open.myComputer ? 'chevronDown' : 'chevronRight'" :size="11" /></span>
+        <span class="fw-caret" :class="{ open: open.myComputer }"><icon name="chevronDown" :size="11" /></span>
         <span class="fw-sec-txt"><span class="fw-sec-icon"><icon name="monitor" :size="14" /></span>{{ t("navThisPc") }}</span>
       </button>
       <div v-if="open.myComputer" class="fw-sec-b">
@@ -54,25 +85,10 @@
       </div>
     </div>
 
-    <!-- 分割线②：此电脑 / 盘符  ⇢  回收站 -->
-    <div class="fw-nav-div" aria-hidden="true"></div>
-
-    <!-- 回收站（虚拟位置：进入系统回收站视图；清空入口在右键菜单） -->
-    <button
-      class="fw-nav-item fw-nav-top"
-      :class="{ active: !externalActive && explorer.view === 'recycle' }"
-      :title="t('recycleBin')"
-      @click="goRecycle"
-      @contextmenu.prevent.stop="onRecycleCtx"
-    >
-      <span class="fw-nav-ico"><icon name="trash" :size="14" /></span>
-      <span class="fw-nav-label">{{ t("recycleBin") }}</span>
-    </button>
-
     <!-- 外部注入：置于回收站下方，无注册视图时整组不显示。 -->
     <div v-if="externalViews.length" class="fw-nav-sec fw-nav-external" :class="{ collapsed: externalCollapsed }">
       <button class="fw-sec-h" :aria-expanded="!externalCollapsed" @click="emit('toggle-external')">
-        <span class="fw-caret" :class="{ open: !externalCollapsed }"><icon :name="externalCollapsed ? 'chevronRight' : 'chevronDown'" :size="11" /></span>
+        <span class="fw-caret" :class="{ open: !externalCollapsed }"><icon name="chevronDown" :size="11" /></span>
         <span class="fw-sec-txt">{{ t("externalInjection") }}</span>
       </button>
       <div v-if="!externalCollapsed" class="fw-sec-b">
@@ -755,8 +771,8 @@ async function copyPath(p: string): Promise<void> {
   min-height: 28px;
   margin: 0 4px;
   padding: 0 8px 0 4px;
-  font-size: calc(11px * var(--dsh-fs-scale, 1));
-  font-weight: 700;
+  font-size: calc(13px * var(--dsh-fs-scale, 1));
+  font-weight: 800;
   color: var(--dsh-fg-muted, #6e7681);
   background: transparent;
   border: none;

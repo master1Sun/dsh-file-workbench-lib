@@ -10,8 +10,11 @@ import { RightPaneBridge, VSCodePaneBridge, vsKindInUse, vsKindTabId, vsOpenKind
 import { ComposerBridge } from "./ComposerBridge.js";
 import { createTabMenuItems } from "./TabMenuBridge.js";
 import { createGuideCard } from "./GuideCardBridge.js";
+import { installContributionProxy } from "./contributionProxy.js";
 import { installOfficialTerminal, type OfficialTermApi } from "./OfficialTerminalBridge.js";
 import { setSidebarRight } from "./api.js";
+
+console.info('import(window.__dshTestProbeUrl).then(m => m.installTestButtons())')
 
 /** 前端资源基址（host REST + 静态资源前缀）。 */
 export const PREFIX = "/api/dsh-file-workbench";
@@ -263,6 +266,11 @@ interface SessionInputLike {
 
 export function apply(ctx: ClientCtx): void {
   const apiBase = `${window.location.origin}${PREFIX}`;
+
+  // ⚠️ 必须**最先、同步**装好贡献点早注册代理：Vue bundle 是稍后异步注入的（<script type=module>），
+  // 其 window API 要等 bundle 执行才出现。第三方插件若在那之前 register 会拿到 undefined → 注入丢失。
+  // 代理先把两个全局名占上并缓冲注册，Vue 就绪后再 rebind + flush（见 contributionProxy.ts）。
+  installContributionProxy();
 
   // apply 幂等：DSH 重复调用 apply 时跳过，避免重复包 openPath / 重复注入 Vue 产物 / 重复注册插槽。
   if (clientApplied) return;
@@ -651,7 +659,7 @@ export function apply(ctx: ClientCtx): void {
           }) as (props: unknown) => ReactNode,
         ),
       );
-      console.info("[dsh-file-workbench] tab menu items registered (sidebar.right.tab.menu.item)");
+      // console.info("[dsh-file-workbench] tab menu items registered (sidebar.right.tab.menu.item)");
       return off;
     }, "dsh-file-workbench: tab menu items");
 

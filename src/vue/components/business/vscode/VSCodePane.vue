@@ -38,7 +38,7 @@
         :aria-label="t('vsFoldEditor')"
         @click="rightFolded = true"
       >
-        <icon name="chevronRight" :size="13" />
+        <icon name="chevronsRight" :size="13" />
       </button> -->
       <span class="vs-spacer"></span>
       <!-- 快速打开：假输入框（按钮），点击 / Ctrl+P 弹出居中搜索浮层（对齐 VS Code 的 Quick Open） -->
@@ -102,7 +102,7 @@
       </div>
       <!-- 右栏被折叠时：分隔条与右栏隐藏，左栏右缘出现竖排把手，点击展开编辑区 -->
       <!-- <button v-if="rightFolded" class="vs-unfold-handle" :title="t('vsUnfoldEditor')" @click="rightFolded = false">
-        <icon name="chevronRight" :size="12" />
+        <icon name="chevronsLeft" :size="12" />
       </button> -->
       <!-- 拖拽分隔条 -->
       <div
@@ -181,6 +181,19 @@
           <button v-if="activeConflict" class="vs-status-conflict" @click="resolveConflict">
             {{ t("vsConflictBadge") }}
           </button>
+          <!-- 插件注册项统一收进底部「扩展」按钮：点开弹出菜单逐条展示（statusbar.register / registerMenu）。
+               无任何注册项时不显示该入口。 -->
+          <button
+            v-if="hasExtEntries"
+            ref="extMenuBtnRef"
+            class="vs-status-seg vs-status-btn vs-status-ext"
+            :class="{ open: extMenuOpen }"
+            :title="t('vsMenuExtensions')"
+            @click="openExtMenu"
+          >
+            <icon name="puzzle" :size="11" />
+            {{ t("vsMenuExtensions") }}
+          </button>
           <span class="vs-status-spacer"></span>
           <span class="vs-status-seg">Ln {{ cursor.line }}, Col {{ cursor.col }}</span>
           <button class="vs-status-seg vs-status-btn" :disabled="!vsState.activeTab" @click="openEncMenu">
@@ -205,6 +218,8 @@
       :y="fileMenuY"
       @close="fileMenuOpen = false"
     />
+    <!-- 底部「扩展」菜单：插件注册条目列表，从状态栏向上弹出（statusbar.register / registerMenu） -->
+    <ContextMenu v-if="extMenuOpen" :items="extMenuItems" :x="extMenuX" :y="extMenuY" placement="top" @close="extMenuOpen = false" />
     <!-- 顶栏「最近项目」下拉（与文件菜单同一组件，各自独立状态） -->
     <ContextMenu v-if="recMenuOpen" :items="recMenuItems" :x="recMenuX" :y="recMenuY" @close="recMenuOpen = false" />
     <!-- 快速打开浮层：居中（上 12%），backdrop 点击 / Esc 关闭，方向键 + 回车选择（对齐 VS Code Quick Open） -->
@@ -342,7 +357,7 @@ import { useTheme } from "../../../composables/core/theme";
 import { prefs, savePrefs } from "../../../composables/core/settings";
 import { diffLines } from "../../../composables/domain/lineDiff";
 import { hasIcon } from "../../../composables/ui/icons";
-import { activityText, listActivityViews, ACTIVITY_API_VERSION, type ActivityContext } from "../../../stores/activityBar";
+import { activityText, listActivityViews, listStatusBarItems, listExtensionMenuItems, executeCommand, ensureInjectedViewScrollable, ACTIVITY_API_VERSION, type ActivityContext, type StatusBarItem, type StatusCommandContext } from "../../../stores/activityBar";
 import { languageLabelFor } from "./langResolver";
 import { sshParentOf, sshProjectLabelOf } from "../../../stores/ssh";
 
@@ -1385,6 +1400,16 @@ const allActViews = computed<ActBarView[]>(() => [
 /** 实际渲染的图标：全部视图去掉被隐藏的。 */
 const actBarItems = computed<ActBarView[]>(() => allActViews.value.filter((v) => !vsState.activityBar.hidden.includes(v.id)));
 
+// 保证「当前激活视图」始终是可见视图之一：持久化的旧值 / 刚被隐藏或卸载的插件视图
+// 都会让左栏没有任何按钮处于激活态（内容区却仍显示树），此时回退到文件视图。
+watch(
+  actBarItems,
+  (items) => {
+    if (!items.some((v) => v.id === leftTab.value)) leftTab.value = "files";
+  },
+  { immediate: true },
+);
+
 function hideActView(id: string): void {
   if (!vsState.activityBar.hidden.includes(id)) vsState.activityBar.hidden.push(id);
   // 隐藏的正是当前视图：退回文件视图（files 自身被隐藏时内容区仍显示树，仅图标消失）。
@@ -1428,7 +1453,7 @@ const actSideItem = computed<MenuItem>(() => ({
 
 const actEditorFoldItem = computed<MenuItem>(() => ({
   label: rightFolded.value ? t("vsUnfoldEditor") : t("vsFoldEditor"),
-  icon: rightFolded.value ? "chevronRight" : "chevronLeft",
+  icon: rightFolded.value ? "chevronsRight" : "chevronsLeft",
   onClick: () => {
     rightFolded.value = !rightFolded.value;
   },
@@ -1479,13 +1504,18 @@ function openActBarMenu(e: MouseEvent): void {
 
 const projectListeners = new Set<(dir: string | null) => void>();
 const themeListeners = new Set<(t: "dark" | "light") => void>();
+const activeFileListeners = new Set<(path: string | null) => void>();
 watch(
   () => vsState.projectDir,
   (d) => projectListeners.forEach((f) => f(d)),
 );
 watch(theme, (t) => themeListeners.forEach((f) => f(t)));
+watch(
+  () => vsState.activeTab,
+  (p) => activeFileListeners.forEach((f) => f(p)),
+);
 
-/** 传给插件的上下文门面：getter 保证插件读到的 projectDir / theme 永远是最新值。 */
+/** 传给插件的上下文门面：getter 保证插件读到的 projectDir / theme / activeFile 永远是最新值。 */
 const extCtx: ActivityContext = {
   apiVersion: ACTIVITY_API_VERSION,
   get projectDir() {
@@ -1493,6 +1523,9 @@ const extCtx: ActivityContext = {
   },
   get theme() {
     return theme.value;
+  },
+  get activeFile() {
+    return vsState.activeTab;
   },
   onProjectChange(fn) {
     projectListeners.add(fn);
@@ -1504,10 +1537,66 @@ const extCtx: ActivityContext = {
     fn(theme.value);
     return () => themeListeners.delete(fn);
   },
+  onDidChangeActiveFile(fn) {
+    activeFileListeners.add(fn);
+    fn(vsState.activeTab);
+    return () => activeFileListeners.delete(fn);
+  },
   openFile: (path, opts) => openFile(path, opts),
+  listOpenFiles: () => [...vsState.openTabs],
   openDiff: (title, lines) => showDiffPane({ title, lines }),
   toast: (level, msg) => toast(level, msg),
 };
+
+/* ---------- 状态栏外部项：插件注册的可点击按钮，点击即 executeCommand(commandId) ---------- */
+const extStatusItems = computed(listStatusBarItems); // 注册表 ref → 注册/注销实时更新
+/** 传给命令处理器 / when 谓词的状态上下文（读时取最新值）。 */
+function statusCtx(): StatusCommandContext {
+  return { path: vsState.activeTab, projectDir: vsState.projectDir };
+}
+
+/* ---------- 底部「扩展」按钮：把插件注册项收进一个弹出菜单逐条展示 ---------- */
+
+const extMenuBtnRef = ref<HTMLElement | null>(null);
+const {
+  cmOpen: extMenuOpen, cmX: extMenuX, cmY: extMenuY, openMenuAt: openExtMenuAt,
+} = useContextMenu();
+
+/** 点底部「扩展」→ 在其上方弹出条目菜单（y 给到按钮上沿，ContextMenu 会向上夹取）。 */
+function openExtMenu(): void {
+  const r = extMenuBtnRef.value?.getBoundingClientRect();
+  if (!r) return;
+  openExtMenuAt(r.left, r.top - 4);
+}
+
+/**
+ * 下拉条目：合并两套注册表——状态栏项（statusbar.register）与扩展菜单项（statusbar.registerMenu），
+ * 按 order 升序统一列出。when(ctx) 为假者置灰禁用；点击即 executeCommand(commandId, ctx)。
+ */
+const extMenuItems = computed<MenuItem[]>(() => {
+  // 读这两个 ref 建立依赖：激活文件 / 项目变化时，when(ctx) 结论会随之重算。
+  void vsState.activeTab;
+  void vsState.projectDir;
+  const ctx = statusCtx();
+  const merged: StatusBarItem[] = [
+    ...extStatusItems.value,
+    ...listExtensionMenuItems(),
+  ].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  return merged.map((item) => ({
+    label: item.text,
+    disabled: !!item.when && !item.when(ctx),
+    onClick: () => {
+      try {
+        executeCommand(item.commandId, ctx);
+      } catch (e) {
+        toast("error", (e as Error).message);
+      }
+    },
+  }));
+});
+
+/** 是否存在任一注册项（决定底部「扩展」入口是否显示）。 */
+const hasExtEntries = computed<boolean>(() => extStatusItems.value.length + listExtensionMenuItems().length > 0);
 
 // 切换视图 / 注册表变化 / when() 结论翻转时重挂载；离开视图（含面板卸载）走插件的清理函数。
 watchEffect(
@@ -1516,7 +1605,12 @@ watchEffect(
     const el = extHostRef.value;
     if (!v || !el || (v.when && !v.when(extCtx))) return;
     const cleanup = v.mount(el, extCtx);
+    // 注入内容自带 overflow:hidden 包裹层时会被裁切、外层不出现滚动条 → 鼠标滚不动：兜底。
+    ensureInjectedViewScrollable(el);
+    const ro = new ResizeObserver(() => ensureInjectedViewScrollable(el));
+    ro.observe(el);
     onCleanup(() => {
+      ro.disconnect();
       if (typeof cleanup === "function") {
         try {
           cleanup();
@@ -2686,6 +2780,10 @@ onBeforeUnmount(() => {
 .vs-status-btn:disabled {
   cursor: default;
   opacity: 0.6;
+}
+/* 插件注册的状态栏项：用强调色与内置段区分 */
+.vs-status-ext {
+  color: var(--dsh-accent, #58a6ff);
 }
 /* ── 提交文件详情（diff）：覆盖编辑区的只读视图（标题在顶部伪标签上，无内部标题栏） ── */
 .vs-diffpane {

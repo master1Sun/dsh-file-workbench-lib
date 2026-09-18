@@ -109,11 +109,22 @@
   - 文件工作台：`window.__dshFileWorkbenchWorkbench__.activityBar.register(view)`
 - **契约**：每个视图是 `{ id, title, icon?, order?, mount(el, ctx), when? }`；`mount(el, ctx)`
   把 UI 渲染进 `el`，可返回清理函数（切走该视图 / 卸载时调用）。`ctx` 提供 `projectDir` / `theme`
-  getter、`onProjectChange` / `onThemeChange` 订阅，以及 `openFile` / `openDiff` / `toast`。
+  / `activeFile` getter、`onProjectChange` / `onThemeChange` / `onDidChangeActiveFile` 订阅，
+  以及 `openFile` / `listOpenFiles` / `openDiff` / `toast`。
+- **命令贡献点**（编辑器，apiVersion ≥ 2）：插件还能通过 `window.__dshFileWorkbenchVSCode__.commands`
+  （`register` / `execute` / `unregister` / `list` / `has`）注册可被调用的动作——对标 VS Code 的
+  `commands.registerCommand`。注册的命令在被按 id 触发前保持惰性，不会擅自改动编辑器行为。
+- **状态栏项**（编辑器，apiVersion ≥ 2）：用 `window.__dshFileWorkbenchVSCode__.statusbar.register({ id, text, commandId, tooltip?, order?, when? })`
+  把某个命令暴露成编辑器底部状态栏的可点击按钮，点击即以 `{ path, projectDir }` 上下文自动执行该命令 ——
+  这是命令的内置触发面，无需自己找地方放按钮。
+- **后台任务**（工作台，apiVersion ≥ 3）：用 `window.__dshFileWorkbenchWorkbench__.backgroundTasks`
+  （`start(label, opts?) → { step, updateLabel, done, fail }`、`clearFinished`、`clearAll`）把工作台的
+  任务面板当作通用进度登记处复用——插件登记的耗时任务会出现在同一个底部任务按钮里，含历史 / 归档。
+  注入视图激活时，状态栏只置灰本地导航区（文件信息 / 视图切换），后台任务按钮仍可点击、可查看。
 - **多语言标题**：`title` 可为普通字符串或按 locale 的对象（`{ zh, en }`），随页面语言解析。
 - **位置与可见性**：工作台中注册的视图出现在回收站下方的「外部注入」导航分组，无任何注册时整组隐藏；
-  当某个注入视图处于激活态时，顶部工具栏（WinMenuBar）与资源管理器的命令栏 / 状态栏会被禁用
-  （inert + 置灰），避免本地导航与注入内容争用。
+  当某个注入视图处于激活态时，顶部工具栏（WinMenuBar）与资源管理器的命令栏会被禁用（inert + 置灰），
+  底部状态栏则只置灰本地导航区（文件信息 / 视图切换），保留后台任务按钮可点击、可查看。
 - **幂等**：同 `id` 重复注册即覆盖（支持热更新），`unregister(id)` 干净移除；注册表在模块级，
   面板卸载再挂载不会丢注册。
 

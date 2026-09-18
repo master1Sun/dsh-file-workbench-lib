@@ -9,13 +9,26 @@
     <!-- 顶部流动进度条：任何等待中的操作都显示，颜色跟随「设置 → 强调色」 -->
     <div v-if="busy" class="fw-status-progress" aria-hidden="true"></div>
 
-    <!-- 最左：后台任务按钮（贴左下角）。弹窗是 fixed 定位，不参与本行布局。 -->
+    <!-- 最左：后台任务按钮（贴左下角）+「扩展」入口。弹窗是 fixed 定位，不参与本行布局。 -->
     <div class="fw-status-tasks">
       <BgTaskPanel />
+      <!-- 插件注册项统一收进「扩展」按钮：点开向上弹出菜单逐条展示（workbench statusbar.register）。
+           无任何注册项时不显示该入口。放在本地导航区之外，注入激活时仍可点击。 -->
+      <button
+        v-if="hasExtEntries"
+        ref="extMenuBtnRef"
+        class="fw-status-seg fw-status-ext-btn"
+        :class="{ on: extMenuOpen }"
+        :title="t('vsMenuExtensions')"
+        @click="openExtMenu"
+      >
+        <icon name="puzzle" :size="13" />
+        <span>{{ t("vsMenuExtensions") }}</span>
+      </button>
     </div>
 
     <!-- 中：等待提示 > 文件信息 > 视图自带计数 -->
-    <div class="fw-status-left">
+    <div class="fw-status-left" :class="{ 'chrome-disabled': chromeDisabled }" :inert="chromeDisabled">
       <span v-if="busyText" class="fw-status-busy">
         <span class="fw-status-busy-dot" aria-hidden="true"></span>
         <span class="fw-status-busy-txt">{{ busyText }}</span>
@@ -30,7 +43,7 @@
     </div>
 
     <!-- 右：视图切换（仅文件列表挂载期间可用） -->
-    <div class="fw-status-right">
+    <div class="fw-status-right" :class="{ 'chrome-disabled': chromeDisabled }" :inert="chromeDisabled">
       <button
         v-for="b in LIST_VIEW_BUTTONS"
         v-show="listStatus.canSwitchView"
@@ -43,20 +56,74 @@
         <icon :name="b.icon" :size="13" />
       </button>
     </div>
+
+    <!-- 底部「扩展」菜单：插件注册条目列表，从状态栏向上弹出（workbench statusbar.register） -->
+    <ContextMenu v-if="extMenuOpen" :items="extMenuItems" :x="extMenuX" :y="extMenuY" placement="top" @close="extMenuOpen = false" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import Icon from "../../common/Icon.vue";
 import BgTaskPanel from "./BgTaskPanel.vue";
+import ContextMenu from "../../common/ContextMenu.vue";
 import { explorer } from "../../../stores/explorer";
-import { wb } from "../../../stores/workbench";
+import { wb, toast } from "../../../stores/workbench";
 import { tasks } from "../../../composables/session/tasks";
 import { listStatus, switchListView, type ListViewOption } from "../../../composables/session/listStatus";
 import { useI18n } from "../../../composables/core/i18n";
+import { useContextMenu } from "../../../composables/ui/useContextMenu";
+import { listWorkbenchStatusBarItems, executeCommand, type WorkbenchStatusContext } from "../../../stores/activityBar";
+import type { MenuItem } from "../../../../shared/types";
 
 const { t } = useI18n();
+
+/**
+ * 外部注入视图激活时置真：禁用「文件信息 / 视图切换」这类本地导航区，
+ * 但**保留最左的后台任务按钮可点击、可查看**（BgTaskPanel 不受此 prop 影响）。
+ */
+const props = defineProps<{ chromeDisabled?: boolean }>();
+const chromeDisabled = computed(() => props.chromeDisabled ?? false);
+
+/* ---------- 底部「扩展」按钮：把工作台插件注册项收进一个向上弹出的菜单 ---------- */
+
+const extMenuBtnRef = ref<HTMLElement | null>(null);
+const { cmOpen: extMenuOpen, cmX: extMenuX, cmY: extMenuY, openMenuAt: openExtMenuAt } = useContextMenu();
+
+/** 点「扩展」→ 在其上方弹出条目菜单（y 给到按钮上沿，ContextMenu placement=top 会升到该点之上）。 */
+function openExtMenu(): void {
+  const r = extMenuBtnRef.value?.getBoundingClientRect();
+  if (!r) return;
+  openExtMenuAt(r.left, r.top - 4);
+}
+
+/** 传给命令处理器的上下文：工作台无激活标签概念，path 恒 null；projectDir = 当前工作区根。 */
+function extCtx(): WorkbenchStatusContext {
+  return { path: null, projectDir: wb.root || null };
+}
+
+/** 是否存在任一注册项（决定「扩展」入口是否显示）。 */
+const hasExtEntries = computed<boolean>(() => listWorkbenchStatusBarItems().length > 0);
+
+/**
+ * 下拉条目：列出全部已注册的工作台扩展菜单项（按 order 升序，注册时已排好）。
+ * when(ctx) 为假者置灰禁用；点击即 executeCommand(commandId, ctx)。
+ */
+const extMenuItems = computed<MenuItem[]>(() => {
+  void wb.root; // 建立依赖：工作区切换时重算 when(ctx)
+  const ctx = extCtx();
+  return listWorkbenchStatusBarItems().map((item) => ({
+    label: item.text,
+    disabled: !!item.when && !item.when(ctx),
+    onClick: () => {
+      try {
+        executeCommand(item.commandId, ctx);
+      } catch (e) {
+        toast("error", (e as Error).message);
+      }
+    },
+  }));
+});
 
 /** 视图切换按钮（与文件列表「查看」子菜单的常用三档一致）。 */
 const LIST_VIEW_BUTTONS = [
@@ -170,6 +237,12 @@ const busyText = computed(() => {
   align-items: center;
   justify-self: start;
 }
+/* 外部注入激活时：本地导航区（信息 / 视图切换）置灰禁用；后台任务按钮不受影响仍可点击。 */
+.fw-status-left.chrome-disabled,
+.fw-status-right.chrome-disabled {
+  opacity: 0.55;
+  pointer-events: none;
+}
 
 /* —— 右：视图切换 —— */
 .fw-status-right {
@@ -224,6 +297,9 @@ const busyText = computed(() => {
   white-space: nowrap;
 }
 .fw-status-seg:hover { background: var(--dsh-hover, rgba(110, 118, 129, 0.25)); color: var(--dsh-fg, #c9d1d9); }
+
+/* 「扩展」入口：菜单展开时高亮，与视图切换按钮的选中态同色系。 */
+.fw-status-ext-btn.on { background: var(--dsh-hover, rgba(48, 54, 61, 0.85)); color: var(--dsh-accent, #238636); }
 
 /* 视图切换按钮（原在文件列表内部底栏，随信息一并迁到 footer） */
 .fw-vs-btn {

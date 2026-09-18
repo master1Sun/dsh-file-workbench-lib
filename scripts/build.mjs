@@ -76,6 +76,16 @@ async function copyDirNoDelete(src, dest) {
 // 受限环境的安全删除守卫会拦截 cp 内部的删除/覆写路径，故用只写不删的递归拷贝铺产物。
 await copyDirNoDelete(join(root, "dist"), webDir);
 
+// ── 0b) 构建贡献点测试探针 → dist/assets/__dsh-test-probe，随主产物一并进 lib/web/assets/ ──
+// host 静态路由只放行 assets/ 前缀（见 routes-fs.ts），故探针必须落在 assets/ 下才能被真机加载。
+// lib 模式产出的文件名不带扩展名（fileName 返回 "assets/__dsh-test-probe"），拷入时补 .js。
+await viteBuild({
+  configFile: join(root, "test", "vite.test.config.ts"),
+  logLevel: "warn",
+});
+await copyFile(join(root, "dist", "assets", "__dsh-test-probe"), join(webDir, "assets", "__dsh-test-probe.js"));
+console.log("build: test probe → lib/web/assets/__dsh-test-probe.js");
+
 // External：运行时包由 DSH host / 模块加载器解析，绝不打包。
 // node-pty 是原生模块（conpty.node/conpty.exe 等二进制按模块目录相对路径加载），
 // 一旦被 esbuild 打包进 lib/index.js，二进制定位失效 → 终端必然持续报错，必须 external。

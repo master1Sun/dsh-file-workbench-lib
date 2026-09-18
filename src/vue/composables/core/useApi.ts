@@ -322,7 +322,7 @@ export function search(
 export function batchReplace(
   q: string,
   replacement: string,
-  opts: { key?: string; scope?: string; caseSensitive?: boolean; regex?: boolean } = {},
+  opts: { key?: string; scope?: string; caseSensitive?: boolean; regex?: boolean; wholeWord?: boolean; preserveCase?: boolean; include?: string; exclude?: string } = {},
 ): Promise<ReplaceOutcome> {
   return writeThen(
     request<ReplaceOutcome>("POST", "/replace", {
@@ -332,6 +332,10 @@ export function batchReplace(
       replacement,
       caseSensitive: opts.caseSensitive,
       regex: opts.regex,
+      wholeWord: opts.wholeWord,
+      preserveCase: opts.preserveCase,
+      include: opts.include || undefined,
+      exclude: opts.exclude || undefined,
     }),
   );
 }
@@ -340,7 +344,7 @@ export function batchReplace(
  *  sub：限定在项目内某子目录下搜索（相对项目根的文件夹路径，可空）。 */
 export function grep(
   q: string,
-  opts: { key?: string; path?: string; sub?: string; caseSensitive?: boolean; regex?: boolean } = {},
+  opts: { key?: string; path?: string; sub?: string; caseSensitive?: boolean; regex?: boolean; wholeWord?: boolean; include?: string; exclude?: string } = {},
 ): Promise<{
   files: Array<{ rel: string; hits: Array<{ ln: number; text: string }> }>;
   total: number;
@@ -356,6 +360,9 @@ export function grep(
       sub: opts.sub || undefined,
       case: opts.caseSensitive ? "1" : undefined,
       regex: opts.regex ? "1" : undefined,
+      word: opts.wholeWord ? "1" : undefined,
+      include: opts.include || undefined,
+      exclude: opts.exclude || undefined,
     })}`,
   );
 }

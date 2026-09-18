@@ -307,6 +307,15 @@ if (typeof document !== "undefined") {
   if (host) mountFileWorkbenchPane(host, { apiBase: (import.meta.env.VITE_API_BASE as string) ?? "" });
 }
 
+/* ============================================================================
+ * ⚠️⚠️ 临时测试引用 —— 测完删除下面这一整块（含注释）即可，无其他残留。⚠️⚠️
+ *
+ * 把贡献点集成测试探针的加载 URL 暴露到 window：dev 与真机同一入口。
+ *   import(window.__dshTestProbeUrl).then(m => m.runTests())
+ * 探针由 scripts/build.mjs 产出到 assets/__dsh-test-probe.js（host 只服务 assets/ 前缀）。
+ * ==========================================================================*/
+window.__dshTestProbeUrl = `${(window.__DSH_FILE_WORKBENCH__?.apiBase || "/api/dsh-file-workbench").replace(/\/$/, "")}/assets/__dsh-test-probe.js`;
+
 /**
  * 全局「账号管理」对话框：独立于任一面板常驻挂载一次。
  *
@@ -335,3 +344,4 @@ function mountGlobalAccountDialog(): void {
     console.error("[dsh-file-workbench] 全局账号对话框挂载失败：", e);
   }
 }
+

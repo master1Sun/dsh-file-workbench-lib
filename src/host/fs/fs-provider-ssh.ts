@@ -464,11 +464,21 @@ export const sftpFsProvider: FsProvider = {
     if (needle.length < 2) return { files: [], total: 0, truncated: false };
     const flags = opts?.caseSensitive ? "" : "i";
     const mode = opts?.regex ? "E" : "F";
+    const word = opts?.wholeWord ? " -w" : "";
     const prune = SKIP_DIRS.map((d) => `--exclude-dir=${shellQuote(d)}`).join(" ");
+    const toFlags = (raw: string | undefined, opt: string): string =>
+      (raw ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((g) => `${opt}=${shellQuote(g)}`)
+        .join(" ");
+    const includes = toFlags(opts?.include, "--include");
+    const excludes = toFlags(opts?.exclude, "--exclude");
     const maxFiles = opts?.maxFiles ?? 200;
     const maxTotal = opts?.maxTotal ?? 2000;
     const cmd =
-      `grep -rIn${flags}${mode} ${prune} --binary-files=without-match -e ${shellQuote(needle)} ${shellQuote(root)}` +
+      `grep -rIn${flags}${mode}${word} ${prune}${includes ? " " + includes : ""}${excludes ? " " + excludes : ""} --binary-files=without-match -e ${shellQuote(needle)} ${shellQuote(root)}` +
       ` 2>/dev/null | head -c 4194304`;
     let out: string;
     try {

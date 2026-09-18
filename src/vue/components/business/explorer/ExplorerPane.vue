@@ -46,14 +46,11 @@
         </template>
       </div>
     </div>
-    <!-- 底部状态栏：条目数提示 + 后台任务 + 最小化终端（Win11 样式） -->
-    <div
-      class="fw-explorer-statusbar-shell"
-      :class="{ 'external-view-disabled': leftTab !== 'files' }"
-      :aria-disabled="leftTab !== 'files'"
-      :inert="leftTab !== 'files'"
-    >
-      <StatusBar />
+    <!-- 底部状态栏：条目数提示 + 后台任务 + 最小化终端（Win11 样式）。
+         外部注入激活时**不整体禁用** —— 保留最左的后台任务按钮可点击、可查看，
+         仅把「文件信息 / 视图切换」这类与本地导航相关的区域置灰禁用。 -->
+    <div class="fw-explorer-statusbar-shell">
+      <StatusBar :chrome-disabled="leftTab !== 'files'" />
     </div>
   </div>
 </template>
@@ -70,7 +67,7 @@ import { layout, saveLayout } from "../../../composables/core/settings";
 import { searchTerm } from "../../../stores/workbench";
 import { explorer } from "../../../stores/explorer";
 import { openPreview, toast, wb } from "../../../stores/workbench";
-import { listWorkbenchActivityViews, ACTIVITY_API_VERSION, type ActivityContext } from "../../../stores/activityBar";
+import { listWorkbenchActivityViews, ensureInjectedViewScrollable, ACTIVITY_API_VERSION, type ActivityContext } from "../../../stores/activityBar";
 import { useTheme } from "../../../composables/core/theme";
 import { t } from "../../../composables/core/i18n";
 
@@ -102,6 +99,9 @@ const extCtx: ActivityContext = {
   get theme() {
     return theme.value;
   },
+  // 工作台没有「编辑器激活标签」的概念，故 activeFile 恒为 null、订阅不触发；
+  // 契约仍完整实现，插件可用 `api.apiVersion >= 2` + 存在性判断区分宿主类型。
+  activeFile: null,
   onProjectChange(fn) {
     projectListeners.add(fn);
     fn(wb.root || null);
@@ -112,9 +112,14 @@ const extCtx: ActivityContext = {
     fn(theme.value);
     return () => themeListeners.delete(fn);
   },
+  onDidChangeActiveFile(fn) {
+    fn(null);
+    return () => {};
+  },
   openFile: async (path) => {
     await openPreview(path);
   },
+  listOpenFiles: () => [],
   openDiff: () => toast("info", t("gitDiffEmpty")),
   toast,
 };
@@ -159,7 +164,13 @@ watchEffect(
     const el = extHostRef.value;
     if (!view || !el || (view.when && !view.when(extCtx))) return;
     const cleanup = view.mount(el, extCtx);
+    // 注入内容若自带 overflow:hidden 的包裹层，会被裁切且外层不出现滚动条 → 鼠标滚不动。
+    // 挂载后兜一次底；插件异步撑高内容时由 ResizeObserver 再兜（见下方 observe）。
+    ensureInjectedViewScrollable(el);
+    const ro = new ResizeObserver(() => ensureInjectedViewScrollable(el));
+    ro.observe(el);
     onCleanup(() => {
+      ro.disconnect();
       if (typeof cleanup === "function") {
         try {
           cleanup();
@@ -283,7 +294,7 @@ onMounted(() => {
   flex: 1 1 0;
   min-height: 0;
   width: 100%;
-  height: auto;
+  height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
 }

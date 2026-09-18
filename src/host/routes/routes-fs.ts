@@ -302,9 +302,12 @@ export const fsResource: RouteMatcher = async (req, res, seg, q, method, host) =
       : { provider: localFsProvider, path: (getRoot(q.get("key") ?? undefined) ?? homedir()) };
     const caseSensitive = q.get("case") === "1";
     const regex = q.get("regex") === "1";
+    const wholeWord = q.get("word") === "1";
+    const include = q.get("include")?.trim() || undefined;
+    const exclude = q.get("exclude")?.trim() || undefined;
     const subRaw = (q.get("sub") ?? "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
     const { scanRoot, sub } = scopeSub(base, subRaw);
-    const outcome = await provider.grepFiles(scanRoot, qText, { caseSensitive, regex });
+    const outcome = await provider.grepFiles(scanRoot, qText, { caseSensitive, regex, wholeWord, include, exclude });
     const files = sub ? outcome.files.map((f) => ({ ...f, rel: `${sub}/${f.rel}` })) : outcome.files;
     return (json(res, 200, { ok: true, data: { files, total: outcome.total, truncated: outcome.truncated, scope: scanRoot } }), true);
   }
@@ -558,6 +561,10 @@ export const fsResource: RouteMatcher = async (req, res, seg, q, method, host) =
       replacement?: string;
       caseSensitive?: boolean;
       regex?: boolean;
+      wholeWord?: boolean;
+      preserveCase?: boolean;
+      include?: string;
+      exclude?: string;
     } | null;
     const q = body?.q?.trim() ?? "";
     const replacement = typeof body?.replacement === "string" ? body.replacement : "";
@@ -576,6 +583,10 @@ export const fsResource: RouteMatcher = async (req, res, seg, q, method, host) =
     const outcome = await provider.replaceInFiles(base, q, replacement, {
       caseSensitive: body?.caseSensitive === true,
       regex: body?.regex === true,
+      wholeWord: body?.wholeWord === true,
+      preserveCase: body?.preserveCase === true,
+      include: body?.include?.trim() || undefined,
+      exclude: body?.exclude?.trim() || undefined,
       write: async (abs, content) => {
         await provider.saveText(root, abs, content);
       },

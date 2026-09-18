@@ -1,6 +1,9 @@
 <template>
   <div ref="treeRef" class="vs-tree" @scroll.passive="onScroll" @contextmenu.prevent="onBlankMenu($event)">
-    <div v-if="!root" class="vs-tree-empty">{{ t("vsNoProject") }}</div>
+    <div v-if="props.root && !root && treeLoading" class="vs-tree-loading">
+      <span class="vs-tree-spin" aria-hidden="true"></span>{{ t("vsTreeLoading") }}
+    </div>
+    <div v-else-if="!root" class="vs-tree-empty">{{ t("vsNoProject") }}</div>
     <template v-else>
       <div
         v-for="n in visibleNodes"
@@ -219,6 +222,8 @@ let adoptedTree: TreeCache | null = cachedTreeOf(VS_KEY, props.root);
 const nodes: Record<string, TreeEntry> = adoptedTree ? adoptedTree.nodes : reactive<Record<string, TreeEntry>>({});
 const rootPath = ref<string | null>(adoptedTree ? adoptedTree.rootPath : null);
 const treeRef = ref<HTMLElement | null>(null);
+/** 项目树是否正在建树（rebuild 异步过程中）。有根却还没 ready/没内容时用于显示「正在加载」提示。 */
+const treeLoading = ref(false);
 
 /** 把（重建完的）树登记进模块级缓存，供下次挂载接管。 */
 function bindTreeCache(root?: string | null): void {
@@ -505,6 +510,10 @@ async function revalidateVisible(): Promise<void> {
 /** 依据 root 重建树。 */
 async function rebuild(): Promise<void> {
   const gen = ++rebuildGen;
+  // 有项目根就先进入「加载中」：覆盖 exists→setRoot→列根目录→默认展开这段异步过程，
+  // 避免这段时间里界面显示误导性的「未选择项目目录」。finally 里按代次守卫复位。
+  if (props.root) treeLoading.value = true;
+  try {
   // 项目根已不存在（被外部删除）→ 清空目录树并通知父面板：从「最近项目」移除 + 关闭项目。
   // ⛔ 必须放在「接管缓存」之前：否则缓存里那份旧树会被原样接管，目录删除后界面仍显示旧文件。
   if (props.root) {
@@ -589,6 +598,10 @@ async function rebuild(): Promise<void> {
   await restoreScroll();
   // 建完登记进模块级缓存：下次挂载（切面板导致的卸载重建）直接接管，不再重列目录。
   bindTreeCache();
+  } finally {
+    // 只有仍是最新一次 rebuild 才复位；被更新的 rebuild 取代时把控制权交给那一次的 finally。
+    if (gen === rebuildGen) treeLoading.value = false;
+  }
 }
 
 /** 供父面板在「状态就绪 / 重新激活」时显式重建（切回面板、换项目后确保有内容）。 */
@@ -1141,6 +1154,26 @@ function persist(): void {
 .vs-tree-empty {
   padding: 10px;
   color: var(--dsh-fg-weak, #8b949e);
+}
+.vs-tree-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  color: var(--dsh-fg-weak, #8b949e);
+}
+.vs-tree-loading .vs-tree-spin {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--dsh-fg-weak, #8b949e);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: vs-tree-spin 0.7s linear infinite;
+}
+@keyframes vs-tree-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .vs-tree-row {
   display: flex;
