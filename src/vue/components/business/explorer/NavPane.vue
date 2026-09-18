@@ -1,10 +1,10 @@
 <template>
-  <div class="fw-nav">
+  <div class="fw-nav" :class="{ 'external-active': externalActive }">
     <!-- 主文件夹（Win11：独立顶层项，点击直接进入主页视图） -->
     <button
       v-if="homeItem"
       class="fw-nav-item fw-nav-top fw-nav-leaf"
-      :class="{ active: isActive(homeItem) }"
+      :class="{ active: !externalActive && isActive(homeItem) }"
       :title="homeItem.path"
       @click="go(homeItem)"
       @contextmenu.prevent.stop="onItemCtx($event, homeItem)"
@@ -18,7 +18,7 @@
       v-for="it in quickFolders"
       :key="it.path"
       class="fw-nav-item fw-nav-top fw-nav-leaf"
-      :class="{ active: isActive(it) }"
+      :class="{ active: !externalActive && isActive(it) }"
       :title="it.path"
       @click="go(it)"
       @contextmenu.prevent.stop="onItemCtx($event, it)"
@@ -31,28 +31,46 @@
     <!-- 分割线①：主文件夹 / 快速访问  ⇢  此电脑 -->
     <div class="fw-nav-div" aria-hidden="true"></div>
 
-    <!-- 此电脑：左侧箭头展开/折叠，标签点击进入「此电脑」视图（Win11 行为），两者均可右键 -->
-    <div class="fw-nav-row" :class="{ active: explorer.view === 'computer' }" @click="goThisPc">
-      <button class="fw-nav-caret" :title="open.myComputer ? t('navCollapse') : t('navExpand')" @click.stop="toggle('myComputer')">
-        <icon :name="open.myComputer ? 'chevronDown' : 'chevronRight'" :size="12" />
+    <!-- 外部注入：与「我的电脑」同属左侧列表，可单独折叠。 -->
+    <div v-if="externalViews.length" class="fw-nav-sec fw-nav-external" :class="{ collapsed: externalCollapsed }">
+      <button class="fw-sec-h" :aria-expanded="!externalCollapsed" @click="emit('toggle-external')">
+        <span class="fw-caret" :class="{ open: !externalCollapsed }"><icon :name="externalCollapsed ? 'chevronRight' : 'chevronDown'" :size="11" /></span>
+        <span class="fw-sec-txt">{{ t("externalInjection") }}</span>
       </button>
-      <button
-        class="fw-nav-row-main"
-        :title="t('navThisPc')"
-        @click="goThisPc"
-        @contextmenu.prevent.stop="onThisPcCtx"
-      >
-        <span class="fw-nav-ico"><icon name="monitor" :size="14" /></span>
-        <span class="fw-nav-label">{{ t("navThisPc") }}</span>
-      </button>
+      <div v-if="!externalCollapsed" class="fw-sec-b">
+        <div v-if="!externalViews.length" class="fw-nav-empty">{{ t("externalInjectionEmpty") }}</div>
+        <button
+          v-for="view in externalViews"
+          :key="view.id"
+          class="fw-nav-item fw-nav-external-item"
+          :class="{ active: activeExternalId === view.id }"
+          :title="activityLabel(view)"
+          @click="emit('select-external', view.id)"
+        >
+          <span class="fw-nav-ico">
+            <icon v-if="hasIcon(view.icon ?? '')" :name="view.icon ?? ''" :size="14" />
+            <span v-else>{{ activityLabel(view).slice(0, 1) }}</span>
+          </span>
+          <span class="fw-nav-label">
+            <span>{{ activityLabel(view) }}</span>
+          </span>
+        </button>
+      </div>
     </div>
-    <div v-if="open.myComputer" class="fw-nav-children">
-    <div v-if="explorer.drivesErr" class="fw-nav-empty is-err">{{ explorer.drivesErr }}</div>
+
+    <!-- 此电脑：标题只负责展开/折叠，右键标题仍打开菜单。 -->
+    <div class="fw-nav-sec" :class="{ collapsed: !open.myComputer, active: !externalActive && explorer.view === 'computer' }">
+      <button class="fw-sec-h" :aria-expanded="open.myComputer" @click="toggleMyComputer" @contextmenu.prevent.stop="onThisPcCtx">
+        <span class="fw-caret" :class="{ open: open.myComputer }"><icon :name="open.myComputer ? 'chevronDown' : 'chevronRight'" :size="11" /></span>
+        <span class="fw-sec-txt"><span class="fw-sec-icon"><icon name="monitor" :size="14" /></span>{{ t("navThisPc") }}</span>
+      </button>
+      <div v-if="open.myComputer" class="fw-sec-b">
+      <div v-if="explorer.drivesErr" class="fw-nav-empty is-err">{{ explorer.drivesErr }}</div>
       <button
         v-for="d in explorer.drives"
         :key="d.path"
         class="fw-nav-item fw-nav-drive"
-        :class="{ active: isDriveActive(d) }"
+        :class="{ active: !externalActive && isDriveActive(d) }"
         :title="d.path"
         @click="goDrive(d)"
         @contextmenu.prevent.stop="onDriveCtx($event, d)"
@@ -60,6 +78,7 @@
         <span class="fw-nav-ico"><icon name="hardDrive" :size="13" /></span>
         <span class="fw-nav-label">{{ d.name }}</span>
       </button>
+      </div>
     </div>
 
     <!-- 分割线②：此电脑 / 盘符  ⇢  回收站 -->
@@ -68,7 +87,7 @@
     <!-- 回收站（虚拟位置：进入系统回收站视图；清空入口在右键菜单） -->
     <button
       class="fw-nav-item fw-nav-top"
-      :class="{ active: explorer.view === 'recycle' }"
+      :class="{ active: !externalActive && explorer.view === 'recycle' }"
       :title="t('recycleBin')"
       @click="goRecycle"
       @contextmenu.prevent.stop="onRecycleCtx"
@@ -95,7 +114,7 @@
           v-for="h in sshHosts"
           :key="h.id"
           class="fw-nav-item"
-          :class="{ active: isSshActive(h) }"
+          :class="{ active: !externalActive && isSshActive(h) }"
           :title="`${h.user}@${h.host}:${h.port}`"
           @click="goSsh(h)"
           @contextmenu.prevent.stop="onSshCtx($event, h)"
@@ -119,7 +138,7 @@
           v-for="it in favList"
           :key="it.path"
           class="fw-nav-item"
-          :class="{ active: selectedManual === it.path }"
+          :class="{ active: !externalActive && selectedManual === it.path }"
           :title="it.path"
           @click="goFavorite(it.path)"
           @contextmenu.prevent.stop="onPathCtx($event, it.path, { openEditor: false, openTerminal: false, openParent: true })"
@@ -161,8 +180,31 @@ import { useContextMenu } from "../../../composables/ui/useContextMenu";
 import SshHostDialog from "./SshHostDialog.vue";
 import { myComputerDriveName } from "../../../composables/domain/driveName";
 import type { DriveInfo, MenuItem, MyComputerItem } from "../../../../shared/types";
+import { hasIcon } from "../../../composables/ui/icons";
+import { activityText, type ActivityView } from "../../../stores/activityBar";
 
 const { t } = useI18n();
+const props = withDefaults(
+  defineProps<{
+    externalViews?: readonly ActivityView[];
+    externalCollapsed?: boolean;
+    activeExternalId?: string;
+    externalActive?: boolean;
+  }>(),
+  { externalViews: () => [], externalCollapsed: false },
+);
+const emit = defineEmits<{
+  (e: "toggle-external"): void;
+  (e: "select-external", id: string): void;
+  (e: "select-local"): void;
+}>();
+const externalViews = computed(() => props.externalViews ?? []);
+const externalCollapsed = computed(() => props.externalCollapsed === true);
+const activeExternalId = computed(() => props.activeExternalId ?? "");
+const externalActive = computed(() => props.externalActive === true);
+function activityLabel(view: ActivityView): string {
+  return activityText(view.title);
+}
 
 /** 各分组展开态（直接读写 layout.navGroups，实现 JSON 持久化）。 */
 const open = layout.navGroups;
@@ -198,6 +240,7 @@ function sshDotTitle(h: api.SshHostPublic): string {
 
 /** 点击：直接浏览远端根（不改工作区根，浏览本身不受 root 限制），顺带刷新连接状态。 */
 function goSsh(h: api.SshHostPublic): void {
+  emit("select-local");
   selectedManual.value = null;
   void browseTo(sshRootRef(h.id));
   void pingSshHost(h.id);
@@ -265,7 +308,7 @@ async function removeSsh(h: api.SshHostPublic): Promise<void> {
 const items = computed(() => explorer.homeItems);
 
 /** 快速访问文件夹（Win11 侧栏直接平铺在顶层：桌面/下载/文档/图片/音乐/视频）。 */
-const QUICK_TYPES: readonly string[] = ["desktop", "download", "documents", "pictures", "music", "videos"];
+const QUICK_TYPES: readonly string[] = ["desktop", "download"];
 const quickFolders = computed(() => items.value.filter((i) => QUICK_TYPES.includes(i.type)));
 /** 主文件夹（用户主目录）。 */
 const homeItem = computed(() => items.value.find((i) => i.type === "home") ?? null);
@@ -316,6 +359,7 @@ function isDriveActive(d: DriveInfo): boolean {
 }
 
 function go(it: MyComputerItem): void {
+  emit("select-local");
   selectedManual.value = null; // 点位置项：清除手动选中，恢复位置高亮
   // Windows 系统回收站是虚拟入口（path 为空）：进入回收站视图而非文件系统浏览。
   if (it.type === "recycle") {
@@ -327,6 +371,7 @@ function go(it: MyComputerItem): void {
 
 /** 「此电脑」标签点击：进入此电脑视图（右侧显示「设备和驱动器」）并展开磁盘子项。 */
 function goThisPc(): void {
+  emit("select-local");
   selectedManual.value = null;
   if (!open.myComputer) {
     open.myComputer = true;
@@ -335,14 +380,22 @@ function goThisPc(): void {
   void openThisPc();
 }
 
+/** 「我的电脑」分组标题：行为与 SSH 分组一致，重复点击只展开/收起当前分组。 */
+function toggleMyComputer(): void {
+  open.myComputer = !open.myComputer;
+  saveLayout();
+}
+
 /** 磁盘子项点击：进入该盘根目录。 */
 function goDrive(d: DriveInfo): void {
+  emit("select-local");
   selectedManual.value = null;
   void browseTo(d.path);
 }
 
 /** 独立「回收站」按钮：清除手动选中并进入回收站视图。 */
 function goRecycle(): void {
+  emit("select-local");
   selectedManual.value = null;
   void enterRecycle();
 }
@@ -393,6 +446,7 @@ const favList = computed(() => favorites.value.map((p) => ({ path: p, name: base
 
 /** 收藏条目：文件夹→进入该目录，文件→预览并让资源管理器定位到其所在文件夹。 */
 async function goFavorite(p: string): Promise<void> {
+  emit("select-local");
   selectedManual.value = p; // 仅点击后高亮
   try {
     const det = await api.detail(p);
@@ -558,9 +612,12 @@ async function copyPath(p: string): Promise<void> {
   flex-direction: column;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 4px 0 8px;
+  gap: 3px;
+  min-width: 0;
+  padding: 6px 6px 10px;
   user-select: none;
 }
+.fw-nav * { min-width: 0; }
 /* 条目：与 Win11 一致的行高与圆角，悬停/选中为整行色块 */
 .fw-nav-item {
   display: flex;
@@ -586,6 +643,19 @@ async function copyPath(p: string): Promise<void> {
   background: var(--dsh-hover, rgba(48, 54, 61, 0.85));
   box-shadow: inset 2px 0 0 var(--dsh-accent, #238636);
   font-weight: 600;
+}
+/* 外部注入视图激活时，右侧已不属于本地文件导航，避免本地入口与注入按钮同时高亮。 */
+.fw-nav.external-active .fw-nav-item.active:not(.fw-nav-external-item),
+.fw-nav.external-active .fw-nav-row.active,
+.fw-nav.external-active .fw-nav-sec.active {
+  background: transparent;
+  box-shadow: none;
+  font-weight: inherit;
+}
+.fw-nav.external-active .fw-nav-item.active:not(.fw-nav-external-item) .fw-nav-ico,
+.fw-nav.external-active .fw-nav-row.active .fw-nav-ico,
+.fw-nav.external-active .fw-nav-sec.active .fw-sec-txt {
+  color: inherit;
 }
 .fw-nav-top {
   margin: 0 4px 1px;
@@ -697,6 +767,12 @@ async function copyPath(p: string): Promise<void> {
   user-select: none;
   letter-spacing: 0.6px;
 }
+.fw-sec-icon {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 3px;
+  vertical-align: -2px;
+}
 .fw-sec-h:hover {
   color: var(--dsh-fg, #c9d1d9);
   background: var(--dsh-hover, rgba(48, 54, 61, 0.35));
@@ -718,7 +794,7 @@ async function copyPath(p: string): Promise<void> {
 .fw-sec-b {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 4px;
   margin: 2px 10px 0 16px;
   padding-left: 4px;
   border-left: 1px solid color-mix(in srgb, var(--dsh-border, #30363d) 60%, transparent);
@@ -736,7 +812,7 @@ async function copyPath(p: string): Promise<void> {
 }
 .fw-nav-item.active .fw-nav-ico,
 .fw-nav-row.active .fw-nav-ico { color: var(--dsh-accent, #238636); }
-.fw-nav-label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fw-nav-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 分组空态：图标 + 居中弱化文案；is-err 变体用于错误信息（danger 色点缀） */
 .fw-nav-empty {
   display: flex;

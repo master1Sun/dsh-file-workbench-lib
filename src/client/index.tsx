@@ -12,6 +12,8 @@ import { createTabMenuItems } from "./TabMenuBridge.js";
 import { createGuideCard } from "./GuideCardBridge.js";
 import { installOfficialTerminal, type OfficialTermApi } from "./OfficialTerminalBridge.js";
 import { setSidebarRight } from "./api.js";
+// 测试注入演示：随 client 加载，等待工作台/编辑器 API 就绪后自动注册测试页面。
+import "../../test/activity-bar-injection.js";
 
 /** 前端资源基址（host REST + 静态资源前缀）。 */
 export const PREFIX = "/api/dsh-file-workbench";

@@ -25,6 +25,8 @@ export interface WorkbenchState {
   root: string;
   /** 资源管理器当前展示目录。 */
   explorerPath: string;
+  /** 文件工作台当前是否显示外部注入面板。 */
+  externalViewActive: boolean;
   search: SearchState;
   /** 终端浮窗显示态（右键「在终端打开」置真）。 */
   termOpen: boolean;
@@ -42,6 +44,7 @@ export const wb = reactive<WorkbenchState>({
   key: "default",
   root: "",
   explorerPath: "",
+  externalViewActive: false,
   search: { q: "", hits: [], truncated: false, running: false, scope: "" },
   termOpen: false,
   termRequestCwd: "",

@@ -1,7 +1,7 @@
 <template>
   <div ref="rootEl" class="fw-root" :style="rootStyle">
     <!-- 顶部工具栏：导航按钮 + 路径地址栏 + 搜索 + 设置（Win11 文件夹风格） -->
-    <win-menu-bar @open-settings="settingsRef?.open()" />
+    <win-menu-bar :external-view-active="wb.externalViewActive" @open-settings="settingsRef?.open()" />
 
     <!-- 主体：单窗口资源管理器（命令栏 + 导航树 + 文件列表 + 状态栏） -->
     <div class="fw-body">
@@ -26,7 +26,7 @@ import SettingsDialog from "./components/settings/SettingsDialog.vue";
 import ExplorerPane from "./components/business/explorer/ExplorerPane.vue";
 import WinMenuBar from "./components/common/WinMenuBar.vue";
 import ShortcutHelpDialog from "./components/common/ShortcutHelpDialog.vue";
-import { ensureRoot } from "./stores/workbench";
+import { ensureRoot, wb } from "./stores/workbench";
 import { goHome, loadHome, loadDrives, takeInitialLocation, goSessionDir as goSessionDirAction } from "./stores/explorer";
 import { useTheme } from "./composables/core/theme";
 import { prefs } from "./composables/core/settings";

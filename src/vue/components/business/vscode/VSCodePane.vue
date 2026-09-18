@@ -1,6 +1,6 @@
 <template>
   <div ref="rootRef" class="vs-pane" :data-theme="theme" :style="rootStyle">
-    <!-- 顶栏：标题 + 「文件」下拉菜单 + 项目目录。空间不足时文本标签折叠成图标（compact） -->
+    <!-- 顶栏：标题 + 文件菜单 + 最近项目 + 当前项目路径。空间不足时文本标签折叠成图标。 -->
     <div ref="topbarRef" class="vs-topbar" :class="{ compact: topbarCompact }">
       <span class="vs-brand" :title="t('vsBrand')">
         <icon class="vs-topbar-ico" name="code" :size="14" />
@@ -29,6 +29,17 @@
         <span class="vs-topbar-txt vs-recent-name">{{ recentShortLabel }}</span>
         <span class="vs-caret"></span>
       </button>
+      <span class="vs-sep"></span>
+      <span class="vs-project-path" :title="vsState.projectDir ?? t('vsNoProject')">{{ projectLabel }}</span>
+      <!-- <button
+        v-if="!rightFolded"
+        class="vs-btn vs-editor-fold-btn"
+        :title="t('vsFoldEditor')"
+        :aria-label="t('vsFoldEditor')"
+        @click="rightFolded = true"
+      >
+        <icon name="chevronRight" :size="13" />
+      </button> -->
       <span class="vs-spacer"></span>
       <!-- 快速打开：假输入框（按钮），点击 / Ctrl+P 弹出居中搜索浮层（对齐 VS Code 的 Quick Open） -->
       <button
@@ -59,21 +70,15 @@
             :class="{ active: leftTab === v.id }"
             :disabled="v.disabled"
             :title="v.title"
-            @click="leftTab = v.id"
+            @click="selectLeftTab(v.id)"
             @contextmenu.prevent.stop="openActViewMenu(v, $event)"
           >
             <icon v-if="hasIcon(v.icon ?? '')" :name="v.icon ?? ''" :size="17" />
             <span v-else class="vs-act-letter">{{ v.title.slice(0, 1) }}</span>
           </button>
         </div>
-        <!-- 内容区：头部是项目目录（SSH 远端显示「主机名 · 路径」），下面是当前视图 -->
+        <!-- 内容区：直接显示当前视图（树 / 搜索 / Git 记录） -->
         <div class="vs-left-main">
-          <div class="vs-left-head" :title="vsState.projectDir ?? t('vsNoProject')">
-            <span class="vs-left-head-txt">{{ projectLabel }}</span>
-            <button class="vs-left-head-open" :title="t('vsOpenFolder')" @click="selectProject">
-              <icon name="folderOpen" :size="13" />
-            </button>
-          </div>
           <ProjectTree
             v-show="leftTab === 'files'"
             ref="treeRef"
@@ -166,7 +171,7 @@
             v-if="statusBranch"
             class="vs-status-seg vs-status-btn"
             :title="vsState.projectDir ?? ''"
-            @click="leftTab = 'git'"
+            @click="selectLeftTab('git')"
           >
             <icon name="git" :size="11" />
             {{ statusBranch }}
@@ -337,7 +342,7 @@ import { useTheme } from "../../../composables/core/theme";
 import { prefs, savePrefs } from "../../../composables/core/settings";
 import { diffLines } from "../../../composables/domain/lineDiff";
 import { hasIcon } from "../../../composables/ui/icons";
-import { listActivityViews, ACTIVITY_API_VERSION, type ActivityContext } from "../../../stores/activityBar";
+import { activityText, listActivityViews, ACTIVITY_API_VERSION, type ActivityContext } from "../../../stores/activityBar";
 import { languageLabelFor } from "./langResolver";
 import { sshParentOf, sshProjectLabelOf } from "../../../stores/ssh";
 
@@ -421,7 +426,26 @@ const saveAsName = ref("");
 /** 目录树实例（挂载后显式重建一次，兜住「切回面板内容为空」）。 */
 const treeRef = ref<InstanceType<typeof ProjectTree> | null>(null);
 /** 左栏视图（Activity Bar 图标条切换）：'files' / 'search' / 'git' 为内置，其余为外部插件注册的 id。 */
-const leftTab = ref<string>("files");
+const EDITOR_VIEW_KEY = "dsh-file-workbench.vscode.activeView";
+function loadEditorView(): string {
+  try {
+    return localStorage.getItem(EDITOR_VIEW_KEY) ?? "files";
+  } catch {
+    return "files";
+  }
+}
+const leftTab = ref<string>(loadEditorView());
+/** 右侧编辑区是否已折叠（Activity Bar 右键与自动窄屏折叠共用）。 */
+const rightFolded = ref(false);
+
+function selectLeftTab(id: string): void {
+  leftTab.value = id;
+  try {
+    localStorage.setItem(EDITOR_VIEW_KEY, id);
+  } catch {
+    /* 隐私模式等场景无法持久化时，保留当前挂载周期内的状态。 */
+  }
+}
 
 // 项目目录被清空（关闭项目 / 空白窗口）时，若停在搜索 / Git 视图则退回文件视图（对应按钮已禁用）。
 watch(
@@ -1354,7 +1378,9 @@ const allActViews = computed<ActBarView[]>(() => [
   { id: "files", title: t("vsLeftTabFiles"), icon: "folder" },
   { id: "search", title: t("vsLeftTabSearch"), icon: "search", disabled: !vsState.projectDir },
   { id: "git", title: t("vsLeftTabGit"), icon: "git", disabled: !vsState.projectDir },
-  ...extViews.value.filter((v) => !v.when || v.when(extCtx)).map((v) => ({ id: v.id, title: v.title, icon: v.icon })),
+  ...extViews.value
+    .filter((v) => !v.when || v.when(extCtx))
+    .map((v) => ({ id: v.id, title: activityText(v.title), icon: v.icon })),
 ]);
 /** 实际渲染的图标：全部视图去掉被隐藏的。 */
 const actBarItems = computed<ActBarView[]>(() => allActViews.value.filter((v) => !vsState.activityBar.hidden.includes(v.id)));
@@ -1400,11 +1426,21 @@ const actSideItem = computed<MenuItem>(() => ({
   },
 }));
 
+const actEditorFoldItem = computed<MenuItem>(() => ({
+  label: rightFolded.value ? t("vsUnfoldEditor") : t("vsFoldEditor"),
+  icon: rightFolded.value ? "chevronRight" : "chevronLeft",
+  onClick: () => {
+    rightFolded.value = !rightFolded.value;
+  },
+}));
+
 const actMenuItems = computed<MenuItem[]>(() => {
   if (actMenuMode.value === "view" && actMenuTarget.value) {
     const v = actMenuTarget.value;
     return [
       { label: t("vsActHide", { name: v.title }), icon: "close", onClick: () => hideActView(v.id) },
+      { separator: true },
+      actEditorFoldItem.value,
       { separator: true },
       actPositionItem.value,
       actSideItem.value,
@@ -1417,6 +1453,8 @@ const actMenuItems = computed<MenuItem[]>(() => {
       checked: !vsState.activityBar.hidden.includes(v.id),
       onClick: () => toggleActView(v.id),
     })),
+    { separator: true },
+    actEditorFoldItem.value,
     { separator: true },
     actPositionItem.value,
     actSideItem.value,
@@ -2007,7 +2045,6 @@ function evalTopbarCompact(): void {
 const RIGHT_FOLD_BELOW = 560;
 /** 面板宽度 ≥ 此值时恢复右栏；与上者之间是迟滞死区。 */
 const RIGHT_UNFOLD_ABOVE = 680;
-const rightFolded = ref(false);
 let foldRO: ResizeObserver | null = null;
 
 function evalRightFold(): void {
@@ -2314,6 +2351,23 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.vs-project-path {
+  flex: 0 1 280px;
+  min-width: 80px;
+  overflow: hidden;
+  color: var(--dsh-fg-weak, #8b949e);
+  direction: rtl;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vs-topbar.compact .vs-project-path { display: none; }
+.vs-editor-fold-btn {
+  flex: 0 0 28px;
+  width: 28px;
+  padding: 0;
+  justify-content: center;
+}
 .vs-body {
   display: flex;
   align-items: stretch;
@@ -2440,7 +2494,7 @@ onBeforeUnmount(() => {
   color: var(--dsh-fg-muted, #6e7681);
   font-size: calc(11px * var(--dsh-fs-scale, 1));
 }
-/* ── 内容区：头部为项目路径，下面是当前视图（树 / 搜索 / Git 记录） ── */
+/* ── 内容区：当前视图（树 / 搜索 / Git 记录） ── */
 .vs-left-main {
   flex: 1 1 auto;
   min-width: 0;
@@ -2448,48 +2502,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   overflow: hidden;
 }
-.vs-left-head {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  height: 30px;
-  padding: 0 4px 0 10px;
-  color: var(--dsh-fg-weak, #8b949e);
-  font-size: calc(11px * var(--dsh-fs-scale, 1));
-  border-bottom: 1px solid var(--dsh-border, #30363d);
-  background: var(--dsh-bg2, #161b22);
-  user-select: none;
-}
-.vs-left-head-txt {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  direction: rtl; /* 超长路径从左侧截断，保留最有辨识度的尾部 */
-  text-align: left;
-}
-.vs-left-head-open {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  opacity: 0.7;
-  transition: background 0.12s, opacity 0.12s;
-}
-.vs-left-head-open:hover {
-  opacity: 1;
-  background: var(--dsh-hover, rgba(255, 255, 255, 0.08));
-}
-/* 目录树 / 搜索 / Git 视图吃掉头部以下全部高度 */
+/* 目录树 / 搜索 / Git 视图占满左侧内容区 */
 .vs-left-main :deep(.vs-tree) {
   flex: 1 1 auto;
   min-height: 0;

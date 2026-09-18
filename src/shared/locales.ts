@@ -82,6 +82,7 @@ export const zh = {
   vsLeftTabGit: "版本控制",
   vsGitNoRepo: "当前目录不是 Git / SVN 仓库",
   vsUnfoldEditor: "展开编辑器",
+  vsFoldEditor: "折叠编辑器",
   vsSearchNeedsProject: "请先打开项目文件夹再使用搜索",
   vsMenuRecent: "打开最近项目",
   vsEmptyTitle: "打开一个文件夹开始编辑",
@@ -169,6 +170,8 @@ export const zh = {
   navHome: "主文件夹",
   navGallery: "图库",
   navThisPc: "此电脑",
+  externalInjection: "外部注入",
+  externalInjectionEmpty: "暂无注入内容",
   driveLabel: "本地磁盘 ({drive}:)",
   // 消息提示（右下角浮层）
   toastClose: "关闭提示",
@@ -965,6 +968,7 @@ export const en: Record<CopyKey, string> = {
   vsLeftTabGit: "Version Control",
   vsGitNoRepo: "This folder is not a Git / SVN repository",
   vsUnfoldEditor: "Show editor",
+  vsFoldEditor: "Hide editor",
   vsSearchNeedsProject: "Open a project folder first to use search",
   vsMenuRecent: "Open Recent",
   vsEmptyTitle: "Open a folder to start editing",
@@ -1049,6 +1053,8 @@ export const en: Record<CopyKey, string> = {
   navHome: "Home",
   navGallery: "Gallery",
   navThisPc: "This PC",
+  externalInjection: "External injections",
+  externalInjectionEmpty: "No injected content",
   driveLabel: "Local Disk ({drive}:)",
   // Message toast (bottom-right overlay)
   toastClose: "Close notification",

@@ -17,6 +17,18 @@ import { ref } from "vue";
 /** API 契约版本：以后破坏性修改 ctx 结构时递增，插件据此降级/告警。 */
 export const ACTIVITY_API_VERSION = 1;
 
+/** 注入视图文案：可传普通字符串，也可按 locale 提供多语言文本。 */
+export type ActivityText = string | Readonly<Record<string, string>>;
+
+/** 按当前页面语言解析注入视图文案。 */
+export function activityText(text: ActivityText | undefined): string {
+  if (typeof text === "string") return text;
+  if (!text) return "";
+  const locale = typeof document !== "undefined" ? document.documentElement.lang || navigator.language : "en";
+  const key = locale.toLowerCase();
+  return text[locale] ?? text[key] ?? (key.startsWith("zh") ? text.zh ?? text.en : text.en ?? text.zh) ?? Object.values(text)[0] ?? "";
+}
+
 /** 传给插件的上下文：编辑器面板能力的最小只读门面。 */
 export interface ActivityContext {
   apiVersion: number;
@@ -40,8 +52,8 @@ export interface ActivityContext {
 export interface ActivityView {
   /** 唯一 id（建议带命名空间，如 "myPlugin.notes"）；同 id 覆盖。 */
   id: string;
-  /** 图标条 hover 提示。 */
-  title: string;
+  /** 图标条 hover 提示，可按 locale 提供多语言文本。 */
+  title: ActivityText;
   /** 图标名（复用工作台内置 icon 集）；缺失/非法时显示 title 首字符。 */
   icon?: string;
   /** 排序权重（小的靠前；内置 文件/搜索/Git 之后按此排序）。 */
@@ -55,7 +67,7 @@ export interface ActivityView {
   when?(ctx: Pick<ActivityContext, "projectDir">): boolean;
 }
 
-/** 已注册的扩展视图（ref 包装，注册/注销会触发面板重渲染）。 */
+/** 已注册的文件编辑器扩展视图。 */
 const registry = ref<ActivityView[]>([]);
 
 /** 注册（幂等：同 id 覆盖）。 */
@@ -74,12 +86,36 @@ export function listActivityViews(): ActivityView[] {
   return registry.value;
 }
 
+/** 文件工作台自己的扩展视图注册表，与文件编辑器注册表完全隔离。 */
+const workbenchRegistry = ref<ActivityView[]>([]);
+
+export function registerWorkbenchActivityView(view: ActivityView): void {
+  unregisterWorkbenchActivityView(view.id);
+  workbenchRegistry.value = [...workbenchRegistry.value, view].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+}
+
+export function unregisterWorkbenchActivityView(id: string): void {
+  workbenchRegistry.value = workbenchRegistry.value.filter((v) => v.id !== id);
+}
+
+export function listWorkbenchActivityViews(): ActivityView[] {
+  return workbenchRegistry.value;
+}
+
 /* ---- window 全局 API（跨 bundle 注入入口） ---- */
 interface WorkbenchVSCodeAPI {
   apiVersion: number;
   activityBar: {
     register: typeof registerActivityView;
     unregister: typeof unregisterActivityView;
+  };
+}
+
+interface WorkbenchActivityAPI {
+  apiVersion: number;
+  activityBar: {
+    register: typeof registerWorkbenchActivityView;
+    unregister: typeof unregisterWorkbenchActivityView;
   };
 }
 
@@ -91,11 +127,19 @@ if (typeof window !== "undefined") {
   };
   // 幂等：重复执行（HMR / bundle 重注）直接覆盖，不留半初始化状态。
   w.__dshFileWorkbenchVSCode__ = api;
+  w.__dshFileWorkbenchWorkbench__ = {
+    apiVersion: ACTIVITY_API_VERSION,
+    activityBar: {
+      register: registerWorkbenchActivityView,
+      unregister: unregisterWorkbenchActivityView,
+    },
+  } satisfies WorkbenchActivityAPI;
 }
 
 declare global {
   interface Window {
     __dshFileWorkbenchVSCode__?: WorkbenchVSCodeAPI;
+    __dshFileWorkbenchWorkbench__?: WorkbenchActivityAPI;
   }
 }
 

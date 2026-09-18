@@ -1,6 +1,12 @@
 <template>
   <!-- 顶部工具栏（Win11 文件夹风格：左侧 导航按钮 + 刷新/设置，中间 路径地址栏，右侧 搜索）。 -->
-  <header ref="toolbarRef" class="fw-toolbar">
+  <header
+    ref="toolbarRef"
+    class="fw-toolbar"
+    :class="{ 'external-view-disabled': externalViewActive }"
+    :aria-disabled="externalViewActive"
+    :inert="externalViewActive"
+  >
     <!-- 面板收窄时隐藏后退/前进（历史不丢，展开即恢复），把宽度让给地址栏与搜索 -->
     <el-button v-show="!narrow" text size="small" :title="t('goBack')" :disabled="!canGoBack" @click="doBack">
       <icon name="arrowLeft" :size="16" />
@@ -58,6 +64,7 @@ import Icon from "./Icon.vue";
 import NavPathBar from "./NavPathBar.vue";
 
 const emit = defineEmits<{ (e: "open-settings"): void }>();
+defineProps<{ externalViewActive?: boolean }>();
 
 const { t } = useI18n();
 
@@ -148,6 +155,11 @@ watch(searchTerm, (v) => {
   padding: 6px 8px;
   border-bottom: 1px solid var(--dsh-border, #30363d);
   background: var(--dsh-bg2, #161b22);
+}
+/* 外部注入面板激活时整体置灰：inert 已拦截交互，此处仅做视觉弱化。 */
+.fw-toolbar.external-view-disabled {
+  opacity: 0.55;
+  pointer-events: none;
 }
 /* Win11 风格搜索框：右侧圆角胶囊，放大镜图标在左，可清除 */
 .fw-search-ico {

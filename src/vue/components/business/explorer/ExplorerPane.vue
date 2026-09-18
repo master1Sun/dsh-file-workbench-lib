@@ -1,11 +1,28 @@
 <template>
-  <div ref="rootRef" class="fw-explorer">
+  <div ref="rootRef" class="fw-explorer" :class="{ 'user-slot-active': leftTab !== 'files' }">
     <!-- Win11 命令栏：面板内部顶部 -->
-    <CommandBar :nav-folded="leftFolded" :compact="compact" @unfold-nav="leftFolded = false" />
-    <div class="fw-exp-body" :class="{ 'left-folded': leftFolded }">
+    <div
+      class="fw-explorer-topbar-shell"
+      :class="{ 'external-view-disabled': leftTab !== 'files' }"
+      :aria-disabled="leftTab !== 'files'"
+      :inert="leftTab !== 'files'"
+    >
+      <CommandBar :nav-folded="leftFolded" :compact="compact" @unfold-nav="leftFolded = false" />
+    </div>
+    <div class="fw-exp-body" :class="{ 'left-folded': leftFolded, 'user-slot-active': leftTab !== 'files' }">
       <!-- 左栏：Win11 风格导航树（此电脑 / 图库 / 桌面 / 下载 / …） -->
       <div class="fw-exp-left" :style="leftStyle">
-        <NavPane />
+        <div class="fw-exp-left-main">
+          <NavPane
+            :external-views="visibleExtViews"
+            :external-collapsed="userSlotCollapsed"
+            :active-external-id="leftTab === 'files' ? '' : leftTab"
+            :external-active="leftTab !== 'files' && !!activeExtView"
+            @toggle-external="userSlotCollapsed = !userSlotCollapsed"
+            @select-external="selectExternalView"
+            @select-local="selectLocalView"
+          />
+        </div>
       </div>
       <!-- 可拖拽分隔条：左右两栏宽度比例写回 layout.explorerSplit（默认 3:7）。 -->
       <div
@@ -21,18 +38,28 @@
       <!-- 右栏：搜索中显示结果；「此电脑」显示设备和驱动器；否则显示当前目录文件列表
            （回收站复用同一套列表 UI，仅操作不同）。 -->
       <div class="fw-exp-right">
-        <SearchPane v-if="searching" />
-        <ThisPcPane v-else-if="explorer.view === 'computer'" />
-        <FileListPane v-else />
+        <div v-if="activeExtView" ref="extHostRef" class="fw-exp-ext-view"></div>
+        <template v-else>
+          <SearchPane v-if="searching" />
+          <ThisPcPane v-else-if="explorer.view === 'computer'" />
+          <FileListPane v-else />
+        </template>
       </div>
     </div>
     <!-- 底部状态栏：条目数提示 + 后台任务 + 最小化终端（Win11 样式） -->
-    <StatusBar />
+    <div
+      class="fw-explorer-statusbar-shell"
+      :class="{ 'external-view-disabled': leftTab !== 'files' }"
+      :aria-disabled="leftTab !== 'files'"
+      :inert="leftTab !== 'files'"
+    >
+      <StatusBar />
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from "vue";
 import NavPane from "./NavPane.vue";
 import SearchPane from "./SearchPane.vue";
 import FileListPane from "./FileListPane.vue";
@@ -42,9 +69,109 @@ import StatusBar from "./StatusBar.vue";
 import { layout, saveLayout } from "../../../composables/core/settings";
 import { searchTerm } from "../../../stores/workbench";
 import { explorer } from "../../../stores/explorer";
+import { openPreview, toast, wb } from "../../../stores/workbench";
+import { listWorkbenchActivityViews, ACTIVITY_API_VERSION, type ActivityContext } from "../../../stores/activityBar";
+import { useTheme } from "../../../composables/core/theme";
+import { t } from "../../../composables/core/i18n";
 
 const rootRef = ref<HTMLElement | null>(null);
 const dragging = ref(false);
+const theme = useTheme(rootRef);
+
+/* 工作台与文件编辑器共用 Activity Bar 注册表；文件视图保留为默认内置视图。 */
+const extViews = computed(listWorkbenchActivityViews);
+const WORKBENCH_VIEW_KEY = "dsh-file-workbench.activeExternalView";
+function loadWorkbenchView(): string {
+  try {
+    return localStorage.getItem(WORKBENCH_VIEW_KEY) ?? "files";
+  } catch {
+    return "files";
+  }
+}
+const leftTab = ref(loadWorkbenchView());
+const userSlotCollapsed = ref(false);
+const extHostRef = ref<HTMLElement | null>(null);
+const projectListeners = new Set<(dir: string | null) => void>();
+const themeListeners = new Set<(value: "dark" | "light") => void>();
+
+const extCtx: ActivityContext = {
+  apiVersion: ACTIVITY_API_VERSION,
+  get projectDir() {
+    return wb.root || null;
+  },
+  get theme() {
+    return theme.value;
+  },
+  onProjectChange(fn) {
+    projectListeners.add(fn);
+    fn(wb.root || null);
+    return () => projectListeners.delete(fn);
+  },
+  onThemeChange(fn) {
+    themeListeners.add(fn);
+    fn(theme.value);
+    return () => themeListeners.delete(fn);
+  },
+  openFile: async (path) => {
+    await openPreview(path);
+  },
+  openDiff: () => toast("info", t("gitDiffEmpty")),
+  toast,
+};
+
+const visibleExtViews = computed(() => extViews.value.filter((view) => !view.when || view.when(extCtx)));
+const activeExtView = computed(() => visibleExtViews.value.find((view) => view.id === leftTab.value));
+watch(
+  () => leftTab.value !== "files",
+  (active) => {
+    wb.externalViewActive = active;
+  },
+  { immediate: true },
+);
+
+function selectExternalView(id: string): void {
+  leftTab.value = id;
+  try {
+    localStorage.setItem(WORKBENCH_VIEW_KEY, id);
+  } catch {
+    /* 隐私模式等场景无法持久化时，保留当前挂载周期内的状态。 */
+  }
+}
+
+function selectLocalView(): void {
+  leftTab.value = "files";
+  try {
+    localStorage.removeItem(WORKBENCH_VIEW_KEY);
+  } catch {
+    /* 隐私模式等场景无法持久化时，保留当前挂载周期内的状态。 */
+  }
+}
+
+watch(
+  () => wb.root,
+  (root) => projectListeners.forEach((listener) => listener(root || null)),
+);
+watch(theme, (value) => themeListeners.forEach((listener) => listener(value)));
+
+watchEffect(
+  (onCleanup) => {
+    const view = activeExtView.value;
+    const el = extHostRef.value;
+    if (!view || !el || (view.when && !view.when(extCtx))) return;
+    const cleanup = view.mount(el, extCtx);
+    onCleanup(() => {
+      if (typeof cleanup === "function") {
+        try {
+          cleanup();
+        } catch {
+          /* 插件清理失败不应阻断工作台卸载。 */
+        }
+      }
+      el.replaceChildren();
+    });
+  },
+  { flush: "post" },
+);
 
 /* ---------- 左栏自动折叠：面板拖窄收起导航树，拖宽恢复 ----------
  * 与 VSCodePane 的右栏折叠同一套思路：触发源是面板自身宽度（ResizeObserver 观察
@@ -137,16 +264,38 @@ onMounted(() => {
   min-height: 0;
 }
 .fw-exp-left {
+  display: flex;
   flex: 0 0 auto;
   min-width: 0;
   height: 100%;
   overflow: hidden;
+}
+.fw-exp-left-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.fw-exp-left-main > :deep(.fw-nav),
+.fw-exp-ext-view {
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
+  height: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .fw-exp-right {
   flex: 1 1 0;
   min-width: 0;
   height: 100%;
   overflow: hidden;
+}
+.fw-explorer.user-slot-active .external-view-disabled {
+  opacity: 0.55;
+  pointer-events: none;
 }
 /* 左栏自动折叠：面板拖窄时收起导航树（含分隔条），文件列表占满整栏；拖宽自动恢复。 */
 .fw-exp-body.left-folded .fw-exp-left,
