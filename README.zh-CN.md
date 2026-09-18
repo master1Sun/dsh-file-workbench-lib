@@ -99,6 +99,24 @@
 暂存 / 提交 / 差异 / 还原 / 忽略（写入仓库根 `.gitignore`），SVN 提供 打开管理面板 / 更新 /
 加入版本控制 / 忽略。
 
+### 🧩 外部视图注入（Activity Bar）
+
+文件编辑器与文件工作台都支持**外部插件 / 脚本注册自定义视图**，经由一套框架无关的 Activity Bar
+注册表实现——不要求 Vue/React，原生 JS 即可。完整作者文档见 [`docs/activity-bar-plugin.md`](docs/activity-bar-plugin.md)。
+
+- **两个相互独立的注册表**，以 window 全局暴露：
+  - 文件编辑器：`window.__dshFileWorkbenchVSCode__.activityBar.register(view)`
+  - 文件工作台：`window.__dshFileWorkbenchWorkbench__.activityBar.register(view)`
+- **契约**：每个视图是 `{ id, title, icon?, order?, mount(el, ctx), when? }`；`mount(el, ctx)`
+  把 UI 渲染进 `el`，可返回清理函数（切走该视图 / 卸载时调用）。`ctx` 提供 `projectDir` / `theme`
+  getter、`onProjectChange` / `onThemeChange` 订阅，以及 `openFile` / `openDiff` / `toast`。
+- **多语言标题**：`title` 可为普通字符串或按 locale 的对象（`{ zh, en }`），随页面语言解析。
+- **位置与可见性**：工作台中注册的视图出现在回收站下方的「外部注入」导航分组，无任何注册时整组隐藏；
+  当某个注入视图处于激活态时，顶部工具栏（WinMenuBar）与资源管理器的命令栏 / 状态栏会被禁用
+  （inert + 置灰），避免本地导航与注入内容争用。
+- **幂等**：同 `id` 重复注册即覆盖（支持热更新），`unregister(id)` 干净移除；注册表在模块级，
+  面板卸载再挂载不会丢注册。
+
 ### 🔗 会话联动
 
 - **会话文件**：经 SSE 实时推送当前会话触碰过的文件，在导航树「会话文件」分组展示。
@@ -205,7 +223,7 @@ src/
                          officialTerm（官方终端桥取用器）、driveName
       session/           sessionSse、tasks、listStatus
       ui/                icons、clipboard、dnd、virtual
-    stores/              workbench、explorer、fileCommands、vscode
+    stores/              workbench、explorer、fileCommands、vscode、activityBar（外部视图注入注册表）
     types/               auto-imports.d.ts、components.d.ts
 ```
 

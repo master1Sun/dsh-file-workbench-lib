@@ -85,6 +85,18 @@ Plus per-file **diff view / file history / blame**, and upstream/downstream `↑
 
 **Context menus** are generated uniformly by `composables/domain/repoMenu.ts` (single source of truth); Git offers stage / commit / diff / discard / ignore (writing the repo-root `.gitignore`), SVN offers open management panel / update / add to version control / ignore.
 
+### 🧩 External View Injection (Activity Bar)
+
+Both the file editor and the file workbench let **external plugins/scripts register their own views** via a framework-agnostic Activity Bar registry — no Vue/React required; plain JS works too. Full author guide: [`docs/activity-bar-plugin.md`](docs/activity-bar-plugin.md).
+
+- **Two independent registries**, exposed as window globals:
+  - File editor: `window.__dshFileWorkbenchVSCode__.activityBar.register(view)`
+  - File workbench: `window.__dshFileWorkbenchWorkbench__.activityBar.register(view)`
+- **Contract**: each view is `{ id, title, icon?, order?, mount(el, ctx), when? }`; `mount(el, ctx)` renders into `el` and may return a cleanup function invoked when the view is switched away or unmounted. `ctx` exposes `projectDir` / `theme` getters, `onProjectChange` / `onThemeChange` subscriptions, and `openFile` / `openDiff` / `toast`.
+- **Multi-language titles**: `title` accepts a string or a per-locale object (`{ zh, en }`), resolved against the page language.
+- **Placement & visibility**: in the workbench, registered views appear in an "External injections" nav group under the Recycle Bin; the whole group hides when nothing is registered. While an injected view is active, the top toolbar (WinMenuBar) and the explorer's command/status bars are disabled (inert + dimmed) so local navigation doesn't compete with the injected content.
+- **Idempotent**: re-registering the same `id` overwrites (supports hot-update); `unregister(id)` removes it cleanly. The registry lives at module scope, so panel unmount/remount keeps registrations.
+
 ### 🔗 Session Integration
 
 - **Session files**: files touched by the current session are pushed in real time via SSE and shown in the nav tree's "Session files" group.
@@ -188,7 +200,7 @@ src/
                          officialTerm (official terminal bridge accessor), driveName
       session/           sessionSse, tasks, listStatus
       ui/                icons, clipboard, dnd, virtual
-    stores/              workbench, explorer, fileCommands, vscode
+    stores/              workbench, explorer, fileCommands, vscode, activityBar (external view-injection registry)
     types/               auto-imports.d.ts, components.d.ts
 ```
 
