@@ -3,15 +3,9 @@
   <div
     v-if="inRepo"
     class="vs-gitbar"
-    :style="expanded && barH > 0 ? { height: barH + 'px', maxHeight: 'none' } : undefined"
   >
-    <!-- 顶边拖拽把手：展开时可上下拖动调整高度（持久化到 prefs.vsGitBarH） -->
-    <div v-if="expanded" class="vs-gitbar-resize" title="拖动调整高度" @mousedown.prevent="startResize"></div>
-    <!-- 头部：折叠 + 分支/版本 + 标题 + 数量 + 刷新 -->
+    <!-- 头部：分支/版本 + 标题 + 数量 + 刷新 -->
     <div class="vs-gitbar-head">
-      <button class="vs-gitbar-act" :title="expanded ? t('vsGitCollapse') : t('vsGitExpand')" @click="expanded = !expanded">
-        <icon :name="expanded ? 'chevronDown' : 'chevronUp'" :size="12" />
-      </button>
       <icon :name="kind === 'svn' ? 'clock' : 'git'" :size="12" />
       <span class="vs-gitbar-branch" :class="{ detached: kind === 'svn' }" :title="repoRoot">{{ branchLabel }}</span>
       <span class="vs-gitbar-title">{{ kind === "svn" ? "SVN · " + t("vsGitHistory") : t("vsGitHistory") }}</span>
@@ -23,7 +17,7 @@
     </div>
     <!-- 提交列表：git 泳道曲线 / svn 线性圆点 + 标题 + 作者 + 行尾详情按钮；
          点击行（或详情按钮）在该行下方内联展开变更文件列表 -->
-    <div v-show="expanded" class="vs-gitbar-list">
+    <div class="vs-gitbar-list">
       <div v-if="loading && !rows.length" class="vs-gitbar-empty">{{ t("vsLoading") }}</div>
       <div v-else-if="!rows.length" class="vs-gitbar-empty">{{ t("gitLogEmpty") }}</div>
       <template v-else>
@@ -116,7 +110,6 @@ import {
 import { VS_STORE_KEY, defaultVSCodeStore, type VSCodeStore } from "../../../stores/vscode";
 import { isBrowsablePath } from "../../../stores/explorer";
 import * as api from "../../../composables/core/useApi";
-import { prefs, savePrefs } from "../../../composables/core/settings";
 import { t } from "../../../composables/core/i18n";
 import Icon from "../../common/Icon.vue";
 
@@ -132,8 +125,6 @@ const branchLabel = ref("");
 /** 提交列表（新的在前，最多 30 条）。 */
 const commits = ref<GitCommit[]>([]);
 const loading = ref(false);
-/** 列表展开/折叠（**默认折叠**，只有用户手动点击头部按钮才展开）。 */
-const expanded = ref(false);
 
 /** 泳道 SVG 行高（与样式里的行高保持一致，SVG 坐标直接用它换算）。 */
 const ROW_H = 24;
@@ -333,37 +324,6 @@ async function loadCommits(): Promise<void> {
   }
 }
 
-/* ── 顶边拖拽调高（高度持久化到 prefs.vsGitBarH，多实例共享同一偏好） ── */
-
-/** 拖拽中的临时高度；null = 未在拖拽。 */
-const dragH = ref<number | null>(null);
-/** 生效高度：拖拽中用临时值，否则用持久化值（0 = 未调过，走默认 max-height 260）。 */
-const barH = computed(() => dragH.value ?? (prefs.vsGitBarH > 0 ? prefs.vsGitBarH : 0));
-
-const RESIZE_MIN = 96;
-const RESIZE_MAX = 600;
-
-/** 顶边把手按下：监听 window 移动/抬起，向上拖 = 变高。 */
-function startResize(e: MouseEvent): void {
-  const startY = e.clientY;
-  const barEl = (e.currentTarget as HTMLElement).parentElement;
-  const startH = barEl?.offsetHeight || 260;
-  const onMove = (ev: MouseEvent): void => {
-    dragH.value = Math.min(RESIZE_MAX, Math.max(RESIZE_MIN, Math.round(startH + (startY - ev.clientY))));
-  };
-  const onUp = (): void => {
-    window.removeEventListener("mousemove", onMove);
-    window.removeEventListener("mouseup", onUp);
-    if (dragH.value != null) {
-      prefs.vsGitBarH = dragH.value; // 落盘，下次打开沿用
-      savePrefs();
-    }
-    dragH.value = null;
-  };
-  window.addEventListener("mousemove", onMove);
-  window.addEventListener("mouseup", onUp);
-}
-
 /** 探测序号：并发探测（挂载立即探测 + 外部请求切换目录）时丢弃过期响应。 */
 let reloadSeq = 0;
 
@@ -412,7 +372,7 @@ async function reload(): Promise<void> {
     if (seq === reloadSeq) loading.value = false;
   }
   // 已展开（用户先展开再切目录等场景）→ 立即补拉列表。
-  if (kind.value && expanded.value) void loadCommits();
+  if (kind.value) void loadCommits();
 }
 
 /** 按后端类型拉取变更文件（git 按需请求；svn 已在解析时缓存）。 */
@@ -421,20 +381,14 @@ async function loadStatus(c: GitCommit): Promise<void> {
   // svn：statuses 已在 parseSvnLogXml 填好，无需请求。
 }
 
-// 项目目录变化（切换项目 / 首次就绪）→ 重新探测，列表**回到默认折叠**。projectDir 为 null（空白窗口）时同样隐藏。
+// 项目目录变化（切换项目 / 首次就绪）→ 重新探测。projectDir 为 null（空白窗口）时同样隐藏。
 watch(
   () => store.state.projectDir,
   () => {
-    expanded.value = false;
     void reload();
   },
   { immediate: true },
 );
-
-// 手动展开且列表为空 → 首次按需拉取提交列表。
-watch(expanded, (v) => {
-  if (v && kind.value && !commits.value.length) void loadCommits();
-});
 
 /** 头部刷新：重新探测 + 拉取提交列表。 */
 async function refresh(): Promise<void> {
@@ -460,18 +414,6 @@ async function refresh(): Promise<void> {
   min-height: 0;
 }
 /* 顶边拖拽把手：骑在边框上的细条，悬停整行变高亮提示可拖 */
-.vs-gitbar-resize {
-  position: absolute;
-  top: -3px;
-  left: 0;
-  right: 0;
-  height: 6px;
-  cursor: row-resize;
-  z-index: 3;
-}
-.vs-gitbar-resize:hover {
-  background: color-mix(in srgb, var(--dsh-accent, #58a6ff) 35%, transparent);
-}
 .vs-gitbar-head {
   flex: 0 0 auto;
   display: flex;
