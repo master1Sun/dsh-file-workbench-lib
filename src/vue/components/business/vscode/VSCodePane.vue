@@ -14,6 +14,21 @@
         <span class="vs-topbar-txt">{{ t("vsMenuFile") }}</span>
         <span class="vs-caret"></span>
       </button>
+      <!-- 最近项目快捷下拉：按钮上直接显示当前项目名（过长省略，完整路径在 tooltip），
+           展开列出最近项目（当前项打勾置灰、右侧 × 可单条移除）＋ 打开文件夹 / 清空全部。
+           与「文件」菜单同源，只是把最高频的「切项目」提到顶栏一键可达。 -->
+      <span class="vs-sep"></span>
+      <button
+        ref="recentBtnRef"
+        class="vs-btn vs-btn-menu vs-recent-btn"
+        :class="{ open: recMenuOpen }"
+        :title="recentBtnTitle"
+        @click="openRecentMenu"
+      >
+        <icon class="vs-topbar-ico" name="clock" :size="13" />
+        <span class="vs-topbar-txt vs-recent-name">{{ recentShortLabel }}</span>
+        <span class="vs-caret"></span>
+      </button>
       <span class="vs-spacer"></span>
       <!-- 快速打开：假输入框（按钮），点击 / Ctrl+P 弹出居中搜索浮层（对齐 VS Code 的 Quick Open） -->
       <button
@@ -185,6 +200,8 @@
       :y="fileMenuY"
       @close="fileMenuOpen = false"
     />
+    <!-- 顶栏「最近项目」下拉（与文件菜单同一组件，各自独立状态） -->
+    <ContextMenu v-if="recMenuOpen" :items="recMenuItems" :x="recMenuX" :y="recMenuY" @close="recMenuOpen = false" />
     <!-- 快速打开浮层：居中（上 12%），backdrop 点击 / Esc 关闭，方向键 + 回车选择（对齐 VS Code Quick Open） -->
     <div v-if="searchOpen" class="vs-quickopen-backdrop" @mousedown.self="closeSearch">
       <div class="vs-quickopen" @mousedown.stop>
@@ -712,6 +729,68 @@ const fileMenuItems = computed<MenuItem[]>(() => [
   },
 ]);
 
+/* ---------- 顶栏「最近项目」快捷下拉（按钮上显示当前项目名） ---------- */
+
+const recentBtnRef = ref<HTMLElement | null>(null);
+const {
+  cmOpen: recMenuOpen, cmX: recMenuX, cmY: recMenuY, openMenuAt: openRecMenuAt,
+} = useContextMenu();
+
+/** 按钮上的项目短名：取末段文件夹名；远端根引用（末段为空）回落到「主机名 · 路径」全标签。 */
+const recentShortLabel = computed<string>(() => {
+  const d = vsState.projectDir;
+  if (!d) return t("vsNoProject");
+  const b = basename(d);
+  if (b) return b;
+  return api.isRemoteRef(d) ? sshProjectLabelOf(d) : d;
+});
+/** 悬浮提示：完整项目路径 + 用途说明（按钮上只放得下短名）。 */
+const recentBtnTitle = computed<string>(() =>
+  vsState.projectDir ? `${projectLabel.value} · ${t("vsRecentProjects")}` : t("vsRecentProjects"),
+);
+
+/**
+ * 下拉条目：打开文件夹 / 最近项目（当前项打勾置灰，右侧 × 单条移除）/ 清空全部。
+ * 列表读 `vsState.recentProjects`（store 经 publishRecents 广播的权威镜像），
+ * 与文件菜单里的「打开最近」子菜单同源，改一处即同步。
+ */
+const recMenuItems = computed<MenuItem[]>(() => [
+  { label: t("vsOpenFolder"), icon: "folderOpen", onClick: selectProject },
+  { separator: true },
+  ...vsState.recentProjects.map((p) => ({
+    label: basename(p) || p,
+    checked: p === vsState.projectDir,
+    disabled: p === vsState.projectDir,
+    trailing: { icon: "close", title: t("vsRecentForgetTitle"), onClick: () => void forgetRecent(p) },
+    onClick: () => void onPickFolder(p),
+  })),
+  { separator: true },
+  {
+    label: t("vsRecentClearAll"),
+    icon: "trash",
+    disabled: vsState.recentProjects.length === 0,
+    onClick: () => void confirmClearAll(),
+  },
+]);
+
+/** 菜单打开时其全屏 backdrop 会盖住按钮，点击按钮区域实际是「点 backdrop 关闭」，这里只负责打开。 */
+function openRecentMenu(): void {
+  const r = recentBtnRef.value?.getBoundingClientRect();
+  openRecMenuAt(r?.left ?? 0, (r?.bottom ?? 0) + 2);
+}
+
+/** 单条移除：确认后从最近项目列表摘掉（不关闭当前项目，下次切换会重新记入）。 */
+async function forgetRecent(p: string): Promise<void> {
+  const name = basename(p) || p;
+  const ok = await confirmDialog({
+    title: t("vsRecentForgetTitle"),
+    message: t("vsRecentForgetConfirm", { name }),
+  });
+  if (!ok) return;
+  store.forgetProject(p);
+  toast("ok", t("vsRecentForgot", { name }));
+}
+
 /* ---------- 「最近项目」（已并入顶栏文件菜单的子菜单） ---------- */
 
 /**
@@ -939,7 +1018,7 @@ const edMenuItems = computed<MenuItem[]>(() => [
   { label: t("vsSaveAs"), icon: "save", disabled: !canSave.value, onClick: () => saveAs() },
   { label: t("vsSaveAll"), disabled: dirtyPaths.value.length === 0, onClick: () => void saveAll() },
   { separator: true },
-  // Minimap（右侧块状缩略渲染）开关：与设置弹窗中的开关同一偏好，即时生效。
+  // 编辑器缩略图（Minimap，右侧块状缩略渲染）开关：入口只在本右键菜单，即时生效。
   {
     label: t("vsMinimap"),
     checked: prefs.vsMinimap,
@@ -2050,6 +2129,8 @@ onBeforeUnmount(() => {
 .vs-topbar.compact .vs-quickopen-trigger { width: 28px; padding: 0; justify-content: center; }
 .vs-topbar.compact .vs-quickopen-ph,
 .vs-topbar.compact .vs-quickopen-kbd { display: none; }
+/* 紧凑档：最近项目按钮退化为定宽时钟图标（与快速打开一致），项目名让位给地址栏与搜索 */
+.vs-topbar.compact .vs-recent-btn { width: 28px; padding: 0; justify-content: center; }
 .vs-sep {
   width: 1px;
   height: 16px;
@@ -2222,6 +2303,16 @@ onBeforeUnmount(() => {
   border-right: 3.5px solid transparent;
   border-top: 4px solid currentColor;
   opacity: 0.75;
+}
+/* 顶栏「最近项目」下拉按钮：显示当前项目名，过长省略（完整路径在 title）。
+   max-width 防止长目录名把右侧搜索框挤出顶栏。 */
+.vs-recent-btn {
+  max-width: 200px;
+}
+.vs-recent-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .vs-body {
   display: flex;

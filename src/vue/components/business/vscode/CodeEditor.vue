@@ -386,7 +386,7 @@ function buildState(doc: string): EditorState {
       search(),
       // Ctrl+F / Ctrl+H / Escape 接管（见模块作用域 findKeymapExt 注释）。
       findKeymapExt,
-      // 右侧 minimap（块状显示），可在设置 / 编辑器右键菜单中开关。
+      // 右侧 minimap（块状显示），可在编辑器右键菜单中开关。
       minimapCompartment.of(prefs.vsMinimap ? minimapExtension() : []),
       langCompartment.of([]),
       themeCompartment.of(props.dark ? oneDark : []),
@@ -689,7 +689,7 @@ watch(
     view.value?.dispatch({ effects: themeCompartment.reconfigure(props.dark ? oneDark : []) });
   },
 );
-// Minimap 开关（设置 / 编辑器右键菜单）：即时重配置当前视图。
+// Minimap 开关（编辑器右键菜单）：即时重配置当前视图。
 watch(
   () => prefs.vsMinimap,
   () => {
@@ -804,6 +804,31 @@ watch(
   height: 14px;
   background: var(--dsh-border, #30363d);
   margin: 0 2px;
+}
+/* ── 行号列（gutter）──
+ * 底色比代码区抬一级（bg2），右侧一道分隔线，数字用弱化墨色；全部走 `--dsh-*` 令牌，
+ * 白天/黑夜随宿主主题（含「跟随系统」）自动切换，无需在 JS 里按 dark 分支配色。
+ * oneDark（深色）与 CodeMirror 默认主题（浅色）自带的 gutter 配色会在这里被覆盖：
+ * 主题生成的选择器是 `.ͼn .cm-gutters`（两类），本规则是 `.vs-code-editor[data-v-x] .cm-gutters`
+ * （两类 + 属性），优先级更高，两种模式下都稳。
+ */
+.vs-code-editor :deep(.cm-gutters) {
+  background: var(--dsh-bg2, #161b22);
+  border-right: 1px solid var(--dsh-border, #30363d);
+  color: var(--dsh-fg-weak, #8b949e);
+  /* 等宽数字：行号位数变化时列宽不跳动 */
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+/* 行号左右留白：与代码首字符拉开距离；min-width 保证 1~5 位数行号列宽恒定。 */
+.vs-code-editor :deep(.cm-lineNumbers .cm-gutterElement) {
+  padding: 0 12px 0 10px;
+  min-width: 32px;
+}
+/* 当前行行号：悬停面作底 + 主前景色，与代码区当前行高亮呼应 */
+.vs-code-editor :deep(.cm-activeLineGutter) {
+  background: var(--dsh-hover, rgba(48, 54, 61, 0.5));
+  color: var(--dsh-fg, #c9d1d9);
 }
 .vs-code-editor :deep(.cm-editor) {
   height: 100%;

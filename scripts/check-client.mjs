@@ -680,9 +680,135 @@ try {
     );
     check(
       "CommandBar 声明 navFolded prop 与 unfold-nav emit，且折叠时出现恢复按钮",
-      /defineProps<\{ navFolded\?:\s*boolean \}>\(\)/.test(cmdbar) &&
+      // 只要求 navFolded 在 props 里（后来又加了 compact，写死整段签名会假红）。
+      /defineProps<\{ navFolded\?:\s*boolean[^}]*\}>\(\)/.test(cmdbar) &&
         /defineEmits<\{ \(e: "unfold-nav"\)/.test(cmdbar) &&
         /v-if="navFolded"[^>]*@click="\$emit\('unfold-nav'\)"/.test(cmdbar),
+    );
+  }
+
+  console.log("\n⑮ 静态约束：拖放移动后目录树必须真的重列（不能只调 rebuild——它会被缓存早退成零请求）");
+  {
+    /** 与 ⑫ 同口径：先去掉注释行，免得说明文字里的词造成误报。 */
+    const pt = readFileSync(join(ROOT, "src/vue/components/business/vscode/ProjectTree.vue"), "utf8")
+      .split(/\r?\n/)
+      .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+      .join("\n");
+    const dropBody = pt.slice(pt.indexOf("async function onDrop"), pt.indexOf("function createFileAtRoot"));
+    const relistBody = pt.slice(pt.indexOf("async function relistTree"), pt.indexOf("function persist(): void"));
+
+    // 旧行为：onDrop 移动成功后只 `await rebuild()`，而 rebuild 第一步就是
+    // 「本次挂载接管过同槽同根的缓存树 → 直接返回（零请求）」，于是拖放后一个 /list 都不发，
+    // 树里还是移动前的旧内容 —— 表现是「拖过去了，文件还在原处、目标目录也不出现」。
+    check(
+      "onDrop 移动成功后走 relistTree 原地重列（不再只调 rebuild）",
+      /await relistTree\(\)/.test(dropBody) && !/rebuild\(\)/.test(dropBody),
+      dropBody.includes("rebuild()") ? "dropBody 仍含 rebuild()" : "",
+    );
+    check(
+      "relistTree 先作废列目录读缓存再重列（否则仍可能命中 30s 内的旧 /list 结果）",
+      /api\.invalidateReadCache\("list:"\)/.test(relistBody) && /await loadChildren\(n\)/.test(relistBody),
+    );
+    check(
+      "relistTree 自根向下 DFS：重列完父目录才取其子项（移动整个目录时不会拿已失效的旧路径打 404）",
+      /const r = root\.value/.test(relistBody) &&
+        /for \(const cp of \[\.\.\.n\.children\]\)/.test(relistBody) &&
+        /if \(c\?\.isDir && c\.expanded && !c\.loading\) await walk\(c\)/.test(relistBody),
+    );
+    check(
+      "onDrop 成功后展开目标目录（否则重列了但目标折叠着，用户仍看不到拖进去的文件）",
+      /markExpanded\(destDir, true\)/.test(dropBody) && /dst\.expanded = true/.test(dropBody),
+    );
+    // 反向约束：rebuild 的「接管缓存 → 零请求」早退分支必须保留，
+    // 别为了修这个问题把它整段删掉（切右侧面板回来会退化成每次全量重列）。
+    check(
+      "rebuild 的缓存接管早退分支仍在（切面板零请求优化未被顺手删掉）",
+      /adoptedTree && props\.root && adoptedTree\.root === props\.root/.test(pt) &&
+        /TREE_REVALIDATE_MS/.test(pt),
+    );
+  }
+  console.log("\n⑯ 静态约束：顶栏「最近项目」快捷下拉（文件与搜索框之间，显示当前项目名）");
+  {
+    const vspane = readFileSync(join(ROOT, "src/vue/components/business/vscode/VSCodePane.vue"), "utf8");
+    const topbar = vspane.slice(vspane.indexOf('class="vs-topbar"'), vspane.indexOf('class="vs-body"'));
+    const recBlock = vspane.slice(
+      vspane.indexOf("顶栏「最近项目」快捷下拉"),
+      vspane.indexOf("「最近项目」（已并入顶栏文件菜单的子菜单）"),
+    );
+
+    // 旧行为：顶栏只有「文件」按钮与搜索框，切项目必须进「文件 ▸ 打开最近」两级菜单。
+    check(
+      "下拉按钮落在顶栏「文件」按钮之后、spacer 之前（即文件与搜索框之间）",
+      /vs-btn vs-btn-menu"[\s\S]*?<\/button>[\s\S]*?vs-recent-btn[\s\S]*?vs-spacer/.test(topbar),
+    );
+    check(
+      "按钮上直接显示当前项目名（recentShortLabel）",
+      /\{\{\s*recentShortLabel\s*\}\}/.test(topbar) &&
+        /recentShortLabel = computed[\s\S]*?vsState\.projectDir/.test(recBlock),
+    );
+    check(
+      "完整路径走 title（按钮只放得下短名，tooltip 补 projectLabel）",
+      /:title="recentBtnTitle"/.test(topbar) && /recentBtnTitle = computed[\s\S]*?projectLabel\.value/.test(recBlock),
+    );
+    check(
+      "下拉用独立 ContextMenu 实例（不与「文件」菜单抢同一套开关状态）",
+      /<ContextMenu v-if="recMenuOpen" :items="recMenuItems" :x="recMenuX" :y="recMenuY"/.test(vspane) &&
+        /cmOpen: recMenuOpen, cmX: recMenuX, cmY: recMenuY, openMenuAt: openRecMenuAt/.test(recBlock) &&
+        // 按钮本身必须把 open 态接回去（否则菜单开了按钮不高亮，观感像没点中）
+        /:class="\{ open: recMenuOpen \}"/.test(topbar),
+    );
+    check(
+      "菜单条目取自 vsState.recentProjects（与文件菜单同源，切换/清空即时同步）",
+      /vsState\.recentProjects\.map/.test(recBlock) && /onClick: \(\) => void onPickFolder\(p\)/.test(recBlock),
+    );
+    check(
+      "当前项目在列表里打勾并置灰（不可能「切到已在的项目」）",
+      /checked: p === vsState\.projectDir/.test(recBlock) && /disabled: p === vsState\.projectDir/.test(recBlock),
+    );
+    check(
+      "每条可单独移除（trailing × → 确认后 store.forgetProject）",
+      /trailing: \{[\s\S]*?forgetRecent\(p\)[\s\S]*?\}/.test(recBlock) && /store\.forgetProject\(p\)/.test(recBlock),
+    );
+    // 顶栏宽度有限（右侧还有快速打开）：compact 档必须退化成图标，否则项目名会挤掉搜索框。
+    check(
+      "紧凑档退化为定宽图标（项目名让位给地址栏与搜索）",
+      /\.vs-topbar\.compact \.vs-recent-btn \{[^}]*width: 28px/.test(vspane),
+    );
+  }
+
+  console.log("\n⑰ 静态约束：编辑器外观（行号列昼夜自适应 + 缩略图开关只留在编辑器右键菜单）");
+  {
+    const ce = readFileSync(join(ROOT, "src/vue/components/business/vscode/CodeEditor.vue"), "utf8");
+    const dlg = readFileSync(join(ROOT, "src/vue/components/settings/SettingsDialog.vue"), "utf8");
+    const locales = readFileSync(join(ROOT, "src/shared/locales.ts"), "utf8");
+    const vspane = readFileSync(join(ROOT, "src/vue/components/business/vscode/VSCodePane.vue"), "utf8");
+    const gut = ce.slice(ce.indexOf(":deep(.cm-gutters)"), ce.indexOf(".vs-code-editor :deep(.cm-editor)"));
+
+    // 旧行为：行号列完全交给 oneDark（深色）/ CodeMirror 默认（浅色），不带边框、与宿主主题无关；
+    // 这里要求三要素都走 --dsh-* 令牌 —— 令牌由 theme.ts 随宿主「跟随系统」重写，昼夜自动生效。
+    check(
+      "行号列底色 / 边框 / 墨色全部走 --dsh-* 令牌（随白天黑夜切换，不写死深色）",
+      /background: var\(--dsh-bg2/.test(gut) &&
+        /border-right: 1px solid var\(--dsh-border/.test(gut) &&
+        /color: var\(--dsh-fg-weak/.test(gut),
+    );
+    check(
+      "当前行行号用悬停面 + 主前景（与代码区当前行高亮呼应）",
+      /cm-activeLineGutter\)[\s\S]*?background: var\(--dsh-hover[\s\S]*?color: var\(--dsh-fg/.test(ce),
+    );
+    check(
+      "文件工作台设置里已移除编辑器缩略图开关（入口收敛到编辑器右键菜单）",
+      !/vsMinimap/.test(dlg),
+    );
+    check(
+      "缩略图开关仍可在编辑器右键菜单切换（设置项删了但能力没丢）",
+      /label: t\("vsMinimap"\)[\s\S]*?prefs\.vsMinimap = !prefs\.vsMinimap/.test(vspane),
+    );
+    check(
+      "中英文案同步改名（去掉「Minimap（右侧缩略图）」旧串）",
+      /vsMinimap: "编辑器缩略图"/.test(locales) &&
+        /vsMinimap: "Editor Thumbnail"/.test(locales) &&
+        !/右侧缩略图|right thumbnail/.test(locales),
     );
   }
 } finally {

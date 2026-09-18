@@ -32,10 +32,6 @@
           <span class="k">{{ t('autoSave') }}</span>
           <el-switch v-model="prefs.autoSave" @change="changed" />
         </div>
-        <div class="fw-set-row">
-          <span class="k">{{ t('vsMinimap') }}</span>
-          <el-switch v-model="prefs.vsMinimap" @change="changed" />
-        </div>
       </div>
       <div class="fw-set-group">
         <div class="fw-set-group-title">{{ t('settingsGroupAppearance') }}</div>

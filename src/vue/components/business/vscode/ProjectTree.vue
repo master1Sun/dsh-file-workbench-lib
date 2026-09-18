@@ -971,7 +971,13 @@ async function onDrop(node: TreeEntry, e: DragEvent): Promise<void> {
   try {
     await api.rename(src, to, VS_KEY);
     emit("file-renamed", src, to);
-    await rebuild(); // 目录可能整棵迁移：直接重建最稳（树缓存本身有滚动/展开恢复）
+    // 目标目录自动展开：刚拖进来的文件要立刻可见（否则即便重列了，目标仍折叠着，看着像没生效）。
+    const dst = nodes[destDir];
+    if (dst?.isDir && !dst.expanded) {
+      dst.expanded = true;
+      markExpanded(destDir, true);
+    }
+    await relistTree();
   } catch (err) {
     toast("error", (err as Error).message);
   }
@@ -1078,6 +1084,44 @@ async function refreshNode(node: TreeEntry): Promise<void> {
   node.expanded = true;
   markExpanded(node.path, true);
   await loadChildren(node);
+}
+
+/**
+ * 原地重列**当前已展开**的目录（自根向下的 DFS），用于拖放移动后的整树刷新。
+ *
+ * ⛔ 为什么不能只调 `rebuild()`：rebuild 的第一步就是「本次挂载接管过同槽同根的缓存树 →
+ *    直接返回（零请求）」，于是拖放后**一个 /list 都不发**，树里仍是移动前的旧内容 ——
+ *    用户看到的就是「拖过去了，文件还在原处、目标目录里也不出现」。
+ *    （只有缓存超过 `TREE_REVALIDATE_MS`(30s) 才会在后台补一次新鲜度，所以这不是「慢一点」，
+ *    而是在 30s 内**完全不动**。）
+ *
+ * ⛔ 为什么不用「清空 nodes 再全量重建」：那会先清空整棵树，中间要闪一帧「未选择项目目录」。
+ *    原地重列不动展开态与滚动位置，视觉上是连续更新。
+ *
+ * ⛔ 为什么走 DFS 而不是先拍一份「已展开目录」快照：重列完父目录才取它的子项，于是**只会对
+ *    此刻确实存在的路径发请求**；移动整个目录时其旧路径已失效，先快照再遍历会拿旧路径打出 404。
+ */
+async function relistTree(): Promise<void> {
+  // 目录内容已改 → 作废列目录读缓存，否则重新 /list 仍可能命中 30s 内的旧结果。
+  // （写接口 `writeThen` 已整体作废，这里兜底，免得将来换写接口时漏掉。）
+  api.invalidateReadCache("list:");
+  const r = root.value;
+  if (!r) return;
+  const seen = new Set<string>();
+  const walk = async (n: TreeEntry): Promise<void> => {
+    if (seen.has(n.path)) return;
+    seen.add(n.path);
+    await loadChildren(n);
+    // `loadChildren` 内的 `applyExpansion` 会顺带并发加载已展开的子目录；
+    // 正在加载中的目录跳过等待（它的结果同样是作废缓存之后取的），避免重复打一次 /list。
+    for (const cp of [...n.children]) {
+      const c = nodes[cp];
+      if (c?.isDir && c.expanded && !c.loading) await walk(c);
+    }
+  };
+  await walk(r);
+  // 刚真正问过宿主 → 刷新缓存时间戳，省掉紧接着的一次后台复查。
+  touchTreeCache();
 }
 
 /** 持久化 VS Code 状态（路径/激活/展开/比例/滚动位置）。 */

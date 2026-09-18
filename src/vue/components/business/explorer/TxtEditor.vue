@@ -1,15 +1,23 @@
 <template>
   <el-dialog
     v-model="visible"
-    class="fw-np-dialog"
+    class="fw-clone-dialog fw-np-dialog"
     width="800px"
+    align-center
+    modal-class="fw-blur-overlay"
     :close-on-click-modal="false"
     :before-close="beforeClose"
     append-to-body
     @close="onClose"
   >
     <template #header>
-      <div class="fw-np-title">{{ dirty ? "* " : "" }}{{ fileName }} - 记事本</div>
+      <div class="fw-dlg-head">
+        <span class="fw-dlg-badge"><icon name="fileText" :size="20" /></span>
+        <span class="fw-dlg-headtext">
+          <span class="fw-dlg-headtitle">{{ dirty ? "* " : "" }}{{ fileName }}</span>
+          <span class="fw-dlg-headsub">{{ t("txtEditorSub") }}<template v-if="dirty"> · {{ t("txtUnsaved") }}</template></span>
+        </span>
+      </div>
     </template>
 
     <div class="fw-np" tabindex="-1" @keydown.ctrl.s.prevent="onSaveShortcut" @keydown.f5.prevent="insertTimestamp">
@@ -60,7 +68,7 @@
 
       <!-- 状态栏 -->
       <div v-if="showStatus && !loading && !error" class="fw-np-status">
-        <span v-if="readonly" class="fw-np-seg">只读</span>
+        <span v-if="readonly" class="fw-np-seg fw-np-ro">{{ t("txtReadonly") }}</span>
         <span class="fw-np-spacer"></span>
         <span class="fw-np-seg">Ln {{ cursorLine }}, Col {{ cursorCol }}</span>
         <span class="fw-np-seg">100%</span>
@@ -481,38 +489,19 @@ function onClose(): void {
 }
 </script>
 
+<style src="../repo/clone-shared.css"></style>
 <style>
 /* el-dialog 的根节点经 teleport 渲染，拿不到本组件的 scoped 属性，
-   因此这里不用 scoped，改用唯一的 fw-np- 前缀做全局限定，确保能命中对话框根节点。 */
-/* 强制记事本浅色外观，不受 IDE 主题影响 */
+   因此这里不用 scoped，改用唯一的 fw-np- 前缀做全局限定，确保能命中对话框根节点。
+   壳层（圆角/阴影/头部/关闭按钮）由 clone-shared.css 的 .fw-clone-dialog 统一提供；
+   此处只保留编辑器特有的尺寸与内容区样式，颜色一律走 --dsh-* token（深浅主题跟随）。 */
 .fw-np-dialog.el-dialog {
-  /* 默认 800×800，页面不够大时随视口收缩（width 属性也给了 800px，此处 min() 覆盖生效） */
+  /* 默认 800×800，页面不够大时随视口收缩 */
   width: min(800px, 92vw) !important;
   height: min(800px, 88vh) !important;
   max-width: none !important;
-  margin-top: 5vh;
   display: flex !important;
   flex-direction: column !important;
-  background: #ffffff;
-  border: 1px solid #dcdcdc;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);
-}
-.fw-np-dialog .el-dialog__header {
-  flex: 0 0 auto;
-  margin: 0;
-  padding: 6px 10px;
-  background: #ffffff;
-  border-bottom: 1px solid #e6e6e6;
-}
-.fw-np-dialog .el-dialog__title {
-  display: none;
-}
-.fw-np-dialog .el-dialog__headerbtn {
-  top: 4px;
-  height: 24px;
-}
-.fw-np-dialog .el-dialog__headerbtn .el-dialog__close {
-  color: #333;
 }
 .fw-np-dialog .el-dialog__body {
   padding: 0 !important;
@@ -520,14 +509,6 @@ function onClose(): void {
   flex-direction: column !important;
   min-height: 0;
   flex: 1 1 auto !important;
-  background: #ffffff;
-}
-
-.fw-np-title {
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  font-size: 12px;
-  color: #1a1a1a;
-  font-weight: 400;
 }
 
 .fw-np {
@@ -539,14 +520,14 @@ function onClose(): void {
   outline: none;
 }
 
-/* 菜单栏 */
+/* 菜单栏（仿记事本结构，配色随主题） */
 .fw-np-menubar {
   display: flex;
-  background: #ffffff;
-  border-bottom: 1px solid #e6e6e6;
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  font-size: 12px;
-  color: #1a1a1a;
+  background: var(--dsh-bg2, #161b22);
+  border-bottom: 1px solid var(--dsh-border, #30363d);
+  font-family: var(--dsh-font);
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+  color: var(--dsh-fg, #c9d1d9);
   user-select: none;
   z-index: 2;
 }
@@ -554,62 +535,67 @@ function onClose(): void {
   position: relative;
   padding: 3px 10px;
   cursor: default;
-  line-height: 18px;
+  line-height: 22px;
 }
 .fw-np-menu:hover,
 .fw-np-menu.open {
-  background: #e5f3ff;
+  background: var(--dsh-accent-weak);
+  color: var(--dsh-accent);
 }
 .fw-np-dropdown {
   position: absolute;
   top: 100%;
   left: 0;
   min-width: 168px;
-  background: #ffffff;
-  border: 1px solid #dcdcdc;
-  box-shadow: 2px 2px 6px rgba(0, 0, 0, 0.18);
-  padding: 2px 0;
+  background: var(--dsh-bg2, #161b22);
+  border: 1px solid var(--dsh-border, #30363d);
+  border-radius: var(--dsh-radius-md, 8px);
+  box-shadow: var(--dsh-shadow-menu, 0 8px 24px rgba(0, 0, 0, 0.4));
+  padding: 4px;
   z-index: 20;
 }
 .fw-np-item {
-  padding: 4px 28px 4px 12px;
+  padding: 5px 28px 5px 12px;
   white-space: nowrap;
+  border-radius: var(--dsh-radius-sm, 4px);
   cursor: default;
 }
 .fw-np-item:hover {
-  background: #e5f3ff;
+  background: var(--dsh-hover, rgba(48, 54, 61, 0.5));
 }
 .fw-np-item.disabled {
-  color: #a0a0a0;
+  color: var(--dsh-fg-muted, #6e7681);
+  opacity: 0.6;
   pointer-events: none;
 }
 .fw-np-sep {
   height: 1px;
-  margin: 3px 0;
-  background: #e6e6e6;
+  margin: 4px 6px;
+  background: color-mix(in srgb, var(--dsh-border, #30363d) 70%, transparent);
 }
 
-/* 文本区 */
+/* 加载 / 错误态（对齐全局 .fw-loading / .fw-error 观感） */
 .fw-np-state {
   flex: 1;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   padding: 16px;
-  color: #555;
-  font-family: "Segoe UI", sans-serif;
-  font-size: 12px;
+  color: var(--dsh-fg-weak, #8b949e);
+  font-family: var(--dsh-font);
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
   min-height: 0;
 }
 .fw-np-err {
-  color: #c00;
+  color: var(--dsh-danger, #f85149);
 }
 .fw-np-spin {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  border: 2px solid #cfcfcf;
-  border-top-color: #1a73e8;
+  border: 2px solid var(--dsh-border, #30363d);
+  border-top-color: var(--dsh-accent, #2f81f7);
   animation: fw-np-spin 0.8s linear infinite;
 }
 @keyframes fw-np-spin {
@@ -617,6 +603,8 @@ function onClose(): void {
     transform: rotate(360deg);
   }
 }
+
+/* 文本区：等宽字体随 mono token，底色用一级面与壳层区分 */
 .fw-np-area {
   flex: 1;
   width: 100%;
@@ -624,12 +612,12 @@ function onClose(): void {
   resize: none;
   border: none;
   outline: none;
-  padding: 2px 4px;
-  background: #ffffff;
-  color: #000000;
-  font-family: "Lucida Console", Consolas, "Courier New", "Microsoft YaHei", monospace;
-  font-size: 14px;
-  line-height: 1.35;
+  padding: 8px 10px;
+  background: var(--dsh-bg, #0d1117);
+  color: var(--dsh-fg, #c9d1d9);
+  font-family: var(--dsh-mono, "Lucida Console", Consolas, monospace);
+  font-size: calc(13px * var(--dsh-fs-scale, 1));
+  line-height: 1.5;
   tab-size: 4;
   box-sizing: border-box;
   white-space: pre;
@@ -640,39 +628,44 @@ function onClose(): void {
   word-break: break-word;
 }
 .fw-np-area:read-only {
-  color: #000;
-  background: #f4f4f4;
+  color: var(--dsh-fg-weak, #8b949e);
+  background: color-mix(in srgb, var(--dsh-bg2, #161b22) 55%, var(--dsh-bg, #0d1117));
   cursor: default;
 }
 
-/* 状态栏 */
+/* 状态栏：与主界面状态栏同一套配色语言 */
 .fw-np-status {
   display: flex;
   align-items: center;
-  background: #f0f0f0;
-  border-top: 1px solid #dcdcdc;
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  font-size: 11px;
-  color: #1a1a1a;
-  height: 22px;
+  background: var(--dsh-bg2, #161b22);
+  border-top: 1px solid var(--dsh-border, #30363d);
+  font-family: var(--dsh-font);
+  font-size: calc(11px * var(--dsh-fs-scale, 1));
+  color: var(--dsh-fg-weak, #8b949e);
+  height: 24px;
   padding: 0 2px;
   z-index: 2;
 }
 .fw-np-seg {
-  padding: 0 8px;
-  border-left: 1px solid #dedede;
-  line-height: 22px;
+  padding: 0 10px;
+  border-left: 1px solid color-mix(in srgb, var(--dsh-border, #30363d) 60%, transparent);
+  line-height: 24px;
 }
 .fw-np-seg:first-child {
   border-left: none;
 }
+.fw-np-status .fw-np-seg:only-of-type,
 .fw-np-eol {
-  border-right: 1px solid #dedede;
+  border-right: 1px solid color-mix(in srgb, var(--dsh-border, #30363d) 60%, transparent);
 }
 .fw-np-spacer {
   flex: 1;
-  border-left: 1px solid #dedede;
+  border-left: 1px solid color-mix(in srgb, var(--dsh-border, #30363d) 60%, transparent);
   align-self: stretch;
+}
+.fw-np-status .fw-np-seg[style],
+.fw-np-status .fw-np-ro {
+  color: var(--dsh-warn);
 }
 
 /* 菜单遮罩 */
