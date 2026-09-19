@@ -157,7 +157,7 @@ function injectStyles(): void {
   --pm-av-builtin:#6e7681; --pm-av-file:#388bfd; --pm-av-url:#a371f7;}
 .${NS}-root{display:flex;flex-direction:column;height:100%;min-height:0;gap:0;}
 
-/* ---- 标题栏：标题 + 右侧工具条（排序 + 管理⋯），VS Code 同款 ---- */
+/* ---- 标题栏：标题 + Tab（已安装/浏览）+ 右侧工具条（排序 + 刷新 + 管理⋯），VS Code 同款 ---- */
 .${NS}-hdr{display:flex;align-items:center;gap:6px;padding:6px 6px 6px 12px;position:sticky;top:0;background:var(--pm-bg);z-index:2;}
 .${NS}-title{font-size:11px;font-weight:400;letter-spacing:.4px;text-transform:uppercase;color:var(--pm-fg-weak);}
 .${NS}-spacer{flex:1 1 auto;}
@@ -172,6 +172,14 @@ function injectStyles(): void {
 .${NS}-search-box svg{width:14px;height:14px;flex:0 0 auto;color:var(--pm-fg-muted);}
 .${NS}-search-input{flex:1 1 auto;min-width:0;border:none;outline:none;background:transparent;color:inherit;font-size:13px;}
 .${NS}-search-input::placeholder{color:var(--pm-fg-muted);}
+
+/* ---- Tab（已安装 / 浏览，挂在标题行内）：分段标签观感，选中下划线 + 计数徽章 ---- */
+.${NS}-tabs{display:flex;align-items:stretch;gap:2px;margin-left:10px;}
+.${NS}-tab{display:flex;align-items:center;gap:5px;padding:3px 8px;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--pm-fg-weak);font-size:11px;font-weight:600;letter-spacing:.2px;text-transform:uppercase;cursor:pointer;user-select:none;border-radius:4px 4px 0 0;}
+.${NS}-tab:hover{color:var(--pm-fg);}
+.${NS}-tab.active{color:var(--pm-fg);border-bottom-color:var(--pm-accent);}
+.${NS}-tab-count{font-size:10px;font-weight:600;padding:0 6px;border-radius:8px;background:color-mix(in srgb,var(--pm-fg) 10%,transparent);color:var(--pm-fg-muted);}
+.${NS}-tab.active .${NS}-tab-count{background:color-mix(in srgb,var(--pm-accent) 18%,transparent);color:var(--pm-accent);}
 
 /* ---- 统一列表容器（已安装 + 未安装合并，无分组头）---- */
 .${NS}-listwrap{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;}
@@ -208,11 +216,6 @@ function injectStyles(): void {
 .${NS}-ver{font-size:11px;color:var(--pm-fg-muted);flex:0 0 auto;}
 .${NS}-desc{font-size:12px;color:var(--pm-fg-weak);line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
 .${NS}-err{font-size:11px;color:var(--pm-danger);margin-top:2px;word-break:break-all;}
-
-/* ---- 分区标题（已安装 / 浏览器）：VS Code 扩展面板 collapsible section 观感 ---- */
-.${NS}-section{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:6px;padding:6px 10px;font-size:11px;font-weight:600;letter-spacing:.2px;text-transform:uppercase;color:var(--pm-fg-weak);background:var(--pm-bg);border-bottom:1px solid var(--pm-border);cursor:pointer;user-select:none;}
-.${NS}-section:hover{color:var(--pm-fg);}
-.${NS}-section-caret{width:12px;flex:0 0 auto;font-size:10px;line-height:1;}
 
 /* ---- 行内操作区：hover 才显出（VS Code 悬停浮出）---- */
 .${NS}-rowacts{position:absolute;top:6px;right:10px;display:none;align-items:center;gap:4px;}
@@ -400,25 +403,15 @@ function sortPlugins(arr: UserPlugin[]): UserPlugin[] {
   return s;
 }
 
-/** 分区折叠态（模块级，跨重绘/语言切换存活；仅本会话内）。 */
-const collapsedSections = new Set<"installed" | "browse">();
+/** 当前 Tab（已安装 / 浏览）：搜索只作用于所在页；模块级，跨重绘/语言切换存活。 */
+let activeTab: "installed" | "browse" = "installed";
 
-/** 分区标题行（「已安装 (n)」/「浏览器 (n)」）：点击折叠/展开该段，样式对齐 VS Code collapsible section。 */
-function sectionHeader(label: string, n: number, key: "installed" | "browse", root: HTMLElement, ctx: ActivityContext): HTMLElement {
-  const h = document.createElement("div");
-  h.className = `${NS}-section`;
-  const caret = document.createElement("span");
-  caret.className = `${NS}-section-caret`;
-  caret.textContent = collapsedSections.has(key) ? "\u25b8" : "\u25be"; // ▸ / ▾
-  const text = document.createElement("span");
-  text.textContent = `${label} (${n})`;
-  h.append(caret, text);
-  h.addEventListener("click", () => {
-    if (collapsedSections.has(key)) collapsedSections.delete(key);
-    else collapsedSections.add(key);
-    renderList(root, ctx);
-  });
-  return h;
+/** 把两页的搜索结果条数写进 Tab 计数徽章（buildChrome 前 renderList 先跑，缺节点静默跳过）。 */
+function setTabCounts(root: HTMLElement, installedN: number, browseN: number): void {
+  const i = root.querySelector<HTMLElement>(`.${NS}-tab[data-tab="installed"] .${NS}-tab-count`);
+  const b = root.querySelector<HTMLElement>(`.${NS}-tab[data-tab="browse"] .${NS}-tab-count`);
+  if (i) i.textContent = String(installedN);
+  if (b) b.textContent = String(browseN);
 }
 
 /* --------------------------------------------------------------- 菜单纯净化 */
@@ -555,11 +548,13 @@ function renderList(root: HTMLElement, ctx: ActivityContext): void {
   // 防重保险：任何合并路径若产出同 id 双记录，已安装段只显一条（市场模型下 url./file. 为唯一主键）。
   const seenIds = new Set<string>();
   const all = listUserPlugins().filter((p) => !seenIds.has(p.id) && (seenIds.add(p.id), true));
-  const installed = all.filter((p) => matchesQuery(p, q));
+  const installed = sortPlugins(all.filter((p) => matchesQuery(p, q)));
   const available = registryEntries
     .filter((e) => !isInstalled(all, e))
     .filter((e) => !q || `${e.name} ${e.title ?? ""} ${e.titleEn ?? ""} ${e.description ?? ""} ${e.descriptionEn ?? ""}`.toLowerCase().includes(q))
     .map(entryToPlugin);
+  // Tab 计数恒按「当前搜索词命中的条数」——切页后搜索在哪页就在哪页计数。
+  setTabCounts(root, installed.length, available.length);
 
   const list = root.querySelector<HTMLElement>(`.${NS}-list`);
   if (!list) return;
@@ -567,13 +562,10 @@ function renderList(root: HTMLElement, ctx: ActivityContext): void {
   clearTimeout(skeletonRerenderTimer);
   skeletonRerenderTimer = 0;
   list.replaceChildren();
-  // VS Code 扩展面板式两段分区：「已安装」（本地）在上，「浏览器」（远程注册表）在下；
-  // 下载成功的项从注册表移入本地段（isInstalled 过滤 + 重绘即达成）。点标题折叠/展开。
-  const shown = sortPlugins(installed);
-  list.append(sectionHeader(t("pmInstalledSection"), shown.length, "installed", root, ctx));
-  if (!collapsedSections.has("installed")) {
-    if (shown.length) {
-      for (const p of shown) list.append(buildRow(p, root, ctx));
+  // VS Code 扩展面板的 Tab 化改版：「已安装」「浏览」各成一页，搜索只作用于当前页。
+  if (activeTab === "installed") {
+    if (installed.length) {
+      for (const p of installed) list.append(buildRow(p, root, ctx));
     } else {
       const empty = document.createElement("div");
       empty.className = `${NS}-empty`;
@@ -582,19 +574,22 @@ function renderList(root: HTMLElement, ctx: ActivityContext): void {
       }</div>`;
       list.append(empty);
     }
-  }
-  if (available.length || registryFetching) {
-    list.append(sectionHeader(t("pmBrowseSection"), available.length, "browse", root, ctx));
-    if (!collapsedSections.has("browse")) {
-      for (const p of available) list.append(buildAvailableRow(p, root, ctx));
-      // 拉取中：骨架行占位（头像块 + 双脉冲线），列表到达后由重绘自然替换。
-      // ⚠️ 最短可见 300ms：本地 host 秒回时动画会一闪而过等于没有——
-      // 未等满则把重绘推迟到窗口末尾（registryFetching 此时已复位，再渲染的是真列表）。
-      if (registryFetching) {
-        for (let i = 0; i < 3; i++) list.append(buildSkeletonRow());
-        const w = skeletonWaitMs();
-        if (w > 0) skeletonRerenderTimer = setTimeout(() => renderList(root, ctx), w);
-      }
+  } else {
+    for (const p of available) list.append(buildAvailableRow(p, root, ctx));
+    // 拉取中：骨架行占位（头像块 + 双脉冲线），列表到达后由重绘自然替换。
+    // ⚠️ 最短可见 300ms：本地 host 秒回时动画会一闪而过等于没有——
+    // 未等满则把重绘推迟到窗口末尾（registryFetching 此时已复位，再渲染的是真列表）。
+    if (registryFetching) {
+      for (let i = 0; i < 3; i++) list.append(buildSkeletonRow());
+      const w = skeletonWaitMs();
+      if (w > 0) skeletonRerenderTimer = setTimeout(() => renderList(root, ctx), w);
+    } else if (!available.length) {
+      const empty = document.createElement("div");
+      empty.className = `${NS}-empty`;
+      empty.innerHTML = `<div class="${NS}-empty-icon">&#x2601;</div><div class="${NS}-empty-text">${
+        q ? t("pmEmptyWithQuery", { q: escapeHtml(query) }) : t("pmBrowseEmpty")
+      }</div>`;
+      list.append(empty);
     }
   }
 
@@ -1008,7 +1003,31 @@ function buildChrome(host: HTMLElement, ctx: ActivityContext): { cleanup: () => 
     });
     refreshBtn.classList.add("is-busy");
   });
-  hdr.append(title, spacer, sortBtn, refreshBtn, kebab);
+  /* Tab 栏（挂进标题行）：已安装 / 浏览 两页切换，搜索只作用于当前页 */
+  const tabBar = document.createElement("div");
+  tabBar.className = `${NS}-tabs`;
+  const mkTab = (key: "installed" | "browse", label: string): HTMLElement => {
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = `${NS}-tab${activeTab === key ? " active" : ""}`;
+    tab.dataset.tab = key;
+    const text = document.createElement("span");
+    text.textContent = label;
+    const count = document.createElement("span");
+    count.className = `${NS}-tab-count`;
+    count.textContent = "0";
+    tab.append(text, count);
+    tab.addEventListener("click", () => {
+      if (activeTab === key) return;
+      activeTab = key;
+      tabBar.querySelectorAll(`.${NS}-tab`).forEach((el) => el.classList.toggle("active", (el as HTMLElement).dataset.tab === key));
+      renderList(root, ctx);
+    });
+    return tab;
+  };
+  tabBar.append(mkTab("installed", t("pmTabInstalled")), mkTab("browse", t("pmTabBrowse")));
+
+  hdr.append(title, tabBar, spacer, sortBtn, refreshBtn, kebab);
 
   /* 搜索框 */
   const searchWrap = document.createElement("div");
@@ -1127,7 +1146,7 @@ function buildChrome(host: HTMLElement, ctx: ActivityContext): { cleanup: () => 
     ]);
   });
 
-  root.append(hdr, searchWrap, urlPanel, listWrap, fileInput);
+  root.append(hdr, searchWrap, tabBar, urlPanel, listWrap, fileInput);
   host.replaceChildren(root);
   renderList(root, ctx);
   // 注册表异步到达后补一次重绘（未安装条目从空 → 有内容）。
