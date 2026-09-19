@@ -89,32 +89,65 @@ function persistKey(dir) {
   return `dsh-fw.stats.${hashKey(String(dir))}`;
 }
 
+/** 结果文件按项目路径哈希命名，跨重启稳定。 */
+function resultFile(dir) {
+  return `.dsh-project-stats/${hashKey(String(dir))}.json`;
+}
+
 async function loadResult(dir) {
   if (!dir) return null;
   if (resultsByProject.has(dir)) return resultsByProject.get(dir);
   let result = null;
-  try {
-    const res = await fetch(`${PREFIX}/plugin-data?k=${encodeURIComponent(persistKey(dir))}`, { headers: { Accept: "application/json" } });
-    const body = await res.json().catch(() => null);
-    const v = body?.data;
-    if (typeof v === "string" && v.trim()) {
-      const parsed = JSON.parse(v);
-      if (parsed && Array.isArray(parsed.files)) result = parsed;
+  const parse = (v) => {
+    if (typeof v !== "string" || !v.trim()) return null;
+    try {
+      const p = JSON.parse(v);
+      return p && Array.isArray(p.files) ? p : null;
+    } catch {
+      return null;
     }
+  };
+  try {
+    const res = await fetch(`${PREFIX}/read?path=${encodeURIComponent(joinRoot(dir, resultFile(dir)))}`, { headers: { Accept: "application/json" } });
+    result = parse((await res.json().catch(() => null))?.data?.content);
   } catch {
     /* ignore */
+  }
+  if (!result) {
+    // 旧版本曾把整份结果写进 /plugin-data；迁移成功即删除旧 key，避免大快照堆积。
+    try {
+      const res = await fetch(`${PREFIX}/plugin-data?k=${encodeURIComponent(persistKey(dir))}`, { headers: { Accept: "application/json" } });
+      result = parse((await res.json().catch(() => null))?.data);
+      if (result) await saveResult(dir, result);
+    } catch {
+      /* ignore */
+    }
   }
   resultsByProject.set(dir, result);
   return result;
 }
 
-function saveResult(dir, result) {
+/** 落盘走 /save（宿主任意绝对路径可写）：/plugin-data 的 POST 经 sendBeacon 时是
+ *  text/plain 内容类型，宿主 JSON 解析器对 >64KB body 直接放弃 → 数百 KB 的统计结果
+ *  一直静默 400（表现为「跑完仍显示未运行」）。失败必须可见，不再 .catch(()=>{}) 吞掉。 */
+async function saveResult(dir, result) {
   resultsByProject.set(dir, result);
-  fetch(`${PREFIX}/plugin-data`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ k: persistKey(dir), v: JSON.stringify(result) }),
-  }).catch(() => {});
+  try {
+    const res = await fetch(`${PREFIX}/save`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: joinRoot(dir, resultFile(dir)), content: JSON.stringify(result) }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!body?.ok) throw new Error(body?.error || `HTTP ${res.status}`);
+    await fetch(`${PREFIX}/plugin-data`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ k: persistKey(dir), v: "" }),
+    }).catch(() => {}); // 清理旧版遗留 key；失败无关紧要
+  } catch (e) {
+    try { currentCtx?.toast?.("error", `统计结果保存失败：${e?.message ?? e}`); } catch { /* noop */ }
+  }
 }
 
 /* ------------------------------------------------------------------ 数据聚合 */
@@ -237,13 +270,13 @@ function scanProject(dir, ctx) {
     });
     const files = rels.map((rel, i) => ({ rel, abs: absList[i], ...measures[i] }));
     const result = { ts: Date.now(), truncated, files };
-    saveResult(dir, result);
-    return result;
+    return saveResult(dir, result).then(() => result);
   })();
   p.then(
     (r) => {
       const s = summarize(r.files);
       lastSummary = s;
+      setProgress(ctx, null);
       if (task) task.done(`${formatNumber(s.total)} 文件 · ${formatNumber(s.lines)} 行 · ${formatBytes(s.bytes)}`);
     },
     (e) => {
@@ -309,7 +342,6 @@ async function runStats(statusCtx) {
   setProgress(ctx, "统计中…");
   try {
     await scanProject(dir, ctx);
-    setProgress(ctx, null);
     refreshView();
     focusStatsView();
     const s = lastSummary;

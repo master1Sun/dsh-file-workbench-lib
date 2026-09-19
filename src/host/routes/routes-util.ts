@@ -73,6 +73,8 @@ export async function readBody(req: IncomingMessage): Promise<unknown> {
     let body = "";
     let size = 0;
     let settled = false;
+    // ⚠ 必须显式挂 data 监听：Node 的 JSON.parse 类型检测器只消费流的前 64KB，
+    // sendBeacon（text/plain）等超大 body 只有这条监听能读全；漏挂即截断 → null → 误导性 400。
     const finish = (value: unknown, isError: boolean): void => {
       if (settled) return;
       settled = true;

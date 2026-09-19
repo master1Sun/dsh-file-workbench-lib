@@ -21,6 +21,8 @@ import {
   ACTIVITY_API_VERSION,
   listActivityViews,
   unregisterActivityView,
+  listWorkbenchActivityViews,
+  unregisterWorkbenchActivityView,
   listCommands,
   unregisterCommand,
   listStatusBarItems,
@@ -217,7 +219,9 @@ function readPlainMeta(code: string, baseName: string): Omit<PluginManifest, "id
 
 function snapshotContributions(): ContributionSet {
   return {
-    views: listActivityViews().map((v) => v.id),
+    // ⚠️ 必须并上工作台注册表：dsh-qqbot「QQ 定时消息」等只经 wb.activityBar.register 注入，
+    // 漏掉它会让「启用后确认有贡献点」的 diff 对纯 wb 插件恒空 → 250ms 后被撤销（图标时有时无）。
+    views: [...listActivityViews().map((v) => v.id), ...listWorkbenchActivityViews().map((v) => v.id)],
     commands: listCommands(),
     status: listStatusBarItems().map((i) => i.id),
     menu: listExtensionMenuItems().map((i) => i.id),
@@ -236,7 +240,11 @@ function diffContributions(before: ContributionSet, after: ContributionSet): Con
 
 function revokeContributions(set: ContributionSet | undefined): void {
   if (!set) return;
-  set.views.forEach(unregisterActivityView);
+  // 视图 id 可能来自编辑器或工作台任一注册表；两边各撤一次（对侧不存在时静默）。
+  set.views.forEach((id) => {
+    unregisterActivityView(id);
+    unregisterWorkbenchActivityView(id);
+  });
   set.commands.forEach(unregisterCommand);
   set.status.forEach(unregisterStatusBarItem);
   set.menu.forEach(unregisterExtensionMenuItem);
@@ -568,6 +576,17 @@ export async function savePluginEditedCode(id: string, code: string | null): Pro
   else await persistNow();
 }
 
+/** 注册表里该裸名的候选地址（同源 /plugin-src?k=）；离线/缺项时 undefined。 */
+async function registryUrlFor(name: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(`${apiBase}/plugin-registry`, { cache: "no-cache", headers: { Accept: "application/json" } });
+    const body = (await res.json()) as { data?: Array<{ name?: string; url?: string }> };
+    return body?.data?.find((e) => e?.name === name && e.url)?.url;
+  } catch {
+    return undefined;
+  }
+}
+
 /** 启用一个插件：执行其代码并把贡献点记入 contributions。 */
 export async function enablePlugin(id: string): Promise<void> {
   const p = findPlugin(id);
@@ -618,10 +637,26 @@ export function disablePlugin(id: string): void {
   void persistNow();
 }
 
-/** 移除：停用并从列表剔除。**内置种子不可移除**（只能启用/停用）。 */
-export function removePlugin(id: string): void {
+/** 移除：停用并从列表剔除。内置种子记录先迁移为可管理的 url. 记录再删（市场模型下无「不可移除」条目）。 */
+export async function removePlugin(id: string): Promise<void> {
   const p = findPlugin(id);
-  if (!p || p.source === "builtin") return;
+  if (!p) return;
+  if (p.source === "builtin") {
+    // 存量快照的种子记录：经注册表候选（同源 bundle，离线可用）转成 url. 记录，
+    // 新记录已启用即等价「迁移并保留状态」；随后停掉并删除旧种子行。
+    const url = await registryUrlFor(p.id);
+    if (url) {
+      const r = await importFromUrl(url);
+      if (r.ok && r.id && r.id !== p.id) {
+        disablePlugin(p.id);
+        plugins.value = plugins.value.filter((x) => x.id !== p.id);
+        await persistNow();
+        return;
+      }
+    }
+    toast("error", t("pmSeedMigrateFailed", { name: p.name }));
+    return;
+  }
   disablePlugin(id);
   plugins.value = plugins.value.filter((x) => x.id !== id);
   void persistNow();
@@ -636,6 +671,101 @@ function upsert(rec: UserPlugin): void {
   const i = plugins.value.findIndex((p) => p.id === rec.id);
   if (i >= 0) plugins.value.splice(i, 1, rec);
   else plugins.value = [...plugins.value, rec];
+}
+
+/* ------------------------------------------------- 存量内置种子 → 市场模型迁移 */
+
+/** 一次性迁移完成标记（与插件快照同文件命名空间，host /plugin-data 任意 key 可读写）。 */
+const SEEDS_MIGRATED_KEY = "dsh-fw.seedsMigratedV2";
+
+/**
+ * 把注册表候选装成 url. 记录并启用；失败返回 undefined（调用方保留种子行下次再试）。
+ * ⚠️ 不走 importFromUrl：种子行仍在列表时其「同文种子捷径」会直接顶回种子启用，绕过迁移。
+ */
+async function installRegistryAsUrl(e: { name: string; url: string; description?: string; descriptionEn?: string }): Promise<string | undefined> {
+  try {
+    const res = await fetch(`${apiBase}/fetch-plugin`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: new URL(e.url, window.location.href).href }),
+    });
+    const payload = (await res.json().catch(() => null)) as { ok?: boolean; error?: string; data?: { code: string; name?: string } } | null;
+    if (!payload?.ok || !payload.data) return undefined;
+    let code: string;
+    let packedManifest: PluginManifest | null;
+    try {
+      ({ code, manifest: packedManifest } = packSourceIfRaw(payload.data.code, e.name));
+    } catch {
+      return undefined;
+    }
+    const check = validatePluginSource(code);
+    if (!check.ok) return undefined;
+    const id = normalizeId(`url.${e.name}`);
+    const manifest = packedManifest ?? readPluginManifest(code);
+    upsert({
+      id,
+      name: manifest?.name || e.name,
+      source: "url",
+      origin: e.url,
+      version: manifest?.version,
+      description: manifest?.description ?? e.description,
+      nameEn: manifest?.nameEn,
+      descriptionEn: manifest?.descriptionEn ?? e.descriptionEn,
+      code,
+      enabled: false,
+    });
+    await enablePlugin(id);
+    return id;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 市场模型一次性迁移：存量 builtin 种子记录 → 经注册表候选转成可移除的 url. 记录。
+ * 未安装区自此接管这些插件（用户视角=「内置」消失、全部变可下载）。种子若仍带用户编辑版
+ * （editedCode，非随包原文）则保留该行不迁移——编辑成果优先于名单整洁。
+ */
+async function migrateBuiltinSeedsToRegistry(): Promise<void> {
+  let entries: Array<{ name?: string; url?: string; description?: string; descriptionEn?: string }> = [];
+  try {
+    // refresh=1：迁移必须拿最新清单（刚 push 的新插件也要能装上），不吃 host 缓存。
+    const res = await fetch(`${apiBase}/plugin-registry?refresh=1`, { cache: "no-cache", headers: { Accept: "application/json" } });
+    const body = (await res.json()) as { data?: typeof entries };
+    entries = Array.isArray(body?.data) ? body.data : [];
+  } catch {
+    return;
+  }
+  const byName = new Map(
+    entries
+      .filter((e): e is { name: string; url: string; description?: string; descriptionEn?: string } => !!e?.name && !!e.url)
+      .map((e) => [e.name, e]),
+  );
+  const seeds = plugins.value.filter((p) => p.source === "builtin");
+  let changed = false;
+  for (const s of seeds) {
+    const e = byName.get(s.id);
+    if (!e) continue; // 注册表暂不认识该裸名（离线/未发布）：留着，下次启动再试
+    if (s.editedCode) continue; // 有用户编辑版：保留种子行，编辑通道不变
+    const newId = await installRegistryAsUrl(e);
+    if (!newId) continue; // 拉取/打包失败：下次启动重试
+    disablePlugin(s.id);
+    plugins.value = plugins.value.filter((x) => x.id !== s.id);
+    changed = true;
+  }
+  if (changed) await persistNow();
+}
+
+/** bootstrap 尾部：一次性执行种子→注册表迁移（成功或确认无可迁移项后落标记，不再重复跑）。 */
+async function maybeMigrateSeeds(): Promise<void> {
+  try {
+    if ((await readPluginData<boolean>(SEEDS_MIGRATED_KEY)) === true) return;
+    await migrateBuiltinSeedsToRegistry();
+    // 快照里已无 builtin 行（本次迁完/历史上就没有）才落标记；仍有残留（离线缺项/编辑版）留待下次。
+    if (!plugins.value.some((p) => p.source === "builtin")) await writePluginData(SEEDS_MIGRATED_KEY, true);
+  } catch {
+    /* 迁移尽力而为：失败不影响正常加载 */
+  }
 }
 
 /** 导入结果：供管理视图即时 toast；error 已本地化。 */
@@ -724,28 +854,43 @@ export async function importFromUrl(url: string): Promise<ImportResult> {
   }
   const check = validatePluginSource(code);
   if (!check.ok) return { ok: false, error: check.error };
-  // 注册表候选本就随包发布为内置种子：bundle 的 loader id（dsh-fw.<name>）撞见在位种子时，
-  // 「下载」等价于「启用该内置插件」——直接激活种子记录，不留 url. 克隆（克隆正是
-  // 「下载后仍显示未安装行」的元凶：同功能双记录）。
-  // ⚠️ 必须同时按文件名兜底比对：源码形态的候选（plugins/ 里未打包的 .js）没有
-  // manifest 声明，loaderId 抽不出来——只认 loaderId 会让捷径整个漏掉、照建克隆。
-  const seedKey =
-    check.loaderId?.startsWith("dsh-fw.") ? check.loaderId.slice("dsh-fw.".length) : baseName.replace(/\.(c|m)?js$/i, "");
+  const seedKey = check.loaderId?.startsWith("dsh-fw.") ? check.loaderId.slice("dsh-fw.".length) : baseName.replace(/\.(c|m)?js$/i, "");
   if (seedKey) {
     const seed = findPlugin(seedKey);
+    // 仅当种子 bundle 与本次下载**逐字节同文**（同源 /plugin-src 往返）才等价启用；
+    // 不同文（上游已换版、或候选是源码形态现场打包）则放行建 url. 记录，避免静默装旧版。
     if (seed?.source === "builtin") {
-      await enablePlugin(seedKey);
-      const srec = findPlugin(seedKey);
-      return { ok: !!srec?.enabled, error: srec?.error, id: seedKey };
+      let sameAsSeed = false;
+      try {
+        // 直接比对引用路径与 bundle 文本两种存量形态（不读 editedCode——编辑版记录不参与同文判定）。
+        sameAsSeed = seed.code === code || (fetchedBuiltinCode.get(seed.id) ?? (await resolvePluginCode(seed))) === code;
+      } catch {
+        /* 取不到种子 bundle：按不同文处理 */
+      }
+      if (sameAsSeed) {
+        await enablePlugin(seedKey);
+        const srec = findPlugin(seedKey);
+        return { ok: !!srec?.enabled, error: srec?.error, id: seedKey };
+      }
     }
   }
-  // 同一 bundle 经不同通道重复导入会撞主键（先「从 URL 导入」再「导入本地文件」，或反之）：
-  // 命中同源码的既有记录时只重新启用，绝不 upsert 覆盖——否则会篡改另一通道的 origin/归属。
+  // 「下载即装」市场模型：注册表候选与随包发布的内置 bundle 同源同内容——既有 url./file.
+  // 记录若装着**同一份 bundle**（先删后重下、或种子时代遗留的克隆），原位刷新源码/元数据并
+  // 重新启用，绝不新建第二份（双记录正是「下载后仍显示未安装行」的元凶）。
+  // ⚠️ 按 code 全文比对而非名字：用户编辑过/上游已换版的同名插件 code 必不同，照常走新装。
   const rawId = check.loaderId || baseName.replace(/\.(c|m)?js$/i, "");
+  // ⚠️ 含点候选名（如 `a.b` → url.a.b）的末段 rawId="b" 与主键对不上，须按文件名主干补比对，否则重下必出双记录。
+  const stem = baseName.replace(/\.(c|m)?js$/i, "");
   const twin =
-    plugins.value.find((x) => x.source === "file" && (x.id === `file.${rawId}` || x.code === code)) ??
-    plugins.value.find((x) => x.source === "url" && x.id === `url.${rawId}` && x.origin === clean);
+    plugins.value.find((x) => x.code === code) ??
+    plugins.value.find(
+      (x) =>
+        (x.source === "file" || x.source === "url") &&
+        (x.id === `${x.source}.${rawId}` || (!!stem && x.id === `${x.source}.${stem}`)),
+    );
   if (twin) {
+    twin.code = code;
+    twin.editedCode = undefined;
     await enablePlugin(twin.id);
     const trec = findPlugin(twin.id);
     return { ok: !!trec?.enabled, error: trec?.error, id: twin.id };
@@ -820,16 +965,14 @@ async function fetchBuiltinSeeds(): Promise<BuiltinSeed[]> {
   }
 }
 
-/** 把内置种子合并进列表（不覆盖用户已有同 id 记录，保留其启用状态）。 */
+/** 把内置种子合并进列表。**仅存量快照兼容通道**——新模型下不再自动注入种子（见 bootstrap）。 */
 function ensureBuiltinSeeds(snapshot: UserPlugin[], seeds: BuiltinSeed[]): UserPlugin[] {
   // 迁移：早期快照里的内置记录用带前缀的旧 id（@sunjuntao/dsh-fw-* / dsh-fw-*），
   // 与现在的裸名种子一一对应且不可被用户移除——留着就是「同名插件显示两份」的重复项，直接丢弃。
   const isLegacyBuiltinId = (id: string) => id.startsWith("@sunjuntao/dsh-fw-") || /^dsh-fw\.[a-z0-9-]+$/i.test(id);
   const seedIds = new Set(seeds.map((s) => s.id));
-  // ⚠️ 内置种子的 key 是 bundle 裸名（如 "linter"），而「极简直调形态」外部插件导入时
-  // 主键取 loader 登记的 id——若作者也用了 `dsh-fw.<同名>`，记录就会与种子撞 key，
-  // 下面的合并会把外部插件当成"旧快照残留"整个丢掉（表现为刷新后插件消失）。
-  // 撞名时把记录改挂到 `<source>.<id>`（与无 loaderId 时的导入命名同源）再正常合并。
+  // ⚠️ 历史坑（保留注释供读）：外部插件 loader id 撞种子裸名时须改挂 `<source>.<id>` 命名空间，
+  // 否则下面的合并会把外部记录当"旧快照残留"顶掉。
   for (const p of snapshot) {
     if ((p.source === "file" || p.source === "url") && seedIds.has(p.id)) p.id = `${p.source}.${p.id}`;
   }
@@ -841,18 +984,8 @@ function ensureBuiltinSeeds(snapshot: UserPlugin[], seeds: BuiltinSeed[]): UserP
   for (const seed of seeds) {
     const existing = byId.get(seed.id);
     if (!existing) {
-      byId.set(seed.id, {
-        id: seed.id,
-        name: seed.name,
-        source: "builtin",
-        origin: seed.id,
-        version: seed.version,
-        description: seed.description,
-        nameEn: seed.nameEn,
-        descriptionEn: seed.descriptionEn,
-        code: seed.code,
-        enabled: false,
-      });
+      // 市场模型：注册表候选不再落成种子记录——未安装项经「下载」以 url. 记录进来。
+      continue;
     } else if (existing.source === "builtin") {
       // 旧快照可能早于种子英文名/描述字段——每次读取时刷新元数据（保留启用状态与 error）。
       Object.assign(existing, {
@@ -863,6 +996,13 @@ function ensureBuiltinSeeds(snapshot: UserPlugin[], seeds: BuiltinSeed[]): UserP
         descriptionEn: seed.descriptionEn || existing.descriptionEn,
         code: seed.code,
       });
+      // 过期内联 bundle 对账：老快照把全量代码直存进记录（早期壳 factory 返回 {apply,inject,meta}，
+      // 引用已被剥掉的 inject → 激活必抛 ReferenceError「未注册任何贡献点」）。种子已随包发布且
+      // code 是引用路径时，丢弃内联代码转按需拉取；用户编辑版（editedCode）不受影响。
+      if (existing.code && !/^plugin-src\//.test(existing.code) && /^plugin-src\//.test(seed.code)) {
+        existing.code = seed.code;
+        fetchedBuiltinCode.delete(seed.id);
+      }
     } else if (!isLegacyBuiltinId(seed.id) && existing.code && !/^plugin-src\//.test(existing.code)) {
       // 旧快照的升级路径：①源码形态（当时还没有导入即打包）→ 现场打包并回填元数据；
       // ②已打包但缺清单元数据（那时还不读 manifest）→ bundle 若带 manifest，升级一次。
@@ -899,13 +1039,19 @@ function ensureBuiltinSeeds(snapshot: UserPlugin[], seeds: BuiltinSeed[]): UserP
 }
 
 /**
- * 一次性引导：读快照 → 合并内置种子 → 填充响应式列表 → 自动启用上次启用项。
+ * 一次性引导：读快照 → 内置种子仅做**存量记录对账**（不再注入新行，见 ensureBuiltinSeeds）
+ * → 填充响应式列表 → 自动启用上次启用项。
  * 由编辑器面板挂载时调用；重复调用为 no-op。
  */
 export async function bootstrapUserPlugins(): Promise<void> {
   if (bootstrapped || typeof window === "undefined") return;
   bootstrapped = true;
-  const [snapshot, seeds] = await Promise.all([readSnapshot(), fetchBuiltinSeeds()]);
+  const snapshot = await readSnapshot();
+  // 市场模型：插件管理不再预置「内置」条目——全部插件以注册表「未安装」呈现、点下载即装。
+  // 种子清单每次 bootstrap 都拉（/plugin-index + bundle manifest，本地 host 成本可忽略）：
+  // ①存量 builtin 记录的元数据/过期内联 bundle 对账；②预热 fetchedBuiltinCode 缓存，
+  // 使 importFromUrl 的「下载 == 随包版本」同文比对成立（种子时代克隆记录重下时归位）。
+  const seeds = await fetchBuiltinSeeds();
   plugins.value = ensureBuiltinSeeds(snapshot, seeds);
   // 串行启用，避免并发 eval 互相污染 diff 归属。仅恢复曾成功激活过的插件；
   // 从未生效的（如版本不兼容）强制置为禁用并清错，不再每次加载重复失败弹 toast。
@@ -920,6 +1066,9 @@ export async function bootstrapUserPlugins(): Promise<void> {
     const rec = findPlugin(p.id);
     if (rec && !rec.enabled) toast("error", t("pmRestoreFailed", { name: rec.name, msg: rec.error || "" }));
   }
+  // 市场模型一次性迁移：存量内置种子 → 注册表候选（url. 记录，可移除）。放最后——
+  // 自动恢复已跑完，迁移期间的新增行不会被本轮覆盖。
+  await maybeMigrateSeeds();
 }
 
 /** 只读列表（管理视图消费）。 */

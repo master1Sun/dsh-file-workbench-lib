@@ -224,11 +224,11 @@ async function fetchRemoteRegistry(): Promise<RegistryItem[]> {
  */
 export const pluginRegistryResource: RouteMatcher = async (req, res, seg, q, method) => {
   void req;
-  void q;
   if (!(seg[0] === "plugin-registry" && seg.length === 1)) return false;
   if (method !== "GET") return false;
   let items: RegistryItem[] = [];
-  if (registryCache && Date.now() - registryCache.at < REGISTRY_TTL_MS) {
+  const force = q.get("refresh") === "1"; // 「检查远端」按钮带参：跳过 5 分钟缓存（用户显式刷新语义）
+  if (registryCache && !force && Date.now() - registryCache.at < REGISTRY_TTL_MS) {
     items = registryCache.items;
   } else {
     try {
@@ -237,12 +237,15 @@ export const pluginRegistryResource: RouteMatcher = async (req, res, seg, q, met
       registryCache = { at: Date.now(), items: remote };
       items = remote;
     } catch {
-      try {
-        // 随包发布的离线回退清单：package 根 registry.json（WEB_DIR=lib/web 的上上级）。
-        items = JSON.parse(readFileSync(resolve(WEB_DIR, "..", "..", "registry.json"), "utf8"));
-      } catch {
-        items = [];
-      }
+      // 在线枚举失败且此前已有成功结果（如 force 时恰好断网）：沿用旧缓存好过回退。
+      if (registryCache) items = registryCache.items;
+      else
+        try {
+          // 随包发布的离线回退清单：package 根 registry.json（WEB_DIR=lib/web 的上上级）。
+          items = JSON.parse(readFileSync(resolve(WEB_DIR, "..", "..", "registry.json"), "utf8"));
+        } catch {
+          items = [];
+        }
     }
   }
   return (json(res, 200, { ok: true, data: items } satisfies ApiResponse<RegistryItem[]>), true);

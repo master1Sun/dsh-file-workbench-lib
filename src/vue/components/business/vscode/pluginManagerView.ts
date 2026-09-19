@@ -175,6 +175,17 @@ function injectStyles(): void {
 /* ---- 统一列表容器（已安装 + 未安装合并，无分组头）---- */
 .${NS}-listwrap{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;}
 
+/* ---- 注册表刷新动效：工具栏按钮转圈 + 「浏览器」段骨架行脉冲 ---- */
+@keyframes ${NS}-spin{to{transform:rotate(360deg);}}
+@keyframes ${NS}-pulse{0%,100%{opacity:.45;}50%{opacity:.9;}}
+.${NS}-refBtn.is-busy svg{animation:${NS}-spin .8s linear infinite;}
+.${NS}-skel{display:flex;align-items:flex-start;gap:10px;padding:6px 12px;}
+.${NS}-skel-avatar{width:32px;height:32px;flex:0 0 auto;border-radius:4px;background:var(--pm-hover);}
+.${NS}-skel-lines{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:6px;padding-top:2px;}
+.${NS}-skel-line{height:9px;border-radius:3px;background:var(--pm-hover);animation:${NS}-pulse 1.1s ease-in-out infinite;}
+.${NS}-skel-line.w60{width:60%;}
+.${NS}-skel-line.w85{width:85%;}
+
 /* ---- 列表行：紧凑，图标 · 两行文本，hover 浮出操作 ---- */
 .${NS}-list{display:flex;flex-direction:column;padding:1px 0 6px;}
 .${NS}-row{display:flex;align-items:flex-start;gap:10px;padding:6px 12px;cursor:default;position:relative;}
@@ -270,6 +281,8 @@ const ICON_SEARCH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 const ICON_GEAR = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
 // 排序（三个长度递减的横条）——VS Code「Sort»」图标观感。
 const ICON_SORT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h13M4 12h9M4 18h5"/></svg>`;
+// 刷新（圆弧 + 箭头）——「检查远端/刷新仓库列表」工具栏按钮。
+const ICON_REFRESH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 6.3"/><path d="M20 4v7h-7"/></svg>`;
 
 /* ------------------------------------------------------------ 展示辅助 */
 
@@ -293,10 +306,29 @@ let registryLoaded = false;
 /** 同条目防重复点击：进行中的下载 URL 集合（仅拦「同一 DOM 存活期间的二次点击」，不驱动任何文案）。 */
 const downloadingUrls = new Set<string>();
 
-async function fetchRegistry(force = false): Promise<RegistryEntry[]> {
+/** 注册表拉取中（骨架行/刷新动画的开关；fetchRegistry 起止时翻转并经面板句柄重绘）。 */
+let registryFetching = false;
+/** 骨架行最短可见时长：本地 host 常 <100ms 返回，动画一闪而过不如没有。 */
+const SKELETON_MIN_MS = 300;
+let fetchStartedAt = 0;
+/** 骨架最短可见窗口的推迟重绘票据（见 renderList）。 */
+let skeletonRerenderTimer: ReturnType<typeof setTimeout> | 0 = 0;
+
+/** 骨架行还需展示的剩余毫秒（已等满窗口返回 0）。 */
+function skeletonWaitMs(): number {
+  return Math.max(0, SKELETON_MIN_MS - (Date.now() - fetchStartedAt));
+}
+
+async function fetchRegistry(force = false, onSettled?: () => void): Promise<RegistryEntry[]> {
   if (registryLoaded && !force) return registryEntries;
+  if (!registryFetching) {
+    registryFetching = true;
+    fetchStartedAt = Date.now();
+    liveRerender?.();
+  }
   try {
-    const res = await fetch("/api/dsh-file-workbench/plugin-registry", { cache: "no-cache" });
+    // force = 用户点「检查远端」：带 refresh=1 让 host 跳过 5 分钟缓存真打 GitHub。
+    const res = await fetch(`/api/dsh-file-workbench/plugin-registry${force ? "?refresh=1" : ""}`, { cache: "no-cache" });
     const body = await res.json();
     // host 返回信封 { ok, data }（在线枚举 GitHub plugins/，失败回退本地 registry.json）。
     const arr = Array.isArray(body) ? body : body?.data;
@@ -305,6 +337,8 @@ async function fetchRegistry(force = false): Promise<RegistryEntry[]> {
     registryEntries = [];
   }
   registryLoaded = true;
+  registryFetching = false;
+  (onSettled ?? liveRerender)?.();
   return registryEntries;
 }
 
@@ -314,7 +348,10 @@ function isInstalled(p: UserPlugin[], entry: RegistryEntry): boolean {
   // 「从 URL 导入」的记录主键取文件名（含 .js），与裸名不互含——先剥扩展名再逐一比对。
   const stem = bare.replace(/\.(c|m)?js$/i, "");
   const ids = new Set(p.map((x) => x.id));
-  for (const cand of [bare, stem]) {
+  for (const cand of new Set([bare, stem])) {
+    // 种子行（裸名 id）不算已安装：builtin 记录在启动迁移中会变成 url. 记录；若迁移没跑成
+    // （离线等），未安装区仍要露出下载入口，不能让插件「两边都不在」。file./url. 前缀照常匹配。
+    if (cand === bare && p.some((x) => x.source === "builtin" && x.id === cand)) continue;
     if (ids.has(cand) || ids.has(`file.${cand}`) || ids.has(`url.${cand}`) || ids.has(`dsh-fw.${cand}`)) return true;
   }
   return false;
@@ -514,7 +551,9 @@ function entryToPlugin(e: RegistryEntry): UserPlugin {
 
 function renderList(root: HTMLElement, ctx: ActivityContext): void {
   const q = query.trim().toLowerCase();
-  const all = listUserPlugins();
+  // 防重保险：任何合并路径若产出同 id 双记录，已安装段只显一条（市场模型下 url./file. 为唯一主键）。
+  const seenIds = new Set<string>();
+  const all = listUserPlugins().filter((p) => !seenIds.has(p.id) && (seenIds.add(p.id), true));
   const installed = all.filter((p) => matchesQuery(p, q));
   const available = registryEntries
     .filter((e) => !isInstalled(all, e))
@@ -523,6 +562,9 @@ function renderList(root: HTMLElement, ctx: ActivityContext): void {
 
   const list = root.querySelector<HTMLElement>(`.${NS}-list`);
   if (!list) return;
+  // 推迟重绘（骨架最短可见窗口）只留一张有效票据：新渲染即作废旧定时器，防过期回写。
+  clearTimeout(skeletonRerenderTimer);
+  skeletonRerenderTimer = 0;
   list.replaceChildren();
   // VS Code 扩展面板式两段分区：「已安装」（本地）在上，「浏览器」（远程注册表）在下；
   // 下载成功的项从注册表移入本地段（isInstalled 过滤 + 重绘即达成）。点标题折叠/展开。
@@ -540,10 +582,18 @@ function renderList(root: HTMLElement, ctx: ActivityContext): void {
       list.append(empty);
     }
   }
-  if (available.length) {
+  if (available.length || registryFetching) {
     list.append(sectionHeader(t("pmBrowseSection"), available.length, "browse", root, ctx));
     if (!collapsedSections.has("browse")) {
       for (const p of available) list.append(buildAvailableRow(p, root, ctx));
+      // 拉取中：骨架行占位（头像块 + 双脉冲线），列表到达后由重绘自然替换。
+      // ⚠️ 最短可见 300ms：本地 host 秒回时动画会一闪而过等于没有——
+      // 未等满则把重绘推迟到窗口末尾（registryFetching 此时已复位，再渲染的是真列表）。
+      if (registryFetching) {
+        for (let i = 0; i < 3; i++) list.append(buildSkeletonRow());
+        const w = skeletonWaitMs();
+        if (w > 0) skeletonRerenderTimer = setTimeout(() => renderList(root, ctx), w);
+      }
     }
   }
 
@@ -751,19 +801,19 @@ function buildRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContext): HTMLE
       label: p.source === "builtin" ? t("pmCodeView") : t("pmCodeEdit"),
       onClick: () => openInstalledViewer(p, root, ctx),
     });
-    if (p.source !== "builtin") {
-      items.push({
-        label: t("pmRemove"),
-        danger: true,
-        onClick: () => {
-          void confirmDialog({ title: t("pmRemove"), message: t("pmRemoveConfirm", { name: shortName(p) }) }).then((ok) => {
-            if (!ok) return;
-            removePlugin(p.id);
-            renderList(root, ctx);
-          });
-        },
-      });
-    }
+    // 移除：所有记录统一入口（种子记录的迁移语义在 removePlugin 内部）。
+    items.push({
+      label: t("pmRemove"),
+      danger: true,
+      onClick: () => {
+        const msg = p.source === "builtin" ? t("pmSeedRemoveConfirm", { name: shortName(p) }) : t("pmRemoveConfirm", { name: shortName(p) });
+        void confirmDialog({ title: t("pmRemove"), message: msg }).then(async (ok) => {
+          if (!ok) return;
+          await removePlugin(p.id);
+          renderList(root, ctx);
+        });
+      },
+    });
     openMenuAt(gear, items);
   });
   acts.append(gear);
@@ -773,6 +823,24 @@ function buildRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContext): HTMLE
 }
 
 /* ------------------------------------------------------------------ 未安装（注册表）行 */
+
+/** 注册表拉取中的骨架行：头像块 + 两条脉冲线，与真实行同布局防跳动。 */
+function buildSkeletonRow(): HTMLElement {
+  const row = document.createElement("div");
+  row.className = `${NS}-skel`;
+  row.setAttribute("aria-hidden", "true");
+  const av = document.createElement("div");
+  av.className = `${NS}-skel-avatar`;
+  const lines = document.createElement("div");
+  lines.className = `${NS}-skel-lines`;
+  const l1 = document.createElement("div");
+  l1.className = `${NS}-skel-line w60`;
+  const l2 = document.createElement("div");
+  l2.className = `${NS}-skel-line w85`;
+  lines.append(l1, l2);
+  row.append(av, lines);
+  return row;
+}
 
 /** 注册表条目行（统一列表里的「未安装」项）：名称 + 描述 + 悬停「下载」按钮；点击即经 importFromUrl 安装并启用。 */
 function buildAvailableRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContext): HTMLElement {
@@ -907,7 +975,21 @@ function buildChrome(host: HTMLElement, ctx: ActivityContext): { cleanup: () => 
   kebab.className = `${NS}-tool`;
   kebab.title = t("pmManage");
   kebab.textContent = "\u22ef"; // ⋯
-  hdr.append(title, spacer, sortBtn, kebab);
+  // 刷新仓库列表：独立工具栏按钮，拉取中图标转圈（is-busy）。
+  const refreshBtn = document.createElement("button");
+  refreshBtn.type = "button";
+  refreshBtn.className = `${NS}-tool ${NS}-refBtn`;
+  refreshBtn.title = t("pmRefreshRegistry");
+  refreshBtn.innerHTML = ICON_REFRESH;
+  refreshBtn.addEventListener("click", () => {
+    if (registryFetching) return;
+    void fetchRegistry(true, () => {
+      refreshBtn.classList.remove("is-busy");
+      renderList(root, ctx);
+    });
+    refreshBtn.classList.add("is-busy");
+  });
+  hdr.append(title, spacer, sortBtn, refreshBtn, kebab);
 
   /* 搜索框 */
   const searchWrap = document.createElement("div");
@@ -1012,12 +1094,6 @@ function buildChrome(host: HTMLElement, ctx: ActivityContext): { cleanup: () => 
         },
       },
       {
-        label: t("pmRefreshRegistry"),
-        onClick: () => {
-          void fetchRegistry(true).then(() => renderList(root, ctx));
-        },
-      },
-      {
         label: t("pmEnableAll"),
         onClick: () => {
           const targets = listUserPlugins().filter((p) => !p.enabled);
@@ -1036,15 +1112,25 @@ function buildChrome(host: HTMLElement, ctx: ActivityContext): { cleanup: () => 
   host.replaceChildren(root);
   renderList(root, ctx);
   // 注册表异步到达后补一次重绘（未安装条目从空 → 有内容）。
-  void fetchRegistry().then(() => renderList(root, ctx));
+  // force：市场模型下「未安装」区是插件唯一入口，打开面板即真打远端（host 侧 refresh=1 跳缓存）；
+  // 拉取中骨架行 + 刷新按钮转圈由 registryFetching/liveRerender 驱动。
+  if (registryFetching) refreshBtn.classList.add("is-busy");
+  void fetchRegistry(true).then(() => {
+    refreshBtn.classList.remove("is-busy");
+    renderList(root, ctx);
+  });
 
   return {
     cleanup() {
+      clearTimeout(skeletonRerenderTimer);
+      skeletonRerenderTimer = 0;
       closeActiveMenu();
       closeCodeViewer();
       host.replaceChildren();
     },
     rerender() {
+      // 刷新进行中保持转圈态（本句柄同时被 fetchRegistry 起止回调经 liveRerender 调用）。
+      refreshBtn.classList.toggle("is-busy", registryFetching);
       renderList(root, ctx);
     },
   };
