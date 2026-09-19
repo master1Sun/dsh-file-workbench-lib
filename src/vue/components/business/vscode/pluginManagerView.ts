@@ -946,9 +946,10 @@ function buildAvailableRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContex
     manage.addEventListener("click", (ev) => {
       ev.stopPropagation();
       activeTab = "installed";
+      root.querySelectorAll<HTMLElement>(`.${NS}-tab`).forEach((el) => el.classList.toggle("active", el.dataset.tab === "installed"));
       renderList(root, ctx);
       const bare = p.id.replace(/^__reg\./, ""); // 引号包裹的属性选择器，无需转义
-      root.querySelector<HTMLElement>(`.${NS}-list .${NS}-row[data-pid$="${bare}"]`)?.scrollIntoView({ block: "nearest" });
+      root.querySelector<HTMLElement>(`.${NS}-list .${NS}-row[data-pid$="${bare}"]`)?.scrollIntoView({ block: "start", behavior: "smooth" });
     });
   }
   btn.addEventListener("click", (ev) => {
