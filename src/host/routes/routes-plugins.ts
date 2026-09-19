@@ -208,7 +208,7 @@ async function fetchRemoteRegistry(): Promise<RegistryItem[]> {
       } catch {
         /* 上游新增但尚未随包发布：无源可抽（raw.githubusercontent 本网络不可达），回退文件名展示 */
       }
-      return { name, url, ...info };
+      return { name, url, title: info.title ?? name, titleEn: info.titleEn, description: info.description, descriptionEn: info.descriptionEn };
     }),
   );
 }
