@@ -504,6 +504,128 @@ id 务必带命名空间前缀。
 7. **命令抛错**：状态栏按钮点击时，命令处理器抛出的异常会被面板捕获并以 error toast 呈现，
    不会中断编辑器；主动 `executeCommand` 调用则异常向上冒泡给调用方。
 
+## 宿主 HTTP API 全清单（已实现，按开放程度分级）
+
+前缀统一 `/api/dsh-file-workbench`，同源直连。除特殊说明外响应都是 `{ ok, data, error? }` 信封；
+下文只写 `data` 的形状。路径参数一律是**绝对路径**（本地 `D:\...` / `/home/...`），或 SSH 引用
+`ssh://<hostId>/<远端POSIX路径>`（`/files /read /save /list /detail` 等 fs 接口与 git/svn 均透明支持两种）。
+可选 `key` 参数用于多窗口工作区（缺省即当前窗口根）。
+
+⚠️ **安全提示**：宿主无鉴权、同源即可调用——插件能调的边界等于用户自己开控制台的边界（见上节
+「信任边界」）。标 🔒 的接口涉及凭据机密或破坏性系统操作，**不建议插件调用**。
+
+### 推荐开放
+
+| 端点 | 方法 | 参数 | `data` |
+| --- | --- | --- | --- |
+| `/root` | GET/POST | GET `?key`；POST body `{ path }`（`ssh://` 串直接作为根） | `{ root }` |
+| `/list` | GET | `?path`（缺省=根，任意目录可列） | 目录列表 `{ entries, root, crumbs, truncated, inaccessible }` |
+| `/parent` | GET | `?path` | `{ root, parent }` |
+| `/browse` | GET | `?path`（缺省 home） | 同 `/list` 但 entries 附带详情（大小/mtime） |
+| `/mycomputer` | GET | — | `{ items }`（盘符/Home/下载/工作区顶层入口） |
+| `/drives` | GET | — | `{ drives }`（含容量与卷标） |
+| `/files` | GET | `?path`（缺省=根） | 项目文件相对路径索引（「快速打开」用，模糊匹配在前端做） |
+| `/read` | GET | `?path&encoding=&bom=1\|0` | `{ content, size, mtime, encoding, hasBom, eol, binary }`；行尾已归一为 LF；>8MB 报 413 |
+| `/save` | POST | `{ path, content, encoding?, hasBom?, eol?, expectedMtime?, force? }` | `{ path, mtime }`；磁盘已被别处改写且未 `force` → **412** `{ code:"mtime-conflict" }` |
+| `/search` | GET | `?q&path&limit(≤2000)&case=1&regex=1` | `{ matches: rel[], byContent: rel[], snippets: {rel:片段}, truncated, scope }`（rel 相对搜索范围） |
+| `/grep` | GET | `?q&path&sub&case=1&regex=1&word=1&include=&exclude=` | `{ files: [{ rel, hits: [{ ln, text }] }], total, truncated, scope }`；`sub` 限定子目录，rel 仍相对项目根 |
+| `/detail` | GET | `?path` | stat 详情（size/mtime/目录标志等） |
+| `/download` | GET | `?path&inline=1` | 原始字节流（`inline=1` 供 PDF/图片 iframe 内联加载），非 JSON 信封 |
+| `/_read-image` | GET | `?path` | 原始 image/* 流；非图片扩展名 400 |
+| `/openExternal` | POST | `{ path }` | `{ path }`（系统默认程序打开） |
+| `/plugin-data` | GET/POST | GET `?k`；POST `{ k, v }`（v ≤8MB） | GET 回 value（不存在为 `null`）；key 建议 `dsh-fw.<插件>.<hash(projectDir)>` |
+| `/plugin-index` | GET | — | 内置插件清单数组 `[{ name, id, titleZh, description }]` |
+| `/plugin-registry` | GET | — | 在线注册表数组 `[{ name, url, title?, description?, descriptionEn? }]`（离线回退随包 registry.json） |
+| `/plugin-src` | GET | `?k=<name>` 或路径形态 `/plugin-src/<name>.js` | bundle 原文（JavaScript，不套信封），可互读其他插件源码作参考 |
+| `/plugin-doc` | GET | `?`（裸路径）或 `/plugin-doc/<name>.md` | 作者文档原文（markdown，不套信封） |
+
+### 文件 CRUD（受工作区守卫：root 外写需用户开启「允许操作工作区外」prefs.allowOutsideRoot，否则 403；受保护系统目录恒 403）
+
+| 端点 | 方法 | 参数 | `data` |
+| --- | --- | --- | --- |
+| `/mkdir` | POST | `{ path }` | `{ path }`（解析后安全路径） |
+| `/touch` | POST | `{ path }` | `{ path }` |
+| `/rename` | POST | `{ from, to }` | `{ path: to }`（跨目录=移动） |
+| `/copy` | POST | `{ src, destDir }` | `{ path: dest }`（重名自动加后缀） |
+| `/remove` | DELETE | `?path` | `{ path }` —— **移入系统回收站**，可经 recycle-* 恢复 |
+| `/upload` | POST | query `?dir=&name=`，body 为**原始文件字节**（非 JSON） | `{ path }` |
+| `/compress` | POST | `{ path, to? }`（to 缺省=同目录 `<name>.zip`，重名自动避让） | `{ path: zip }` |
+| `/extract` | POST | `{ zipPath, destDir? }`（destDir 缺省=zip 所在目录） | `{ destDir, count }` |
+| `/replace` | POST | `{ scope?, q, replacement, caseSensitive?, regex?, wholeWord?, preserveCase?, include?, exclude? }` | `{ changed: [{ rel, count }], files, replacements, truncated }`；**严格限工作区根内**，ssh 根 501 |
+
+### Git（读写均可；ssh 引用在远端服务器上执行 git）
+
+GET 传 `?path=`，POST 放 body `{ path, ... }`。
+
+| 端点 | 方法 | 额外参数 | 说明 |
+| --- | --- | --- | --- |
+| `/git/status` | GET | — | 目录 git 状态徽标 |
+| `/git/panel` | GET | — | 仓库级快照（面板数据） |
+| `/git/log` | GET | `?count`(缺省 20) | 提交历史 |
+| `/git/diff` | GET | — | 单路径改动文本 |
+| `/git/config` | GET/POST | POST `{ name, email }` | user.name/email 读写 |
+| `/git/gh-releases` | GET | — | GitHub Releases 列表（远端 skipped） |
+| `/git/add` `/unstage` `/ignore` `/discard` | POST | — | 暂存/取消暂存/加 ignore/还原 |
+| `/git/commit` | POST | `{ message }` | 提交 |
+| `/git/branch` | POST | `{ action: "create"\|"checkout"\|"delete", name }` | 分支操作 |
+| `/git/sync` | POST | `{ action: "pull"\|"fetch"\|"push" }` | 同步 |
+| `/git/clone` | POST | `{ url, dir, name?, depth?, accountId? }` | 克隆到新目录（dir 可为 ssh 引用→远端克隆；已存在 409） |
+| `/git/gh-release` | POST | `{ tag, name?, body? }` | 发布 GitHub Release（仅本机） |
+| `/git/run` | POST | `{ args: string[] }` | **任意 git 子命令**（如 `["blame","-L","1,10","file"]`） |
+
+### SVN（与 git 对称，本机 + ssh 远端 exec）
+
+| 端点 | 方法 | 参数 | 说明 |
+| --- | --- | --- | --- |
+| `/svn/info` | GET | `?path` | 探测工作副本 + svn 环境 |
+| `/svn/checkout` | POST | `{ url, dir, name?, revision?, accountId? }` | 检出到新目录 |
+| `/svn/run` | POST | `{ path, args: string[] }` | 任意 svn 子命令（自动注入匹配账号凭据） |
+
+### 常驻终端（ConPTY / 远端 pty）
+
+会话按 `session` id 隔离、跨连接常驻；`kind:"ssh"` 会话手动输密码登录（输入被截获为口令行）。
+
+| 端点 | 方法 | 参数 | 说明 |
+| --- | --- | --- | --- |
+| `/exec-open` | POST | `{ session, kind:"local"\|"ssh", shell?("cmd"\|"powershell"), cwd?, hostId?, remote? }` | 建立/复用会话，回 `{ cwd, kind }`（**必须核对 kind**，老宿主会把 ssh 静默建成本机） |
+| `/exec-mux-ws` | WS 升级 | 一条连接覆盖全部会话，帧带 `session` 字段 | 输出流主链路（SSE 兜底：`/exec-mux-stream`） |
+| `/exec-stream` | GET(SSE) | `?session&shell&cwd&key` | 单会话输出流 |
+| `/exec-input` | POST | `{ session, data }` | 写 stdin（`\r` 即执行） |
+| `/exec-resize` | POST | `{ session, cols, rows }` | 尺寸上报（全屏程序需要） |
+| `/exec-kill` | POST | `{ session }` | 终止（杀进程树） |
+| `/term-env` | GET | — | `{ elevated }` 宿主是否提权 |
+
+> 插件跑一次性命令的更简路径：`/git/run` 只收 git；要跑任意程序就 `/exec-open` + `/exec-input` +
+> 监听 mux 流，或考虑把命令包装成 git alias。
+
+### 推送通道 WebSocket：`/push`
+
+一条连接三类订阅（JSON 文本帧）：
+
+```
+发 { type:"watch", paths:[...] }          → 收 { type:"changed", items:{ [path]:{mtimeMs,size}|null } }   // 落盘改动，1s 采样，null=已删除
+发 { type:"session-watch", id:string|null } → 收 { type:"session-ev", ev:{type:"snapshot"|"files"|"status",...} } // AI 会话触碰的文件
+发 { type:"ssh-watch", ids:[...] }        → 收 { type:"ssh-status", items:{ [id]:{alive,error?} } }
+发 { type:"ssh-check", ids:[...] }        → 无条件立刻回推一次 ssh-status
+```
+
+首次 watch 只记基线不推送；「外部改动检测」「SSH 连通」都由此驱动，插件无需轮询。
+（SSE 等价旧出口 `/stream/session?session=` 仍在，但占 HTTP 连接池配额，优先用 WS。）
+
+### 谨慎开放 / 不建议插件使用
+
+- `/persist`：GET `?k` / POST `{k,v}` —— 键有**白名单**（prefs/favorites/recent/layout/vscode/…），
+  其中 `ssh-hosts`、`accounts` 两个键**含明文凭据文件内容**，插件不应读写；跨重启存储请一律用 `/plugin-data`。
+- `/task-archives`：GET（`?list` 只回日期）/ POST `{ map }` **整体覆写**后台任务归档——会冲掉宿主自己的记录，勿动。
+- `/recycle-list` `-count` `-restore` `-delete` `-empty`：系统回收站全家桶；`-delete`/`-empty` 不可逆，
+  插件最多该用 `/recycle-list`+`/recycle-restore` 做「撤销删除」类功能。
+- 🔒 `/ssh/*`（add/update/remove/test/trust/cache/ping）与 🔒 `/accounts/*`（增删改/测试/写入系统）：
+  主机与凭据管理属宿主 UI 职责；唯一例外 `/accounts/match?kind=git|svn&url=`（只回抹密后的命中账号，
+  可用于提示「本仓库将用 xxx 提交」）。
+- `/subagent/spawn`：POST `{ path?, isDir?, instruction?, session? }` → 拉起官方 DSH 子代理会话。
+  能力很强但会消耗用户会话资源，插件调用前应明确征得同意。
+- `/fetch-plugin`：POST `{ url }` 服务端代拉插件源码（SSRF 拦截 + 2MB 上限）——插件管理专用。
+
 ## API 参考（lib 侧）
 
 - 注册表实现：`src/vue/stores/activityBar.ts`（编辑器的 `registerActivityView`，工作台的

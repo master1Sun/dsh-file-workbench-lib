@@ -41,5 +41,11 @@ lib/web/assets/style-*.css
 # vite dev 中间产物（无扩展名探针目录）与历史测试 chunk：均非发布内容。
 lib/web/assets/__dsh-test-probe
 lib/web/assets/contribution-points.test-*.js
+# 按需加载的杂散 chunk（构建只写不删，历史堆积可由 npm run build 再生）。
+lib/web/assets/ConfirmDialog-*.js
+# ⚠️ 当前入口闭包必须显式放行。注意：`index-*.js`/`style-*.css` 前缀规则会连带排除
+# **新**入口文件（! 白名单只救旧名），换入口后必须把新 hash 名加进来；vendor-* 若重新拆出同理。
+!lib/web/assets/index-D0CqeY8q.js
+!lib/web/assets/style-DpdXIKsW.css
 # AGENTS.md 的包内副本：build 每次从仓库根拷贝注入 lib/，无需入库。
 /lib/AGENTS.md

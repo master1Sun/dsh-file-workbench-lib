@@ -69,7 +69,9 @@ export function apply(_ctx) {    // 必须【同步】注册至少一个贡献�
 
 宿主 HTTP（前缀 `/api/dsh-file-workbench`，响应 `{ ok, data, error? }`）：
 `GET /files?path`、`GET /read?path`、`POST /save`、`GET /grep?q&…`、`GET/POST /plugin-data`、
-`POST /git/<op>`（含 `/git/run { path, args }`）等——完整参数与响应形状见 docs。
+`POST /git/<op>`（含 `/git/run { path, args }`）等。**全清单（文件 CRUD、svn、常驻终端、
+/push WebSocket 推送、谨慎开放区）见 docs/activity-bar-plugin.md「宿主 HTTP API 全清单」一节**
+——发布后该节经 `GET /plugin-doc` 在线可取。
 
 ## 常见陷阱（详见 docs 末尾）
 

@@ -68,7 +68,17 @@
   {
     "name": "project-stats",
     "url": "/api/dsh-file-workbench/plugin-src?k=project-stats",
+    "title": "项目统计",
+    "titleEn": "Project Stats",
     "description": "一键统计当前项目的文件数、每个文件行数与总字节数，结果可在详情表格里点击查看",
     "descriptionEn": "One-click project statistics: file count, per-file lines and total bytes."
+  },
+  {
+    "name": "capability-guide",
+    "url": "/api/dsh-file-workbench/plugin-src?k=capability-guide",
+    "title": "能力手册",
+    "titleEn": "Capability Guide",
+    "description": "示例插件即操作手册：12 组 74 项已开放能力（window API / 宿主 HTTP / 终端 / 推送 WS / 持久化）逐条可点运行并回显真实响应",
+    "descriptionEn": "Sample plugin as a living manual: 74 runnable demos across 12 sections covering every exposed capability (window API, host HTTP, terminal, push WS, persistence)."
   }
 ]
