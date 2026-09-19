@@ -356,9 +356,20 @@ function isInstalled(p: UserPlugin[], entry: RegistryEntry): boolean {
     // 种子行（裸名 id）不算已安装：builtin 记录在启动迁移中会变成 url. 记录；若迁移没跑成
     // （离线等），未安装区仍要露出下载入口，不能让插件「两边都不在」。file./url. 前缀照常匹配。
     if (cand === bare && p.some((x) => x.source === "builtin" && x.id === cand)) continue;
-    if (ids.has(cand) || ids.has(`file.${cand}`) || ids.has(`url.${cand}`) || ids.has(`dsh-fw.${cand}`)) return true;
+    // ⚠️ 源码形态候选无 loaderId，importFromUrl 主键 = `url.dsh-fw.<裸名>`（dsh-fw. 前缀二次叠加）——须一并试。
+    for (const id of [cand, `file.${cand}`, `url.${cand}`, `dsh-fw.${cand}`, `url.dsh-fw.${cand}`, `file.dsh-fw.${cand}`]) {
+      if (ids.has(id)) return true;
+    }
   }
-  return false;
+  // 兜底：老记录 id 命名空间曾漂移（撞键自愈改名等），按 origin 下载地址同源判定。
+  const originKey = (o?: string): string | undefined => {
+    const m = o?.match(/[?&]k=([A-Za-z0-9._-]+)|\/([A-Za-z0-9._-]+?)\.js(?:$|[?#])/);
+    return m ? m[1] ?? m[2] : undefined;
+  };
+  return p.some((x) => {
+    const k = originKey(x.origin);
+    return !!k && (k === bare || k === stem);
+  });
 }
 
 function sourceLabel(s: UserPlugin["source"]): string {
