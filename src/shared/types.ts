@@ -298,11 +298,15 @@ export interface ClipboardEntry {
 export interface MenuItem {
   label?: string;
   icon?: string;
+  /** 整行悬停提示（tooltip），如插件注册项的 tooltip。 */
+  title?: string;
   disabled?: boolean;
   checked?: boolean;
   separator?: boolean;
   /** 右侧快捷键提示（仅展示，如 "Ctrl+S"；不做按键绑定）。 */
   hint?: string;
+  /** 运行中指示器：图标列渲染旋转 spinner（覆盖 icon），表示该行对应的任务正在执行。 */
+  running?: boolean;
   children?: MenuItem[];
   onClick?: () => void;
   /** 每行右侧的操作按钮（如最近项目的单条清除）。点击不触发整行 onClick。 */

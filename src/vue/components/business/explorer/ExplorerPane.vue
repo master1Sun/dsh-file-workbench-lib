@@ -100,7 +100,7 @@ const extCtx: ActivityContext = {
     return theme.value;
   },
   // 工作台没有「编辑器激活标签」的概念，故 activeFile 恒为 null、订阅不触发；
-  // 契约仍完整实现，插件可用 `api.apiVersion >= 2` + 存在性判断区分宿主类型。
+  // 契约仍完整实现，插件可用成员存在性判断区分宿主类型（如 `"editor" in ctx`）。
   activeFile: null,
   onProjectChange(fn) {
     projectListeners.add(fn);

@@ -18,15 +18,16 @@ import { startTask, clearFinished, clearAll } from "../composables/session/tasks
 /**
  * API 契约版本：以后破坏性修改 ctx 结构时递增，插件据此降级/告警。
  *
- * v2：`ActivityContext` 增加 activeFile / listOpenFiles / onDidChangeActiveFile（当前激活文件感知），
- * window API 增加 commands 命名空间（registerCommand / executeCommand / …，轻量命令贡献点）。
- * v3：文件工作台 window API（`__dshFileWorkbenchWorkbench__`）增加 backgroundTasks 命名空间——
- * 外部插件可把工作台的后台任务系统当作通用进度登记处使用（start / list / clear…）。
- * v4：文件工作台 window API 增加 statusbar 命名空间（register / unregister / list）——工作台底部
- * 「扩展」弹出菜单贡献点，与编辑器的状态栏/扩展菜单注册表**完全独立**（两套面板各一份）。
- * 均为**向后兼容的增量**——低版本插件不受影响，可按 `apiVersion >= N` 探测新能力。
+ * v1：当前契约全貌（内测阶段版本从 1 起算；对外发布前不保留历史版本号）——
+ * ActivityContext 含 activeFile / listOpenFiles / onDidChangeActiveFile 与 `editor` 只读门面
+ * （对标 VS Code `window.activeTextEditor`：读未保存缓冲区、订阅文档/选区变更、applyEdit 保留
+ * 撤销栈、createDecorations(spec) 宿主装饰工厂——纯 JSON spec 由宿主编译 CM6 扩展，category 分组 +
+ * /plugin-data 协同）；编辑器 window API（`__dshFileWorkbenchVSCode__`）含 activityBar / commands /
+ * statusbar（含顶栏「扩展」下拉）命名空间；工作台 window API（`__dshFileWorkbenchWorkbench__`）含
+ * activityBar / statusbar / backgroundTasks 命名空间，与编辑器注册表**完全独立**。
+ * 插件可按 `apiVersion >= N` 探测新能力；后续增量一律向后兼容。
  */
-export const ACTIVITY_API_VERSION = 4;
+export const ACTIVITY_API_VERSION = 1;
 
 /** 注入视图文案：可传普通字符串，也可按 locale 提供多语言文本。 */
 export type ActivityText = string | Readonly<Record<string, string>>;
@@ -63,6 +64,63 @@ export interface ActivityContext {
   openDiff(title: string, lines: string[]): void;
   /** 统一右下角消息提示。 */
   toast(level: "ok" | "info" | "error", msg: string): void;
+  /**
+   * v1：当前激活文件的编辑器内部交互门面（对标 VS Code `window.activeTextEditor`）。
+   * 仅编辑器 ctx 提供；工作台 ctx 无此成员。用 `!!ctx.editor` 探测（v1 契约即含）。
+   */
+  readonly editor?: EditorAccess;
+}
+
+/**
+ * v1：编辑器内部交互门面——把 CodeMirror 6 的活动视图以最小 API 暴露给插件。
+ *
+ * 设计原则：尽量透传 CodeMirror 原生对象（`EditorView` / `Selection` / `ChangeSpec`），
+ * 因为同源页脚本本就能 `import` CM6 包，复用原生语义比另造抽象更省、也最贴 VS Code。
+ * `getText/getSelection/applyEdit/setDecorations` 是给不想吃透 CM6 的插件的低门槛糖——
+ * 高级插件可直接用 `editor.view` 自行 `state`/`dispatch`。所有方法在无激活文件时安全降级。
+ */
+export interface EditorAccess {
+  /** 当前激活文件的 CodeMirror 视图（getter，读取即最新；无标签 / 卸载期间为 null）。 */
+  readonly view: import("@codemirror/view").EditorView | null;
+  /** 当前缓冲区全文（含未保存改动）；等价 `view?.state.doc.toString()`。 */
+  getText(): string;
+  /** 该文件是否有未保存改动（对标 VS Code `document.isDirty`）。 */
+  isDirty(): boolean;
+  /**
+   * 订阅文档变更（仅在 docChanged 时触发）。回调带最新全文与 CM `ChangeSet`。
+   * 立即以当前内容回调一次。返回取消订阅函数。
+   */
+  onDidChangeTextDocument(
+    fn: (e: { text: string; changes: import("@codemirror/state").ChangeSet | null }) => void,
+  ): () => void;
+  /** 当前选区（多光标支持，CM `EditorSelection` 原样回传）；无视图时 null。 */
+  getSelection(): import("@codemirror/state").EditorSelection | null;
+  /**
+   * 订阅选区变化。回调带最新 `EditorSelection`。立即以当前选区回调一次。返回取消订阅函数。
+   */
+  onDidChangeSelection(fn: (sel: import("@codemirror/state").EditorSelection) => void): () => void;
+  /**
+   * 应用编辑：走 `view.dispatch`，**保留撤销栈**（对标 VS Code `WorkspaceEdit`）。
+   * 传入 CM 风格的 change 数组（`{ from, to?, insert? }`）。无视图时返回 false。
+   */
+  applyEdit(changes: Array<{ from: number; to?: number; insert?: string }>): boolean;
+  /**
+   * 注入 / 清除装饰（波浪线、gutter 图标、行内 hint 等地基，对标 `createTextEditorDecorationType`）。
+   * 传入插件用 `@codemirror/view` 自行构建好的扩展（`Decoration` + `ViewPlugin`/`StateField`），
+   * 传 null 即清除全部插件装饰。独立于内置 search 高亮层，随文件切换自动显隐。无视图时静默忽略。
+   */
+  setDecorations(deco: import("@codemirror/state").Extension | null): void;
+  /**
+   * v1：宿主侧装饰工厂入口——**为同源页插件准备**（CM6 被 vendor chunk 私有化，
+   * 插件 `import` 到的是不同实例，其 Decoration/ViewPlugin 注入必然失效）。
+   * 插件只传纯 JSON spec，由宿主用真实 CM6 构造并返回不透明句柄；再经 `setDecorations(handle.extension)`
+   * 应用。语义类别决定默认样式（波浪线/gutter 颜色），className 可追加覆盖。无激活文件时安全降级为 no-op。
+   */
+  createDecorations(spec: import("../components/business/vscode/pluginDecorations").DecorationSpec): {
+    readonly extension: import("@codemirror/state").Extension;
+    /** 就地替换装饰条目并重绘（同一激活文件内增量更新，无需重新 create）。 */
+    update(items: import("../components/business/vscode/pluginDecorations").DecorationItem[]): void;
+  };
 }
 
 /** 一个 Activity Bar 扩展视图的注册契约。 */
@@ -84,13 +142,28 @@ export interface ActivityView {
   when?(ctx: Pick<ActivityContext, "projectDir">): boolean;
 }
 
+/** 图标字母回退：按码点取首字符（slice 按 UTF-16 计数，emoji 等代理对会被切半）。 */
+export function activityLetter(title: ActivityText): string {
+  return [...activityText(title)][0] ?? "";
+}
+
 /** 已注册的文件编辑器扩展视图。 */
 const registry = ref<ActivityView[]>([]);
 
-/** 注册（幂等：同 id 覆盖）。 */
+/** 注册（幂等：同 id 覆盖）。入参形状非法时抛错——让坏插件在启用即报，而非渲染期崩。 */
 export function registerActivityView(view: ActivityView): void {
+  assertViewShape(view, "activityBar.register");
   unregisterActivityView(view.id);
   registry.value = [...registry.value, view].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+}
+
+/** 视图契约的最小形状校验：id/title/mount 缺一即拒。 */
+function assertViewShape(view: Pick<ActivityView, "id" | "title" | "mount">, where: string): void {
+  if (!view || typeof view !== "object") throw new Error(`${where}: 需要对象参数`);
+  if (typeof view.id !== "string" || !view.id.trim()) throw new Error(`${where}: id 必须是非空字符串`);
+  if (typeof view.title !== "string" && (typeof view.title !== "object" || view.title === null))
+    throw new Error(`${where}: title 必须是字符串或多语言文本对象`);
+  if (typeof view.mount !== "function") throw new Error(`${where}: mount 必须是函数`);
 }
 
 /** 注销（不存在时静默）。 */
@@ -103,10 +176,31 @@ export function listActivityViews(): ActivityView[] {
   return registry.value;
 }
 
+/**
+ * 命令 → 归属视图的图标：「扩展」弹窗菜单条目没有自己的图标时，回退到同插件侧边栏图标的图标。
+ * 优先扫 mount 闭包上登记的命令清单（宿主注入 API 的 register 桩会打 __commandIds 标记），
+ * 再按 id 命名空间前缀兜底（如 projectStats.menu ↔ projectStats.view）；都找不到返回 ""。
+ */
+export function viewIconForCommand(views: ActivityView[], commandId: string): string {
+  if (!commandId) return "";
+  for (const v of views) {
+    const ids = (v.mount as unknown as { __commandIds?: string[] })?.__commandIds;
+    if (Array.isArray(ids) && ids.includes(commandId)) return v.icon ?? "";
+  }
+  const dot = commandId.lastIndexOf(".");
+  if (dot > 0) {
+    const ns = commandId.slice(0, dot);
+    const hit = views.find((v) => v.id.startsWith(ns + "."));
+    if (hit) return hit.icon ?? "";
+  }
+  return "";
+}
+
 /** 文件工作台自己的扩展视图注册表，与文件编辑器注册表完全隔离。 */
 const workbenchRegistry = ref<ActivityView[]>([]);
 
 export function registerWorkbenchActivityView(view: ActivityView): void {
+  assertViewShape(view, "workbench.activityBar.register");
   unregisterWorkbenchActivityView(view.id);
   workbenchRegistry.value = [...workbenchRegistry.value, view].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 }
@@ -178,16 +272,6 @@ export function listCommands(): string[] {
   return [...commandRegistry.keys()];
 }
 
-/**
- * 执行命令：未注册的 id 静默返回 undefined（对齐 VS Code「无处理器则 no-op」）。
- * 处理器抛错会向上冒泡给调用方，由其决定提示方式。
- */
-export function executeCommand<T = unknown>(id: string, ...args: unknown[]): T | undefined {
-  const h = commandRegistry.get(id);
-  if (!h) return undefined;
-  return h(...args) as T | undefined;
-}
-
 /* ---- 状态栏项贡献点：插件在编辑器底部状态栏放一个可点击按钮，点击即触发某命令 ---- */
 
 /** 传给命令处理器的上下文（状态栏项点击时由面板注入）。 */
@@ -208,10 +292,54 @@ export interface StatusBarItem {
   commandId: string;
   /** 悬浮提示；缺省用 commandId。 */
   tooltip?: string;
+  /** 条目图标（复用工作台内置 icon 集，见 composables/ui/icons）；「扩展」弹窗菜单里展示。 */
+  icon?: string;
   /** 排序权重（小的靠前；内置只读/冲突徽标之后按此排序）。 */
   order?: number;
   /** 可见性谓词（如「有激活文件才显示」），入参为当前状态上下文；缺省恒显示。 */
   when?(ctx: StatusCommandContext): boolean;
+}
+
+/* ---- 运行中命令跟踪：宿主级「执行状态」通道，插件零改动即可获得 ----
+ * executeCommand 处捕获 promise 返回值 → 状态栏/扩展菜单条目渲染旋转指示器 + 防重复点击；
+ * 完成/失败时刻意**不**自动弹 toast——结果通知归插件自己发（内容更具体、可附查看指引）。 */
+
+interface InflightCmd {
+  /** 该命令当前在跑的任务数（同一命令并发/重入计数）。 */
+  count: number;
+}
+
+const inflightCommands = reactive(new Map<string, InflightCmd>());
+
+/** 某命令是否有进行中的执行（供菜单条目禁用/指示器用）。 */
+export function isCommandRunning(commandId: string): boolean {
+  return (inflightCommands.get(commandId)?.count ?? 0) > 0;
+}
+
+/**
+ * 执行命令：未注册的 id 静默返回 undefined（对齐 VS Code「无处理器则 no-op」）。
+ * 处理器抛错会向上冒泡给调用方，由其决定提示方式。
+ * 返回值为 Promise 时登记进 in-flight 表（then/catch 都清账，吞掉的 rejection 不外溢）。
+ */
+export function executeCommand<T = unknown>(id: string, ...args: unknown[]): T | undefined {
+  const h = commandRegistry.get(id);
+  if (!h) return undefined;
+  const r = h(...args) as T | undefined;
+  if (r instanceof Promise) trackInflightPromise(id, r);
+  return r;
+}
+
+function trackInflightPromise(id: string, p: Promise<unknown>): void {
+  const rec = inflightCommands.get(id) ?? { count: 0 };
+  rec.count += 1;
+  inflightCommands.set(id, rec);
+  const settle = (): void => {
+    const cur = inflightCommands.get(id);
+    if (!cur) return;
+    cur.count -= 1;
+    if (cur.count <= 0) inflightCommands.delete(id);
+  };
+  p.then(settle, settle);
 }
 
 /** 已注册的状态栏项（reactive ref → 面板渲染随注册/注销实时更新）。 */
@@ -279,6 +407,8 @@ export interface WorkbenchStatusBarItem {
   text: string;
   commandId: string;
   tooltip?: string;
+  /** 条目图标（内置 icon 集名），「扩展」弹窗菜单里展示。 */
+  icon?: string;
   order?: number;
   when?(ctx: WorkbenchStatusContext): boolean;
 }
@@ -558,7 +688,8 @@ if (import.meta.env.DEV) {
   });
   registerStatusBarItem({
     id: "demo.statusPing",
-    text: "◉ 示例状态栏",
+    text: "示例状态栏",
+    icon: "puzzle",
     commandId: "demo.statusPing",
     tooltip: "示例插件：点击读取当前激活文件（仅 dev）",
     order: 90,
@@ -567,7 +698,8 @@ if (import.meta.env.DEV) {
   // 演示「扩展菜单」贡献点：顶栏「扩展」下拉里出现一条，点击复用同一命令（仅 dev）。
   registerExtensionMenuItem({
     id: "demo.extMenuPing",
-    text: "◉ 示例扩展菜单项",
+    text: "示例扩展菜单项",
+    icon: "puzzle",
     commandId: "demo.statusPing",
     tooltip: "示例插件：顶栏扩展菜单条目，点击读取当前激活文件（仅 dev）",
     order: 90,
@@ -582,7 +714,8 @@ if (import.meta.env.DEV) {
   });
   registerWorkbenchStatusBarItem({
     id: "demo.wbStatusPing",
-    text: "◉ 示例工作台扩展项",
+    text: "示例工作台扩展项",
+    icon: "puzzle",
     commandId: "demo.wbStatusPing",
     tooltip: "示例插件：工作台底栏扩展菜单条目，点击读取当前工作区（仅 dev）",
     order: 90,

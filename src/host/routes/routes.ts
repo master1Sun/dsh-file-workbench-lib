@@ -33,6 +33,7 @@ import { persistResource } from "./routes-persist.js";
 import { taskArchiveResource } from "./routes-task-archives.js";
 import { sshResource } from "./routes-ssh.js";
 import { accountsResource } from "./routes-accounts.js";
+import { pluginResource, pluginIndexResource, pluginRegistryResource, pluginSrcResource, pluginDocResource, pluginDataResource } from "./routes-plugins.js";
 
 export function makeFileWorkbenchRoutes(ctxProvider?: () => Context): WebRoute[] {
   const host: RouteHost = { ctxProvider };
@@ -56,6 +57,12 @@ export function makeFileWorkbenchRoutes(ctxProvider?: () => Context): WebRoute[]
       if (await taskArchiveResource(req, res, seg, q, method, host)) return;
       if (await sshResource(req, res, seg, q, method, host)) return;
       if (await accountsResource(req, res, seg, q, method, host)) return;
+      if (await pluginResource(req, res, seg, q, method, host)) return;
+      if (await pluginIndexResource(req, res, seg, q, method, host)) return;
+      if (await pluginRegistryResource(req, res, seg, q, method, host)) return;
+      if (await pluginSrcResource(req, res, seg, q, method, host)) return;
+      if (await pluginDocResource(req, res, seg, q, method, host)) return;
+      if (await pluginDataResource(req, res, seg, q, method, host)) return;
       // 未命中：**必须是 404**。不能抛裸 Error —— fail() 只把 FsError 映射成它的 status，
       // 其余一律 500，会让「路径不存在」这种最常规的情况被前端报成「服务端处理失败」。
       return fail(res, new FsError("not-found", `no route ${method} ${pathname}`, 404));

@@ -1,0 +1,101 @@
+[
+  {
+    "name": "bookmarks",
+    "id": "dsh-fw.bookmarks",
+    "title": "书签",
+    "version": "",
+    "description": "切换光标行书签、按项目持久化并点击跳转（gutter 圆点标记）",
+    "nameEn": "Bookmarks",
+    "descriptionEn": "DSH file editor plugin: activity bar view that toggles line bookmarks, lists current/all-project bookmarks and jumps to them. Uses v1 ctx.editor.createDecorations(category:bookmark) gutter marks + /persist per project. Counterpart of VS Code Bookmarks."
+  },
+  {
+    "name": "find-references",
+    "id": "dsh-fw.find-references",
+    "title": "引用查找",
+    "version": "",
+    "description": "跟随光标选中词，在项目内查找全部引用并点击跳转",
+    "nameEn": "Find References",
+    "descriptionEn": "DSH file editor plugin: activity bar view that takes the word at the caret and finds all references in the project via /grep (whole-word), clicking a hit jumps there. Counterpart of VS Code Find All References."
+  },
+  {
+    "name": "gitlens-lite",
+    "id": "dsh-fw.gitlens-lite",
+    "title": "Git 追溯",
+    "version": "",
+    "description": "对当前文件 git blame，行尾幽灵注释 + 可跳转的作者/时间列表",
+    "nameEn": "GitLens-lite",
+    "descriptionEn": "DSH file editor plugin: activity bar view that runs git blame on the active file (via /git/run --porcelain), lists per-line author/time and jumps to the line; appends ghost annotations with v1 createDecorations widgets. Counterpart of VS Code GitLens inline blame."
+  },
+  {
+    "name": "hex-viewer",
+    "id": "dsh-fw.hex-viewer",
+    "title": "十六进制查看器",
+    "version": "",
+    "description": "以 offset/hex/ASCII 三栏查看当前激活文件的字节（只读）",
+    "nameEn": "Hex Viewer",
+    "descriptionEn": "DSH file editor plugin: activity bar view that inspects the active file as offset/hex/ASCII (read-only), based on the dsh-file-workbench-lib v1 injection API (window.__dshFileWorkbenchVSCode__)."
+  },
+  {
+    "name": "json2interface",
+    "id": "dsh-fw.json2interface",
+    "title": "JSON 转接口",
+    "version": "",
+    "description": "把当前 JSON 缓冲/选区推断成 TypeScript interface，可复制或插入",
+    "nameEn": "JSON → TS",
+    "descriptionEn": "DSH file editor plugin: activity bar view that infers a TypeScript interface from the active JSON buffer/selection, based on the dsh-file-workbench-lib v1 injection API (window.__dshFileWorkbenchVSCode__)."
+  },
+  {
+    "name": "linter",
+    "id": "dsh-fw.linter",
+    "title": "外部诊断",
+    "version": "",
+    "description": "运行可配置 lint/tsc/node 命令，把诊断标成波浪线并列成可跳转问题面板",
+    "nameEn": "External Linter",
+    "descriptionEn": "DSH file editor plugin: activity bar view that runs user-configured commands (node --check/tsc/eslint…) to capture diagnostics, parses file:line:col message → v1 createDecorations squiggles + a jumpable problems panel. Counterpart of VS Code Problems/External Linter."
+  },
+  {
+    "name": "local-history",
+    "id": "dsh-fw.local-history",
+    "title": "本地历史",
+    "version": "",
+    "description": "自动记录编辑快照，按时间倒序列出，可对比差异并一键恢复（对标 VS Code Local History）",
+    "nameEn": "Local History",
+    "descriptionEn": "DSH file editor plugin: activity bar view that keeps timestamped snapshots of saved files and restores them, based on the dsh-file-workbench-lib v1 injection API (window.__dshFileWorkbenchVSCode__)."
+  },
+  {
+    "name": "md-preview",
+    "id": "dsh-fw.md-preview",
+    "title": "Markdown 预览",
+    "version": "",
+    "description": "把当前 Markdown 缓冲实时渲染成 HTML 预览",
+    "nameEn": "Markdown Preview",
+    "descriptionEn": "DSH file editor plugin: activity bar view that live-renders the active Markdown buffer to HTML (dependency-free, escaped), based on the dsh-file-workbench-lib v1 injection API (window.__dshFileWorkbenchVSCode__)."
+  },
+  {
+    "name": "outline",
+    "id": "dsh-fw.outline",
+    "title": "大纲",
+    "version": "",
+    "description": "从当前缓冲提取符号（函数/类/标题）并列成可跳转大纲",
+    "nameEn": "Outline",
+    "descriptionEn": "DSH file editor plugin: activity bar view that extracts symbols (functions/classes/headings) from the active buffer and jumps to them, based on the dsh-file-workbench-lib v1 injection API (window.__dshFileWorkbenchVSCode__)."
+  },
+  {
+    "name": "regex-highlight",
+    "id": "dsh-fw.regex-highlight",
+    "title": "正则高亮",
+    "version": "",
+    "description": "用自定义正则高亮当前文件全部匹配并列出命中行",
+    "nameEn": "Regex Highlight",
+    "descriptionEn": "DSH file editor plugin: activity bar view that highlights all regex matches in the active file with a jump list, based on the dsh-file-workbench-lib v1 injection API (window.__dshFileWorkbenchVSCode__)."
+  },
+  {
+    "name": "todo-tree",
+    "id": "dsh-fw.todo-tree",
+    "title": "TODO 面板",
+    "version": "",
+    "description": "扫描项目内 TODO/FIXME/HACK 等标签，分组成可跳转列表并高亮当前文件",
+    "nameEn": "Todo Tree",
+    "descriptionEn": "DSH file editor plugin: activity bar view that scans TODO/FIXME/HACK/XXX (configurable) tags across the project via /grep into a grouped jumpable tree; highlights the active file with v1 createDecorations. Counterpart of VS Code Todo Tree."
+  }
+]

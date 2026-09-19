@@ -1,0 +1,857 @@
+/**
+ * 宿主内置的「插件管理」Activity Bar 视图（原生 DOM，命名空间 dsh-pm-）。
+ *
+ * 由本模块在编辑器面板挂载时注册一次（见 registerPluginManagerView），**不是**外部插件——
+ * 它是宿主能力：让用户导入 / 启停 / 移除运行期 .js 插件，并列出内嵌的内置套件种子。
+ * 界面**复刻 VS Code 扩展面板侧栏**：标题栏右侧「排序 + ··· 管理」工具条 → 搜索框 →
+ * 统一列表（图标 · 名称+发布方+版本一行、描述一行）；
+ * 悬停浮出操作按钮与齿轮菜单，已禁用项整行淡化、已启用项带绿点徽章。内置种子不可移除。
+ * 已安装与注册表「未安装」条目合并为统一列表展示（未安装行悬停「下载」即装）。
+ */
+import { watch } from "vue";
+import {
+  bootstrapUserPlugins,
+  contributionsOfPluginId,
+  disablePlugin,
+  enablePlugin,
+  importFromFile,
+  importFromUrl,
+  listUserPlugins,
+  removePlugin,
+  type UserPlugin,
+} from "../../../stores/userPlugins";
+import { registerActivityView, listActivityViews, type ActivityContext } from "../../../stores/activityBar";
+import { t, isZh, useI18n } from "../../../composables/core/i18n";
+
+const VIEW_ID = "host.plugin-manager";
+const NS = "dsh-pm";
+
+/** 按当前语言取插件描述（内置种子与带清单的外部插件都有 descriptionEn，EN 模式优先；缺省回退中文）。 */
+function pluginDesc(p: UserPlugin): string {
+  return (!isZh() && p.descriptionEn) || p.description || "";
+}
+
+let registered = false;
+let bootstrapped = false;
+
+/* ---- 「需要重新加载」检测（对标 VS Code Reload Required） ---- */
+
+/** 本会话内插件管理视图自己的 Activity Bar 视图 id（mount 时记录，用于排除自身）。 */
+let selfViewId: string | undefined;
+/** 已提示过/待刷新的插件 id 集合；刷新后自然清空。 */
+const pendingReloadIds = new Set<string>();
+
+/** 当前已注册的 Activity Bar 视图 id 快照。 */
+function viewIds(): Set<string> {
+  return new Set(listActivityViews().map((v) => v.id));
+}
+
+/**
+ * enable/import 后的生效核查：插件的 when() 可能要求项目目录等前置条件——条件满足时
+ * 其贡献视图必须已经出现；缺席说明宿主没有热挂上它（如加载时序、宿主老版本缓存），
+ * 记入待刷新集合，由列表底部横幅提示用户一键刷新（与 VS Code 行为一致）。
+ */
+function markIfNeedsReload(p: UserPlugin | undefined, before: Set<string>): void {
+  if (!p || !p.enabled || p.error) return;
+  const gated = contributionsOfPluginId(p.id);
+  if (!gated.length) return;
+  const view = listActivityViews().find((v) => v.id === gated[0]);
+  if (view?.when && !view.when(activityCtxForProbe())) return; // 条件未满足 → 走「需打开项目」提示，不算失效
+  // 视图已在册即视为生效：导入内置插件的克隆时同 id 覆盖注册，列表不「增长」但功能正常——
+  // 只按 grew 判定会误报「需重新加载」。
+  const live = new Set([...viewIds()].filter((id) => id !== selfViewId));
+  const grew = [...live].some((id) => !before.has(id));
+  if (!grew && !gated.every((id) => live.has(id))) pendingReloadIds.add(p.id);
+  else pendingReloadIds.delete(p.id);
+}
+
+/** 探测 when() 用的最小上下文：目前内置插件只看 projectDir，其余字段给安全默认。 */
+function activityCtxForProbe(): ActivityContext {
+  return { projectDir: lastKnownProjectDir, language: isZh() ? "zh" : "en" } as unknown as ActivityContext;
+}
+
+/** 面板 mount 时记下的项目目录（buildRow 的「需打开项目」判断同源，这里供脱离渲染生命周期的核查用）。 */
+let lastKnownProjectDir: string | undefined;
+
+/** 幂等注册管理视图 + 首次引导加载用户插件（含自动启用上次启用项）。 */
+export function registerPluginManagerView(): void {
+  if (registered || typeof window === "undefined") return;
+  registered = true;
+  // ⚠️ 引导必须在**注册时**跑，而不是等用户点开本面板才跑：插件的贡献点（Activity Bar 图标、
+  // 命令、状态栏项）要一进来就恢复到位。此前只在 mount() 里 bootstrap，导致刷新后必须先打开
+  // 「插件助手」图标才会出现——现在提前到这里，mount 只负责渲染。
+  if (!bootstrapped) {
+    bootstrapped = true;
+    void bootstrapUserPlugins().then(() => liveRerender?.());
+  }
+  registerActivityView({
+    id: VIEW_ID,
+    title: { zh: "插件管理", en: "Plugins" },
+    icon: "grid",
+    order: Number.MAX_SAFE_INTEGER, // 恒排在所有视图最后
+    mount(el, ctx) {
+      selfViewId = VIEW_ID;
+      lastKnownProjectDir = ctx.projectDir ?? undefined;
+      const offProject = ctx.onProjectChange((dir) => {
+        lastKnownProjectDir = dir ?? undefined;
+      });
+      const off = renderManager(el, ctx);
+      liveRerender = off.rerender;
+      return () => {
+        offProject();
+        if (liveRerender === off.rerender) liveRerender = undefined;
+        off.cleanup();
+      };
+    },
+  });
+}
+
+/** 当前挂载中的管理视图重绘入口（bootstrap 完成后回推一次列表；未挂载则忽略）。 */
+let liveRerender: (() => void) | undefined;
+
+/* ------------------------------------------------------------------ 样式 */
+
+function injectStyles(): void {
+  if (typeof document === "undefined" || document.getElementById(`${NS}-styles`)) return;
+  // ⚠️ 配色走本视图自有的 --pm-* 令牌：在 .${NS}-view 上定义浅色默认值，再由 data-theme/.dark
+  // 祖先覆盖为深色。**不直接读 --dsh-*** —— 那些变量若未注入会落到写死的兜底，白天/黑夜就串色。
+  const css = `
+.${NS}-view,.${NS}-menu{
+  --pm-fg:#1f2328; --pm-fg-weak:#656d76; --pm-fg-muted:#8b949e;
+  --pm-bg:#ffffff; --pm-bg2:#f6f8fa; --pm-bg3:#eaeef2;
+  --pm-border:#d0d7de; --pm-hover:#e7ebef; --pm-accent:#0969da;
+  --pm-danger:#cf222e; --pm-purple:#8250df; --pm-info:#0550ae; --pm-warn:#9a6700; --pm-ok:#1a7f37;
+  --pm-input:#f2f4f7; --pm-menu:#ffffff; --pm-shadow:0 8px 24px rgba(31,35,40,.18);
+  --pm-av-builtin:#57606a; --pm-av-file:#1f6feb; --pm-av-url:#8250df;}
+.${NS}-view{color:var(--pm-fg);font-size:13px;}
+:is(html[data-theme="dark"],html.dark,.fw-root[data-theme="dark"],.vs-pane[data-theme="dark"]) .${NS}-view,
+:is(html[data-theme="dark"],html.dark,.fw-root[data-theme="dark"],.vs-pane[data-theme="dark"]) .${NS}-menu{
+  --pm-fg:#c9d1d9; --pm-fg-weak:#8b949e; --pm-fg-muted:#6e7681;
+  --pm-bg:#0d1117; --pm-bg2:#161b22; --pm-bg3:#21262d;
+  --pm-border:#30363d; --pm-hover:#30363d; --pm-accent:#2f81f7;
+  --pm-danger:#f85149; --pm-purple:#d2a8ff; --pm-info:#79c0ff; --pm-warn:#d29922; --pm-ok:#3fb950;
+  --pm-input:#0d1117; --pm-menu:#1c2128; --pm-shadow:0 8px 24px rgba(1,4,9,.6);
+  --pm-av-builtin:#6e7681; --pm-av-file:#388bfd; --pm-av-url:#a371f7;}
+.${NS}-root{display:flex;flex-direction:column;height:100%;min-height:0;gap:0;}
+
+/* ---- 标题栏：标题 + 右侧工具条（排序 + 管理⋯），VS Code 同款 ---- */
+.${NS}-hdr{display:flex;align-items:center;gap:6px;padding:6px 6px 6px 12px;position:sticky;top:0;background:var(--pm-bg);z-index:2;}
+.${NS}-title{font-size:11px;font-weight:400;letter-spacing:.4px;text-transform:uppercase;color:var(--pm-fg-weak);}
+.${NS}-spacer{flex:1 1 auto;}
+.${NS}-tool{width:24px;height:22px;border:none;border-radius:4px;background:transparent;color:var(--pm-fg-weak);cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.${NS}-tool:hover{background:var(--pm-hover);color:var(--pm-fg);}
+.${NS}-tool svg{width:15px;height:15px;}
+
+/* ---- 搜索框 ---- */
+.${NS}-search{padding:2px 12px 8px;position:relative;}
+.${NS}-search-box{display:flex;align-items:center;gap:6px;padding:5px 8px;border:1px solid transparent;border-radius:3px;background:var(--pm-input);}
+.${NS}-search-box:focus-within{border-color:var(--pm-accent);}
+.${NS}-search-box svg{width:14px;height:14px;flex:0 0 auto;color:var(--pm-fg-muted);}
+.${NS}-search-input{flex:1 1 auto;min-width:0;border:none;outline:none;background:transparent;color:inherit;font-size:13px;}
+.${NS}-search-input::placeholder{color:var(--pm-fg-muted);}
+
+/* ---- 统一列表容器（已安装 + 未安装合并，无分组头）---- */
+.${NS}-listwrap{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;}
+
+/* ---- 列表行：紧凑，图标 · 两行文本，hover 浮出操作 ---- */
+.${NS}-list{display:flex;flex-direction:column;padding:1px 0 6px;}
+.${NS}-row{display:flex;align-items:flex-start;gap:10px;padding:6px 12px;cursor:default;position:relative;}
+.${NS}-row:hover{background:var(--pm-hover);}
+.${NS}-row.is-disabled{opacity:.55;}
+/* 已启用：绿点 + 徽章（合并列表后区分状态的主标记）；未安装：虚线弱化行。 */
+.${NS}-badge{display:inline-flex;align-items:center;gap:4px;flex:0 0 auto;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:600;line-height:1.5;color:var(--pm-ok);background:color-mix(in srgb, var(--pm-ok) 14%, transparent);}
+.${NS}-badge::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--pm-ok);}
+.${NS}-row.is-uninstalled .${NS}-name{font-weight:500;color:var(--pm-fg-muted);}
+.${NS}-row.is-uninstalled .${NS}-avatar{opacity:.7;}
+.${NS}-avatar{width:32px;height:32px;flex:0 0 auto;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:#fff;background:var(--pm-av-builtin);overflow:hidden;}
+.${NS}-avatar.file{background:var(--pm-av-file);}
+.${NS}-avatar.url{background:var(--pm-av-url);}
+.${NS}-avatar img{width:100%;height:100%;object-fit:cover;}
+.${NS}-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:1px;padding-top:1px;}
+.${NS}-nameline{display:flex;align-items:baseline;gap:6px;white-space:nowrap;overflow:hidden;}
+.${NS}-name{font-weight:600;font-size:13px;color:var(--pm-fg);overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;}
+.${NS}-vendor{font-size:11px;color:var(--pm-fg-weak);font-weight:400;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;}
+.${NS}-ver{font-size:11px;color:var(--pm-fg-muted);flex:0 0 auto;}
+.${NS}-desc{font-size:12px;color:var(--pm-fg-weak);line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+.${NS}-err{font-size:11px;color:var(--pm-danger);margin-top:2px;word-break:break-all;}
+
+/* ---- 行内操作区：hover 才显出（VS Code 悬停浮出）---- */
+.${NS}-rowacts{position:absolute;top:6px;right:10px;display:none;align-items:center;gap:4px;}
+.${NS}-row:hover .${NS}-rowacts{display:flex;}
+.${NS}-btn{font-size:11px;padding:2px 8px;border-radius:3px;border:1px solid var(--pm-border);background:var(--pm-bg2);color:var(--pm-fg);cursor:pointer;white-space:nowrap;}
+.${NS}-btn.primary{background:var(--pm-accent);border-color:var(--pm-accent);color:#fff;}
+.${NS}-btn:hover{filter:brightness(1.05);}
+.${NS}-gear{width:22px;height:22px;border:none;border-radius:3px;background:transparent;color:var(--pm-fg-weak);cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.${NS}-gear:hover{background:color-mix(in srgb,var(--pm-fg) 12%,transparent);color:var(--pm-fg);}
+.${NS}-gear svg{width:14px;height:14px;}
+
+/* ---- 下拉菜单（fixed 定位，坐标由 JS 按锚点设定，挂 body 脱离 transform 包含块）---- */
+.${NS}-menu{position:fixed;z-index:9999;min-width:176px;max-width:90vw;max-height:70vh;overflow:auto;padding:4px;border-radius:6px;background:var(--pm-menu);border:1px solid var(--pm-border);box-shadow:var(--pm-shadow);display:none;}
+.${NS}-menu.open{display:block;}
+.${NS}-menu-item{display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:12px;border-radius:4px;cursor:pointer;color:var(--pm-fg);}
+.${NS}-menu-item:hover{background:var(--pm-accent);color:#fff;}
+.${NS}-menu-item.danger:hover{background:var(--pm-danger);}
+.${NS}-menu-sep{height:1px;margin:4px 6px;background:var(--pm-border);}
+
+/* ---- URL 输入弹层 ---- */
+.${NS}-url-panel{overflow:hidden;max-height:0;opacity:0;transition:max-height .2s ease,opacity .15s;padding:0 12px;}
+.${NS}-url-panel.open{max-height:48px;opacity:1;padding-bottom:8px;}
+.${NS}-url-inner{display:flex;gap:6px;}
+.${NS}-url-input{flex:1 1 auto;min-width:0;padding:5px 8px;border:1px solid var(--pm-border);border-radius:3px;background:var(--pm-input);color:var(--pm-fg);font-size:12px;outline:none;}
+.${NS}-url-input:focus{border-color:var(--pm-accent);}
+.${NS}-url-go{padding:5px 12px;font-size:12px;border:none;border-radius:3px;background:var(--pm-accent);color:#fff;cursor:pointer;}
+.${NS}-url-go:hover{filter:brightness(1.1);}
+
+/* ---- 空态 ---- */
+.${NS}-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:32px 16px;color:var(--pm-fg-muted);}
+.${NS}-empty-icon{font-size:28px;opacity:.5;}
+.${NS}-empty-text{font-size:12px;text-align:center;line-height:1.6;}
+
+/* ---- 「需要重新加载」横幅（VS Code Reload Required 同款） ---- */
+.${NS}-reload{display:flex;align-items:center;gap:8px;margin:8px 8px 10px;padding:8px 10px;border:1px solid color-mix(in srgb, var(--pm-warn) 45%, transparent);border-radius:6px;background:color-mix(in srgb, var(--pm-warn) 12%, var(--pm-bg));}
+.${NS}-reload-text{flex:1 1 auto;font-size:12px;line-height:1.5;color:var(--pm-fg);}
+.${NS}-reload-x{flex:0 0 auto;border:0;background:transparent;color:var(--pm-fg-muted);font-size:14px;line-height:1;padding:2px 4px;cursor:pointer;}
+.${NS}-reload-x:hover{color:var(--pm-fg);}
+`;
+  const style = document.createElement("style");
+  style.id = `${NS}-styles`;
+  style.textContent = css;
+  document.head.appendChild(style);
+}
+
+/* -------------------------------------------------------------- SVG icons */
+
+const ICON_SEARCH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>`;
+// 齿轮（管理/更多）——复刻 VS Code 行内设置入口。
+const ICON_GEAR = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
+// 排序（三个长度递减的横条）——VS Code「Sort»」图标观感。
+const ICON_SORT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h13M4 12h9M4 18h5"/></svg>`;
+
+/* ------------------------------------------------------------ 展示辅助 */
+
+type SortKey = "install" | "name" | "source";
+let query = "";
+let sortKey: SortKey = "install";
+
+/* ---- 「未安装」注册表（host GET /plugin-registry，见 plugins/registry.json） ---- */
+
+export interface RegistryEntry {
+  name: string;
+  url: string;
+  description?: string;
+  descriptionEn?: string;
+}
+let registryEntries: RegistryEntry[] = [];
+let registryLoaded = false;
+/** 正在下载安装的注册表项 name 集合（行内按钮防重复点击 + loading 文案）。 */
+const downloadingNames = new Set<string>();
+
+async function fetchRegistry(): Promise<RegistryEntry[]> {
+  if (registryLoaded) return registryEntries;
+  try {
+    const res = await fetch("/api/dsh-file-workbench/plugin-registry", { cache: "no-cache" });
+    const arr = await res.json();
+    registryEntries = Array.isArray(arr) ? arr.filter((e: RegistryEntry) => e?.name && e?.url) : [];
+  } catch {
+    registryEntries = [];
+  }
+  registryLoaded = true;
+  return registryEntries;
+}
+
+/** 注册表项是否已在安装列表中（按种子裸名 / file·url 命名空间 id / bundle loader id 归一匹配）。 */
+function isInstalled(p: UserPlugin[], entry: RegistryEntry): boolean {
+  const bare = entry.url.match(/[?&]k=([A-Za-z0-9._-]+)/)?.[1] ?? entry.name;
+  const ids = new Set(p.map((x) => x.id));
+  return ids.has(bare) || ids.has(`file.${bare}`) || ids.has(`url.${bare}`) || ids.has(`dsh-fw.${bare}`);
+}
+
+function sourceLabel(s: UserPlugin["source"]): string {
+  return s === "builtin" ? t("srcBuiltin") : s === "file" ? t("srcFile") : t("srcUrl");
+}
+
+/** 从描述里抽取「对标 XXX」作为发布方位（EN 模式优先从英文描述抽 "Counterpart of XXX"；无则回退来源标签）。 */
+function vendorOf(p: UserPlugin): string {
+  if (!isZh()) {
+    const en = p.descriptionEn?.match(/Counterpart of (.+?)\./);
+    if (en) return en[1].trim();
+  }
+  const m = p.description?.match(/对标\s*([^。（(]+)/);
+  return m ? m[1].trim() : sourceLabel(p.source);
+}
+
+function avatarLetter(p: UserPlugin): string {
+  const n = shortName(p);
+  return (n[0] ?? "?").toUpperCase();
+}
+
+function matchesQuery(p: UserPlugin, q: string): boolean {
+  if (!q) return true;
+  const hay = `${p.name} ${p.nameEn ?? ""} ${p.description ?? ""} ${p.descriptionEn ?? ""} ${vendorOf(p)}`.toLowerCase();
+  return hay.includes(q);
+}
+
+function shortName(p: UserPlugin): string {
+  return p.name.replace(/^@[^/]+\//, "");
+}
+
+/** 按当前语言显示的名称（内置种子带 nameEn；外部插件回退原 name）。 */
+function displayName(p: UserPlugin): string {
+  return (!isZh() && p.nameEn) || shortName(p);
+}
+
+/** 按当前排序键统一排序（install：已安装在前、注册表未安装在后，各自保持导入/注册顺序）。 */
+function sortPlugins(arr: UserPlugin[]): UserPlugin[] {
+  const s = [...arr];
+  if (sortKey === "name") s.sort((a, b) => displayName(a).localeCompare(displayName(b)));
+  else if (sortKey === "source") s.sort((a, b) => a.source.localeCompare(b.source) || displayName(a).localeCompare(displayName(b)));
+  else s.sort((a, b) => Number(isRegistryRow(b)) - Number(isRegistryRow(a)));
+  return s;
+}
+
+/* --------------------------------------------------------------- 菜单纯净化 */
+
+/** 全局单例下拉：打开新菜单前先关闭旧的，避免多个菜单叠加或监听器泄漏。 */
+let activeMenu: { el: HTMLElement; close: () => void } | null = null;
+
+function openMenuAt(anchor: HTMLElement, items: { label: string; onClick: () => void; danger?: boolean }[]): void {
+  closeActiveMenu();
+  const menu = document.createElement("div");
+  menu.className = `${NS}-menu`;
+  for (const it of items) {
+    const node = document.createElement("div");
+    node.className = `${NS}-menu-item${it.danger ? " danger" : ""}`;
+    node.textContent = it.label;
+    node.addEventListener("click", (e) => {
+      e.stopPropagation();
+      close();
+      it.onClick();
+    });
+    menu.append(node);
+  }
+  document.body.appendChild(menu);
+
+  const r = anchor.getBoundingClientRect();
+  menu.style.visibility = "hidden";
+  menu.classList.add("open");
+  const mw = menu.offsetWidth;
+  const mh = menu.offsetHeight;
+  let left = r.right - mw; // 右对齐锚点
+  if (left < 8) left = Math.max(8, r.left);
+  if (left + mw > window.innerWidth - 8) left = Math.max(8, window.innerWidth - 8 - mw);
+  let top = r.bottom + 4;
+  if (top + mh > window.innerHeight - 8) top = Math.max(8, r.top - 4 - mh);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.style.visibility = "";
+
+  function close(): void {
+    document.removeEventListener("mousedown", onDoc, true);
+    window.removeEventListener("resize", close);
+    menu.remove();
+    if (activeMenu?.el === menu) activeMenu = null;
+  }
+  function onDoc(e: MouseEvent): void {
+    if (!menu.contains(e.target as Node)) close();
+  }
+  // 延后一帧挂监听，避免触发本次点击的 mousedown 立刻把菜单关掉。
+  requestAnimationFrame(() => document.addEventListener("mousedown", onDoc, true));
+  window.addEventListener("resize", close);
+  activeMenu = { el: menu, close };
+}
+
+function closeActiveMenu(): void {
+  activeMenu?.close();
+}
+
+/* ------------------------------------------------------------------ 统一列表渲染 */
+
+/** 注册表条目 → 伪插件记录（仅用于与真实记录同构排序展示；不入库）。 */
+function entryToPlugin(e: RegistryEntry): UserPlugin {
+  return {
+    id: `__reg.${e.name}`,
+    name: e.name,
+    source: "url",
+    origin: e.url,
+    description: e.description ?? "",
+    descriptionEn: e.descriptionEn ?? "",
+    code: e.url,
+    enabled: false,
+  } as unknown as UserPlugin;
+}
+
+function renderList(root: HTMLElement, ctx: ActivityContext): void {
+  const q = query.trim().toLowerCase();
+  const all = listUserPlugins();
+  const installed = all.filter((p) => matchesQuery(p, q));
+  const available = registryEntries
+    .filter((e) => !isInstalled(all, e))
+    .filter((e) => !q || `${e.name} ${e.description ?? ""} ${e.descriptionEn ?? ""}`.toLowerCase().includes(q))
+    .map(entryToPlugin);
+  // 已安装 + 未安装合并为一个列表，按当前排序键统一排。
+  const shown = sortPlugins([...installed, ...available]);
+
+  const list = root.querySelector<HTMLElement>(`.${NS}-list`);
+  if (!list) return;
+  list.replaceChildren();
+  if (!shown.length) {
+    const empty = document.createElement("div");
+    empty.className = `${NS}-empty`;
+    empty.innerHTML = `<div class="${NS}-empty-icon">&#x2699;</div><div class="${NS}-empty-text">${
+      q ? t("pmEmptyWithQuery", { q: escapeHtml(query) }) : t("pmEmptyNoPlugins")
+    }</div>`;
+    list.append(empty);
+  } else {
+    for (const p of shown) list.append(isRegistryRow(p) ? buildAvailableRow(p, root, ctx) : buildRow(p, root, ctx));
+  }
+
+  // VS Code「Reload Required」同款：启用/导入后贡献点未实时生效 → 横幅一键刷新。
+  const pending = [...pendingReloadIds].filter((id) => all.some((p) => p.id === id && p.enabled));
+  if (pending.length) {
+    const banner = document.createElement("div");
+    banner.className = `${NS}-reload`;
+    const msg = document.createElement("div");
+    msg.className = `${NS}-reload-text`;
+    msg.textContent = t("pmReloadRequired", { n: String(pending.length) });
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `${NS}-btn primary`;
+    btn.textContent = t("pmReloadNow");
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      window.location.reload();
+    });
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = `${NS}-tool ${NS}-reload-x`;
+    dismiss.title = t("pmReloadDismiss");
+    dismiss.textContent = "\u00d7"; // ×
+    dismiss.addEventListener("click", (e) => {
+      e.stopPropagation();
+      for (const id of pending) pendingReloadIds.delete(id);
+      renderList(root, ctx);
+    });
+    banner.append(msg, btn, dismiss);
+    list.append(banner);
+  }
+}
+
+/** 伪行（注册表占位记录）判定。 */
+function isRegistryRow(p: UserPlugin): boolean {
+  return p.id.startsWith("__reg.");
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] as string);
+}
+
+function buildRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContext): HTMLElement {
+  const row = document.createElement("div");
+  row.className = `${NS}-row${p.enabled ? "" : " is-disabled"}`;
+
+  const av = document.createElement("div");
+  av.className = `${NS}-avatar ${p.source}`;
+  av.textContent = avatarLetter(p);
+  row.append(av);
+
+  const main = document.createElement("div");
+  main.className = `${NS}-main`;
+
+  const nameLine = document.createElement("div");
+  nameLine.className = `${NS}-nameline`;
+  if (p.enabled) {
+    // 醒目标记：已启用行前置绿点 + 「已启用」小徽章（禁用行本就整行淡化，无需标记）。
+    const badge = document.createElement("span");
+    badge.className = `${NS}-badge`;
+    badge.textContent = t("pmEnabledBadge");
+    nameLine.append(badge);
+  }
+  const name = document.createElement("span");
+  name.className = `${NS}-name`;
+  name.textContent = displayName(p);
+  name.title = p.origin || p.name;
+  const vendor = document.createElement("span");
+  vendor.className = `${NS}-vendor`;
+  vendor.textContent = vendorOf(p);
+  nameLine.append(name, vendor);
+  if (p.version) {
+    const ver = document.createElement("span");
+    ver.className = `${NS}-ver`;
+    ver.textContent = `v${p.version}`;
+    nameLine.append(ver);
+  }
+  main.append(nameLine);
+
+  const descText = pluginDesc(p);
+  if (descText) {
+    const desc = document.createElement("div");
+    desc.className = `${NS}-desc`;
+    desc.textContent = descText;
+    main.append(desc);
+  }
+
+  // 已启用但视图被 when()（如「需先打开项目」）挡住时，给一行提示，避免用户以为「点了没反应」。
+  if (p.enabled && !ctx.projectDir) {
+    const note = document.createElement("div");
+    note.className = `${NS}-desc`;
+    note.style.color = "var(--pm-warn)";
+    note.textContent = t("pmNeedsProject");
+    main.append(note);
+  }
+
+  if (p.error) {
+    const err = document.createElement("div");
+    err.className = `${NS}-err`;
+    err.textContent = p.error;
+    main.append(err);
+  }
+
+  row.append(main);
+
+  /* 悬停浮出的操作区：主按钮（启用/禁用）+ 齿轮菜单。 */
+  const acts = document.createElement("div");
+  acts.className = `${NS}-rowacts`;
+
+  const primary = document.createElement("button");
+  primary.type = "button";
+  primary.className = `${NS}-btn${p.enabled ? "" : " primary"}`;
+  primary.textContent = p.enabled ? t("pmDisable") : t("pmEnable");
+  primary.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (p.enabled) {
+      disablePlugin(p.id);
+      pendingReloadIds.delete(p.id);
+      renderList(root, ctx);
+    } else {
+      const before = viewIds();
+      void enablePlugin(p.id).then(() => {
+        if (p.error) ctx.toast("error", t("pmEnableFailed", { name: shortName(p), msg: p.error }));
+        markIfNeedsReload(p, before);
+        renderList(root, ctx);
+      });
+    }
+  });
+  acts.append(primary);
+
+  const gear = document.createElement("button");
+  gear.type = "button";
+  gear.className = `${NS}-gear`;
+  gear.title = t("pmMoreActions");
+  gear.innerHTML = ICON_GEAR;
+  gear.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const items: { label: string; onClick: () => void; danger?: boolean }[] = [
+      {
+        label: p.enabled ? t("pmDisable") : t("pmEnable"),
+        onClick: () => {
+          if (p.enabled) {
+            disablePlugin(p.id);
+            pendingReloadIds.delete(p.id);
+            renderList(root, ctx);
+          } else {
+            const before = viewIds();
+            void enablePlugin(p.id).then(() => {
+              if (p.error) ctx.toast("error", t("pmEnableFailed", { name: shortName(p), msg: p.error }));
+              markIfNeedsReload(p, before);
+              renderList(root, ctx);
+            });
+          }
+        },
+      },
+    ];
+    if (p.source !== "builtin") {
+      items.push({
+        label: t("pmRemove"),
+        danger: true,
+        onClick: () => {
+          removePlugin(p.id);
+          renderList(root, ctx);
+        },
+      });
+    }
+    openMenuAt(gear, items);
+  });
+  acts.append(gear);
+
+  row.append(acts);
+  return row;
+}
+
+/* ------------------------------------------------------------------ 未安装（注册表）行 */
+
+/** 注册表条目行（统一列表里的「未安装」项）：名称 + 描述 + 悬停「下载」按钮；点击即经 importFromUrl 安装并启用。 */
+function buildAvailableRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContext): HTMLElement {
+  const name_ = p.name;
+  const url = p.origin ?? "";
+  const row = document.createElement("div");
+  row.className = `${NS}-row is-uninstalled`;
+
+  const av = document.createElement("div");
+  av.className = `${NS}-avatar url`;
+  av.textContent = (name_[0] ?? "?").toUpperCase();
+  row.append(av);
+
+  const main = document.createElement("div");
+  main.className = `${NS}-main`;
+  const nameLine = document.createElement("div");
+  nameLine.className = `${NS}-nameline`;
+  const name = document.createElement("span");
+  name.className = `${NS}-name`;
+  name.textContent = name_;
+  name.title = url;
+  const vendor = document.createElement("span");
+  vendor.className = `${NS}-vendor`;
+  vendor.textContent = t("pmSrcRegistry");
+  nameLine.append(name, vendor);
+  main.append(nameLine);
+  const descText = (!isZh() && p.descriptionEn) || p.description || "";
+  if (descText) {
+    const desc = document.createElement("div");
+    desc.className = `${NS}-desc`;
+    desc.textContent = descText;
+    main.append(desc);
+  }
+  row.append(main);
+
+  const acts = document.createElement("div");
+  acts.className = `${NS}-rowacts`;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = `${NS}-btn primary`;
+  const busy = downloadingNames.has(name_);
+  btn.textContent = busy ? t("pmDownloading") : t("pmDownload");
+  btn.disabled = busy;
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    if (downloadingNames.has(name_)) return;
+    downloadingNames.add(name_);
+    renderList(root, ctx);
+    void (async () => {
+      const before = viewIds();
+      try {
+        const r = await importFromUrl(url);
+        if (r.ok) {
+          ctx.toast("ok", t("pmDownloaded", { name: name_ }));
+          if (r.id) {
+            const rec = listUserPlugins().find((pp) => pp.id === r.id);
+            if (rec) markIfNeedsReload(rec, before);
+          }
+        } else {
+          ctx.toast("error", t("pmDownloadFailed", { name: name_, msg: r.error ?? "" }));
+        }
+      } catch (err) {
+        ctx.toast("error", t("pmDownloadFailed", { name: name_, msg: err instanceof Error ? err.message : String(err) }));
+      } finally {
+        downloadingNames.delete(name_);
+        renderList(root, ctx);
+      }
+    })();
+  });
+  acts.append(btn);
+  row.append(acts);
+  return row;
+}
+
+/** 构建整个管理界面到 host（inner 容器），返回清理/重绘句柄。语言切换时由 renderManager 拆掉重建。 */
+function buildChrome(host: HTMLElement, ctx: ActivityContext): { cleanup: () => void; rerender: () => void } {
+  const root = document.createElement("div");
+  root.className = `${NS}-root`;
+
+  /* 标题栏 + 工具条（排序 + 管理⋯） */
+  const hdr = document.createElement("div");
+  hdr.className = `${NS}-hdr`;
+  const title = document.createElement("div");
+  title.className = `${NS}-title`;
+  title.textContent = t("pmTitle");
+  const spacer = document.createElement("div");
+  spacer.className = `${NS}-spacer`;
+  const sortBtn = document.createElement("button");
+  sortBtn.type = "button";
+  sortBtn.className = `${NS}-tool`;
+  sortBtn.title = t("pmSort");
+  sortBtn.innerHTML = ICON_SORT;
+  sortBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const mk = (k: SortKey, label: string) => ({
+      label,
+      onClick: () => {
+        sortKey = k;
+        renderList(root, ctx);
+      },
+    });
+    openMenuAt(sortBtn, [mk("install", t("pmSortInstall")), mk("name", t("pmSortName")), mk("source", t("pmSortSource"))]);
+  });
+  const kebab = document.createElement("button");
+  kebab.type = "button";
+  kebab.className = `${NS}-tool`;
+  kebab.title = t("pmManage");
+  kebab.textContent = "\u22ef"; // ⋯
+  hdr.append(title, spacer, sortBtn, kebab);
+
+  /* 搜索框 */
+  const searchWrap = document.createElement("div");
+  searchWrap.className = `${NS}-search`;
+  const searchBox = document.createElement("div");
+  searchBox.className = `${NS}-search-box`;
+  searchBox.innerHTML = ICON_SEARCH;
+  const searchInput = document.createElement("input");
+  searchInput.type = "text";
+  searchInput.className = `${NS}-search-input`;
+  searchInput.placeholder = t("pmSearchPlaceholder");
+  searchInput.addEventListener("input", () => {
+    query = searchInput.value;
+    renderList(root, ctx);
+  });
+  searchBox.append(searchInput);
+  searchWrap.append(searchBox);
+
+  /* 统一列表（已安装 + 注册表未安装合并展示，见 renderList） */
+  const listWrap = document.createElement("div");
+  listWrap.className = `${NS}-listwrap`;
+  const list = document.createElement("div");
+  list.className = `${NS}-list`;
+  listWrap.append(list);
+
+  /* 文件选择器（隐藏） */
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.accept = ".js,.cjs,.mjs,text/javascript";
+  fileInput.multiple = true;
+  fileInput.style.display = "none";
+  fileInput.addEventListener("change", async () => {
+    const files = [...(fileInput.files ?? [])];
+    for (const f of files) {
+      const before = viewIds();
+      try {
+        const r = await importFromFile(f);
+        if (!r.ok) ctx.toast("error", t("pmImportFailed", { name: f.name, msg: r.error || "" }));
+        else if (r.id) { const rec = listUserPlugins().find((pp) => pp.id === r.id); if (rec) markIfNeedsReload(rec, before); }
+      } catch (e) {
+        ctx.toast("error", t("pmImportFailed", { name: f.name, msg: e instanceof Error ? e.message : String(e) }));
+      }
+    }
+    fileInput.value = "";
+    renderList(root, ctx);
+  });
+
+  /* URL 导入弹层 */
+  const urlPanel = document.createElement("div");
+  urlPanel.className = `${NS}-url-panel`;
+  const urlInner = document.createElement("div");
+  urlInner.className = `${NS}-url-inner`;
+  const urlInput = document.createElement("input");
+  urlInput.type = "text";
+  urlInput.className = `${NS}-url-input`;
+  urlInput.placeholder = t("pmUrlPlaceholder");
+  const urlGo = document.createElement("button");
+  urlGo.type = "button";
+  urlGo.className = `${NS}-url-go`;
+  urlGo.textContent = t("pmPull");
+  const doUrlImport = async (): Promise<void> => {
+    const v = urlInput.value.trim();
+    if (!v) return;
+    urlGo.disabled = true;
+    urlGo.textContent = t("pmPulling");
+    const before = viewIds();
+    try {
+      const r = await importFromUrl(v);
+      if (r.ok) {
+        urlInput.value = "";
+        urlPanel.classList.remove("open");
+        ctx.toast("ok", t("pmUrlImported"));
+        if (r.id) { const rec = listUserPlugins().find((pp) => pp.id === r.id); if (rec) markIfNeedsReload(rec, before); }
+      } else {
+        ctx.toast("error", t("pmUrlImportFailed", { msg: r.error || "" }));
+      }
+    } catch (e) {
+      ctx.toast("error", t("pmUrlImportFailed", { msg: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      urlGo.disabled = false;
+      urlGo.textContent = t("pmPull");
+      renderList(root, ctx);
+    }
+  };
+  urlGo.addEventListener("click", () => void doUrlImport());
+  urlInput.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") void doUrlImport();
+  });
+  urlInner.append(urlInput, urlGo);
+  urlPanel.append(urlInner);
+
+  /* 「···」管理菜单 */
+  kebab.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openMenuAt(kebab, [
+      { label: t("pmImportFromFile"), onClick: () => fileInput.click() },
+      {
+        label: t("pmImportFromUrl"),
+        onClick: () => {
+          urlPanel.classList.toggle("open");
+          if (urlPanel.classList.contains("open")) setTimeout(() => urlInput.focus(), 80);
+        },
+      },
+      {
+        label: t("pmEnableAll"),
+        onClick: () => {
+          const targets = listUserPlugins().filter((p) => !p.enabled);
+          const before = viewIds();
+          void Promise.all(targets.map((p) => enablePlugin(p.id))).then(() => {
+            for (const p of targets) markIfNeedsReload(listUserPlugins().find((pp) => pp.id === p.id), before);
+            renderList(root, ctx);
+          });
+        },
+      },
+      { label: t("pmDisableAll"), onClick: () => { for (const p of listUserPlugins()) { if (p.enabled) { disablePlugin(p.id); pendingReloadIds.delete(p.id); } } renderList(root, ctx); } },
+    ]);
+  });
+
+  root.append(hdr, searchWrap, urlPanel, listWrap, fileInput);
+  host.replaceChildren(root);
+  renderList(root, ctx);
+  // 注册表异步到达后补一次重绘（未安装条目从空 → 有内容）。
+  void fetchRegistry().then(() => renderList(root, ctx));
+
+  return {
+    cleanup() {
+      closeActiveMenu();
+      host.replaceChildren();
+    },
+    rerender() {
+      renderList(root, ctx);
+    },
+  };
+}
+
+/**
+ * 挂载入口：注入样式、建持久容器，并在**宿主语言切换**时拆掉重建整个界面。
+ *
+ * 本视图是纯 DOM，标题/占位符/菜单等静态文案只在构建时写一次；仅靠 renderList 换不掉这些，
+ * 所以订阅 useI18n().locale，触发一次「清掉旧 chrome → 重新 buildChrome」，等价组件重渲染。
+ */
+function renderManager(el: HTMLElement, ctx: ActivityContext): { cleanup: () => void; rerender: () => void } {
+  injectStyles();
+  el.classList.add(`${NS}-view`);
+
+  const inner = document.createElement("div");
+  inner.className = `${NS}-inner`;
+  inner.style.cssText = "display:flex;flex-direction:column;height:100%;min-height:0;";
+  el.replaceChildren(inner);
+
+  let cur = buildChrome(inner, ctx);
+  const { locale } = useI18n();
+  const stopLocale = watch(locale, () => {
+    cur.cleanup();
+    cur = buildChrome(inner, ctx);
+  });
+
+  return {
+    cleanup() {
+      stopLocale();
+      cur.cleanup();
+      el.replaceChildren();
+    },
+    rerender() {
+      cur.rerender();
+    },
+  };
+}

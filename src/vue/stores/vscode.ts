@@ -382,6 +382,74 @@ export function getEditorUpdateSink(slot: number): ((update: unknown) => void) |
   return editorUpdateSinks.get(slot);
 }
 
+/**
+ * v5 插件编辑器门面：按槽常驻的「当前挂载 EditorView」。
+ *
+ * CodeEditor 挂载 / 复用活视图时登记本槽当前 view，卸载或销毁时清除；VSCodePane 构造
+ * `ctx.editor.view` getter 时按自己的槽号读回——于是分栏 / 浮窗各看各的活动编辑器，
+ * 与 docCache / updateSinks 同样的按槽隔离语义。这里只存引用，不接管其生命周期。
+ */
+const liveEditorViews = new Map<number, unknown>();
+
+/** 登记 / 清除某槽当前挂载的 EditorView（传 null 注销）。 */
+export function setLiveEditorView(slot: number, view: unknown | null): void {
+  if (view) liveEditorViews.set(slot, view);
+  else liveEditorViews.delete(slot);
+}
+
+/** 取某槽当前挂载的 EditorView（无则 undefined）。调用方按 CM EditorView 结构使用。 */
+export function getLiveEditorView(slot: number): unknown | undefined {
+  return liveEditorViews.get(slot);
+}
+
+/**
+ * v5 插件编辑器门面：编辑器「文档 / 选区」变更事件的按槽 fan-out 表。
+ *
+ * CodeEditor 的 handleUpdate 已经把内部 emit 走单 sink（一个实例一个父组件），但插件可能有
+ * 多个订阅者、且要跨面板常驻，故另开这张多播表：VSCodePane 注册转发器，CodeEditor 每次
+ * docChanged / selectionSet 时回调本槽全部监听者。set 传空数组即注销该槽。
+ */
+type EditorDocListener = (text: string, changes: unknown) => void;
+type EditorSelListener = (selection: unknown) => void;
+const editorDocListeners = new Map<number, Set<EditorDocListener>>();
+const editorSelListeners = new Map<number, Set<EditorSelListener>>();
+
+/** 订阅某槽文档变更（docChanged 才触发）。返回退订函数。 */
+export function onEditorDocChange(slot: number, fn: EditorDocListener): () => void {
+  let s = editorDocListeners.get(slot);
+  if (!s) {
+    s = new Set();
+    editorDocListeners.set(slot, s);
+  }
+  s.add(fn);
+  return () => {
+    s?.delete(fn);
+  };
+}
+
+/** 订阅某槽选区变更。返回退订函数。 */
+export function onEditorSelectionChange(slot: number, fn: EditorSelListener): () => void {
+  let s = editorSelListeners.get(slot);
+  if (!s) {
+    s = new Set();
+    editorSelListeners.set(slot, s);
+  }
+  s.add(fn);
+  return () => {
+    s?.delete(fn);
+  };
+}
+
+/** 向某槽全部文档监听者广播（CodeEditor.handleUpdate 调用）。 */
+export function emitEditorDocChange(slot: number, text: string, changes: unknown): void {
+  editorDocListeners.get(slot)?.forEach((fn) => fn(text, changes));
+}
+
+/** 向某槽全部选区监听者广播（CodeEditor.handleUpdate 调用）。 */
+export function emitEditorSelectionChange(slot: number, selection: unknown): void {
+  editorSelListeners.get(slot)?.forEach((fn) => fn(selection));
+}
+
 /** Vue provide/inject 键：面板根提供，子组件（目录树）注入。 */
 export const VS_STORE_KEY: InjectionKey<VSCodeStore> = Symbol("dsh-file-workbench/vscode-store");
 

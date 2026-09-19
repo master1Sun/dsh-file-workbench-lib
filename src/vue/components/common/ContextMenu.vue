@@ -4,12 +4,14 @@
       <div
         ref="menuEl"
         class="fw-cm"
-        :class="{ 'fw-cm-up': props.placement === 'top' }"
+        :class="{ 'fw-cm-up': props.placement === 'top' && props.anchorX === undefined, 'fw-cm-bubble': anchorX !== undefined, 'fw-cm-fit': props.fitWidth }"
         :data-theme="currentTheme"
         :style="{ left: pos.x + 'px', top: pos.y + 'px' }"
         @mousedown.stop
         @contextmenu.prevent
       >
+        <!-- 指向气泡的箭头：仅传了 anchorX（锚定触发按钮）时渲染，水平中心对准按钮中心 -->
+        <span v-if="anchorX !== undefined" class="fw-cm-arrow-down" :style="{ left: arrowLeftPx + 'px' }"></span>
         <!-- 头部插槽：菜单标题 + 右侧操作（如「最近项目」的「全部清除」按钮），
              固定不随列表滚动，置于滚动容器之外。 -->
         <div v-if="$slots.header" class="fw-cm-header">
@@ -24,10 +26,15 @@
               v-else
               class="fw-cm-item"
               :class="{ disabled: item.disabled, checked: item.checked, hasChild: !!item.children?.length }"
+              :title="item.title"
               @mouseenter="hover(i, $event)"
               @click="pick(item)"
             >
-              <span class="fw-cm-ico"><icon v-if="hasIcon(item.icon ?? '')" :name="item.icon ?? ''" :size="14" /><span v-else>{{ item.icon ?? "" }}</span></span>
+              <span class="fw-cm-ico">
+                <icon v-if="item.running" name="circleOutline" :size="14" class="fw-cm-spin" />
+                <icon v-else-if="hasIcon(item.icon ?? '')" :name="item.icon ?? ''" :size="14" />
+                <span v-else>{{ iconText(item.icon) }}</span>
+              </span>
               <span class="fw-cm-label">{{ item.label }}</span>
               <span v-if="item.hint" class="fw-cm-hint">{{ item.hint }}</span>
               <span class="fw-cm-check">{{ item.checked ? "✓" : "" }}</span>
@@ -55,7 +62,7 @@
               :class="{ disabled: item.disabled }"
               @click="runFooter(item)"
             >
-              <span class="fw-cm-ico"><icon v-if="hasIcon(item.icon ?? '')" :name="item.icon ?? ''" :size="14" /><span v-else>{{ item.icon ?? "" }}</span></span>
+              <span class="fw-cm-ico"><icon v-if="hasIcon(item.icon ?? '')" :name="item.icon ?? ''" :size="14" /><span v-else>{{ iconText(item.icon) }}</span></span>
               <span class="fw-cm-label">{{ item.label }}</span>
             </div>
           </template>
@@ -76,7 +83,7 @@
               :class="{ disabled: sub.disabled, checked: sub.checked }"
               @click="runSub(sub)"
             >
-              <span class="fw-cm-ico"><icon v-if="hasIcon(sub.icon ?? '')" :name="sub.icon ?? ''" :size="14" /><span v-else>{{ sub.icon ?? "" }}</span></span>
+              <span class="fw-cm-ico"><icon v-if="hasIcon(sub.icon ?? '')" :name="sub.icon ?? ''" :size="14" /><span v-else>{{ iconText(sub.icon) }}</span></span>
               <span class="fw-cm-label">{{ sub.label }}</span>
               <span class="fw-cm-check">{{ sub.checked ? "✓" : "" }}</span>
             </div>
@@ -104,6 +111,11 @@ interface Props {
   footerItems?: MenuItem[];
   /** 弹出方向：'bottom'（默认，向下）或 'top'（向上生长，供底部状态栏等贴底锚点用）。 */
   placement?: "top" | "bottom";
+  /** 锚定 x（触发按钮中心的视口坐标）：非 undefined 时菜单水平居中对准该点（clamp 到视口内），
+   *  并在下缘渲染指向箭头（气泡效果）。用于底部「扩展」等贴底入口。 */
+  anchorX?: number;
+  /** 宽度自适应内容（不撑到 min/max 边界）：条目短而少的气泡菜单用，避免整块过宽。 */
+  fitWidth?: boolean;
 }
 
 const props = defineProps<Props>();
@@ -118,6 +130,12 @@ const childLeft = ref(false);
 /** 当前 hover 的、带有子菜单的项（用于根层级渲染子菜单，避免被滚动容器裁剪）。 */
 const activeSub = ref<MenuItem | null>(null);
 const subPos = ref({ x: 0, y: 0 });
+/** 箭头水平位置（菜单内坐标系）：clamp() 后按菜单真实左缘反算，始终对准锚点。 */
+const arrowLeftPx = ref(0);
+/** 锚定气泡（anchorX）时菜单与触发按钮的间距：JS 按「底缘贴按钮上沿-该间距」定位，
+ *  不再依赖 CSS translateY(-100%)——否则首帧 rect 仍是未上移的位置，clamp 会把菜单
+ *  垂直拉回、盖住触发按钮（水平/垂直两套坐标系混用的陷阱）。 */
+const BUBBLE_GAP = 10;
 /** 对齐宿主主题，确保 Teleport 到 body 后仍随白天/黑夜变色。 */
 const currentTheme = ref<"dark" | "light">("dark");
 
@@ -128,6 +146,11 @@ function getTheme(): "dark" | "light" {
 
 function sep(item: MenuItem): boolean {
   return !!item.separator;
+}
+
+/** 非法图标名会退化为纯文本渲染（如插件视图的 title 直接当 icon 传入）——只留首字符，防止溢出到标签列。 */
+function iconText(icon?: string): string {
+  return icon ? [...icon][0] ?? "" : "";
 }
 
 watch(
@@ -156,14 +179,31 @@ function clamp(): void {
   if (!el) return;
   const rw = window.innerWidth;
   const rh = window.innerHeight;
-  const r = el.getBoundingClientRect();
-  // placement=top：菜单经 translateY(-100%) 升到锚点之上，getBoundingClientRect 已含该位移，
-  // 故此处按真实（上移后）尺寸夹取即可。
+  // 气泡锚定：菜单水平居中对准触发按钮中心（clamp 进视口），箭头再反算回按钮位置。
+  // 先按内容宽度量一次（fitWidth 靠 max-content）：若此刻仍贴着 left:0 测量，rect 会被
+  // 视口左缘截断（窄窗口下 x 被夹成 0 → 漂到左上角"跑远"）。临时移到目标锚点附近再测，
+  // 保证拿到真实宽度；随后写回最终坐标，避免非法首帧定位闪现。
   let nx = pos.value.x;
+  if (props.anchorX !== undefined) {
+    const prevLeft = el.style.left;
+    el.style.left = `${Math.max(4, Math.min(props.anchorX - 120, rw - 260))}px`;
+    const probeW = el.getBoundingClientRect().width;
+    el.style.left = prevLeft;
+    nx = Math.max(4, Math.min(props.anchorX - probeW / 2, rw - probeW - 4));
+    arrowLeftPx.value = Math.max(14, Math.min(props.anchorX - nx, probeW - 14));
+  } else if (nx + el.getBoundingClientRect().width > rw - 4) {
+    nx = Math.max(4, rw - el.getBoundingClientRect().width - 4);
+  }
+  const r = el.getBoundingClientRect();
   let ny = pos.value.y;
-  if (nx + r.width > rw - 4) nx = Math.max(4, rw - r.width - 4);
+  if (props.anchorX !== undefined && props.placement === "top") {
+    // 气泡锚定（JS 定位版）：y 是按钮上沿，菜单底缘应停在 y-间距处 → top = y-h-间距。
+    ny = pos.value.y - r.height - BUBBLE_GAP;
+  }
+  // placement=top（非气泡）：菜单经 translateY(-100%) 升到锚点之上，rect 已含该位移，按真实尺寸夹取。
   if (ny + r.height > rh - 4) ny = Math.max(4, rh - r.height - 4);
-  if (r.top < 4) ny = Math.max(4, ny + (4 - r.top));
+  if (r.top < 4 && props.anchorX === undefined) ny = Math.max(4, ny + (4 - r.top));
+  if (ny < 4) ny = 4;
   pos.value = { x: nx, y: ny };
 }
 
@@ -303,12 +343,22 @@ onBeforeUnmount(() => {
   max-height: min(70vh, calc(100vh - 16px));
   overflow-y: auto;
 }
+/* 宽度自适应内容：短条目气泡菜单不撑到 min/max 边界（视口夹取仍由 max-width 兜底） */
+.fw-cm-fit {
+  width: max-content;
+  min-width: 0;
+}
 /* placement=top：贴底锚点（如底部状态栏「扩展」）向上弹出。
    top 给的是触发按钮上沿，用 translateY(-100%) 让菜单整体升到该点之上；
    clamp() 仍按视口夹取 left/top，故超高时会被推回可见区、不会溢出屏幕。 */
 .fw-cm-up {
   transform-origin: bottom left;
   translate: 0 -100%;
+  animation: fw-cm-in-up 0.1s ease-out;
+}
+/* 锚定气泡：top 已由 JS 直接定位（无 translateY(-100%)），动画从按钮方向滑入 */
+.fw-cm-bubble {
+  transform-origin: bottom center;
   animation: fw-cm-in-up 0.1s ease-out;
 }
 @keyframes fw-cm-in-up {
@@ -320,6 +370,21 @@ onBeforeUnmount(() => {
     opacity: 1;
     transform: translateY(0) scale(1);
   }
+}
+/* 指向气泡的箭头：下缘居中的旋转小方块。单层实现——四条边里只有朝外的两条带描边，
+   靠内两条无边，与气泡本体边框无缝衔接（多层叠加时 z 序会压过气泡边框，观感差）。
+   不画阴影：菜单 box-shadow 本就会漫到箭头区域，浅色主题下再叠一层会在白色气泡底边上糊出灰斑。 */
+.fw-cm-arrow-down {
+  position: absolute;
+  bottom: -6px;
+  width: 12px;
+  height: 12px;
+  margin-left: -6px;
+  transform: rotate(45deg);
+  background: var(--dsh-bg2, #161b22);
+  border-right: 1px solid var(--dsh-border, #30363d);
+  border-bottom: 1px solid var(--dsh-border, #30363d);
+  pointer-events: none;
 }
 /* 底部固定区：与列表以分隔线区分，不随列表滚动，始终可见 */
 .fw-cm-footer {
@@ -373,6 +438,20 @@ onBeforeUnmount(() => {
   width: 16px;
   text-align: center;
   font-size: calc(13px * var(--dsh-fs-scale, 1));
+}
+/* 运行中指示器：旋转的开口圆环。旋转本体在内层 svg（.fw-cm-spin）上——
+   scoped CSS 下祖先动画与后代 transition 合成时会被覆盖，故分开两层各管一个 transform。 */
+.fw-cm-spin {
+  display: inline-block;
+  color: var(--dsh-accent, #58a6ff);
+}
+.fw-cm-spin :deep(svg) {
+  animation: fw-cm-spin 0.9s linear infinite;
+}
+@keyframes fw-cm-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 /* 主标签：占满剩余空间，过长时省略（如「最近项目」的完整路径） */
 .fw-cm-label {

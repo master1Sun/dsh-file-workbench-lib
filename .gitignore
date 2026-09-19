@@ -22,3 +22,21 @@
 /nul
 tmp
 /readme
+
+# 插件打包产物（由 plugins/pack.mjs 生成，勿提交）
+/plugins/lib
+/.qoder
+
+# lib/web 旧 hash 资源：构建用只写不删拷贝（受限环境禁批量删除），历史产物会不断堆积；
+# 当前入口引用名写在 lib/client.js 里随包发布，其余均可由 npm run build 再生。
+# ⚠️ 模式不加前导 / —— gitignore 的 `**/` 与锚定路径在中文用户名环境下不可靠。
+assets/index-*.js
+assets/vendor-*.js
+assets/style-*.css
+!assets/index-CJppKl6W.js
+!assets/vendor-C2cID70-.js
+!assets/vendor-vue-DSVMyY-k.js
+!assets/vendor-element-plus-CPaGIovE.js
+!assets/style-COzch9aT.css
+# AGENTS.md 的包内副本：build 每次从仓库根拷贝注入 lib/，无需入库。
+/lib/AGENTS.md

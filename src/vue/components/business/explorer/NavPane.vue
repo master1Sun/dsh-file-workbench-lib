@@ -102,7 +102,7 @@
         >
           <span class="fw-nav-ico">
             <icon v-if="hasIcon(view.icon ?? '')" :name="view.icon ?? ''" :size="14" />
-            <span v-else>{{ activityLabel(view).slice(0, 1) }}</span>
+            <span v-else>{{ activityLetter(view.title) }}</span>
           </span>
           <span class="fw-nav-label">
             <span>{{ activityLabel(view) }}</span>
@@ -196,7 +196,7 @@ import SshHostDialog from "./SshHostDialog.vue";
 import { myComputerDriveName } from "../../../composables/domain/driveName";
 import type { DriveInfo, MenuItem, MyComputerItem } from "../../../../shared/types";
 import { hasIcon } from "../../../composables/ui/icons";
-import { activityText, type ActivityView } from "../../../stores/activityBar";
+import { activityText, activityLetter, type ActivityView } from "../../../stores/activityBar";
 
 const { t } = useI18n();
 const props = withDefaults(

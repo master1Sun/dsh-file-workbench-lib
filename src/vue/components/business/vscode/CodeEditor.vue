@@ -142,7 +142,7 @@ if (typeof window !== "undefined") {
  */
 import { onBeforeUnmount, onMounted, nextTick, ref, shallowRef, watch, computed } from "vue";
 import { EditorView, type ViewUpdate } from "@codemirror/view";
-import { EditorState, Compartment } from "@codemirror/state";
+import { EditorState, Compartment, type Extension } from "@codemirror/state";
 import { basicSetup } from "codemirror";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { indentSelection } from "@codemirror/commands";
@@ -157,6 +157,7 @@ import {
 } from "@codemirror/search";
 import { showMinimap } from "@replit/codemirror-minimap";
 import { languageExtensionFor } from "./langResolver";
+import { buildDecorationExtension, type Decorator, type DecorationItem } from "./pluginDecorations";
 import { t } from "../../../composables/core/i18n";
 import { formatCss, formatXml } from "../../../composables/domain/reformat";
 import { prefs } from "../../../composables/core/settings";
@@ -165,6 +166,9 @@ import {
   getEditorUpdateSink,
   setEditorUpdateSink,
   getVSCodeStore,
+  setLiveEditorView,
+  emitEditorDocChange,
+  emitEditorSelectionChange,
 } from "../../../stores/vscode";
 
 const props = defineProps<{
@@ -207,6 +211,8 @@ const themeCompartment = new Compartment();
 const roCompartment = new Compartment();
 const editableCompartment = new Compartment();
 const minimapCompartment = new Compartment();
+/** v1 插件装饰层：setDecorations 经此 Compartment reconfigure，独立于内置 search 高亮。 */
+const extCompartment = new Compartment();
 let gen = 0;
 /** 当前视图的滚动监听器（随视图销毁一并摘除）。 */
 let scrollHandler: (() => void) | null = null;
@@ -360,12 +366,16 @@ function handleUpdate(raw: unknown): void {
     if (props.path) docCache.set(props.path, u.state);
     // 查找面板打开时文档被编辑（含「全部替换」）：刷新匹配计数。
     if (findOpen.value) refreshMatches();
+    // v1：向插件事件总线广播文档变更（多播，独立于上面的单实例 emit）。
+    emitEditorDocChange(props.slot ?? 0, u.state.doc.toString(), u.changes);
   }
   if (u.selectionSet || u.docChanged) {
     const head = u.state.selection.main.head;
     const line = u.state.doc.lineAt(head);
     emit("cursor", line.number, head - line.from + 1);
     reportView();
+    // v1：向插件事件总线广播选区变化。
+    emitEditorSelectionChange(props.slot ?? 0, u.state.selection);
   }
 }
 
@@ -392,6 +402,8 @@ function buildState(doc: string): EditorState {
       themeCompartment.of(props.dark ? oneDark : []),
       roCompartment.of(EditorState.readOnly.of(!!props.readonly)),
       editableCompartment.of(EditorView.editable.of(!props.readonly)),
+      // v1 插件装饰层占位：setDecorations 通过 reconfigure 注入，默认空。
+      extCompartment.of([]),
       // 注意：本 listener 随 EditorState 一起被跨挂载复用，**不能**直接闭包本实例的 props/emit，
       // 否则重建后编辑事件会打到已销毁的旧实例（父组件收不到 change → 保存写旧内容）。
       // 改为按 slot 转发到「当前实例」的分发器（见 getEditorUpdateSink）。
@@ -452,12 +464,14 @@ function createView(): void {
     const v = existing.view as unknown as EditorView;
     gen++;
     view.value = v;
+    setLiveEditorView(slot, v);
     liveEditorViews.delete(slot);
     host.appendChild(v.dom);
     applyEnv(v);
     restoreScroll(v);
     scrollHandler = () => reportView();
     v.scrollDOM.addEventListener("scroll", scrollHandler, { passive: true });
+    applyExtFor(props.path);
     // 重新挂回后强制重新测量（DOM 经过 detach/attach，高度可能尚未刷新），避免残留折叠态。
     requestAnimationFrame(() => {
       if (view.value === v) v.requestMeasure();
@@ -477,6 +491,7 @@ function createView(): void {
   gen++;
   const v = new EditorView({ state: stateFor(props.path), parent: host });
   view.value = v;
+  setLiveEditorView(slot, v);
   applyEnv(v);
   restoreScroll(v);
   scrollHandler = () => reportView();
@@ -514,6 +529,7 @@ function swapTo(oldPath: string, newPath: string): void {
   v.setState(stateFor(newPath));
   applyEnv(v);
   restoreScroll(v);
+  applyExtFor(newPath);
   void loadLanguage();
 }
 
@@ -527,6 +543,63 @@ function detachScroll(): void {
 /** 让编辑器获得焦点（外部 Ctrl+S 等场景可选调用）。 */
 function focus(): void {
   view.value?.focus();
+}
+
+/**
+ * v1：插件装饰层按路径暂存（path → 该文件的扩展；null = 无装饰）。
+ * 切文件 setState 后据此重配，使各文件装饰互不串台、切走即隐、切回即现。
+ */
+const extByPath = new Map<string, Extension | null>();
+
+/** 把某路径记录的插件扩展应用到当前视图（无记录则清空装饰层）。 */
+function applyExtFor(path: string): void {
+  const v = view.value;
+  if (!v) return;
+  v.dispatch({ effects: extCompartment.reconfigure(extByPath.get(path) ?? []) });
+}
+
+/**
+ * v1：为**当前激活文件**设置插件扩展层（当前主要用于装饰）。经 extCompartment reconfigure，
+ * 独立于内置 search 高亮；传 null 清除。按 path 暂存，切文件后自动重配。
+ */
+function setExtension(ext: Extension | null): void {
+  if (!props.path) return;
+  extByPath.set(props.path, ext);
+  applyExtFor(props.path);
+}
+
+/**
+ * v1：装饰句柄按路径暂存（path → Decorator；null = 无装饰）。
+ * 与 extByPath 并存但语义不同：extByPath 存插件预建的裸 Extension，
+ * decoByPath 存宿主工厂产出的句柄，供后续就地更新 items 时 dispatch 重算。
+ */
+const decoByPath = new Map<string, Decorator | null>();
+
+/**
+ * v1：为**当前激活文件**应用/更新宿主装饰。传纯 JSON items（插件不接触 CM6 类型），
+ * 首建时把工厂 extension 经 extCompartment 注入；再次调用则就地 setItems + dispatch
+ * ReconfigureGutter 触发 inline+gutter 重绘。传 null 清除该文件装饰。按 path 隔离，切文件自动重配。
+ */
+function setDecorationsSpec(items: DecorationItem[] | null): void {
+  const path = props.path;
+  if (!path) return;
+  const v = view.value;
+  if (!v) return;
+  if (items === null) {
+    decoByPath.delete(path);
+    extByPath.delete(path);
+    applyExtFor(path);
+    return;
+  }
+  let dec = decoByPath.get(path) ?? null;
+  if (!dec) {
+    dec = buildDecorationExtension(items);
+    decoByPath.set(path, dec);
+    extByPath.set(path, dec.extension);
+    applyExtFor(path);
+    return;
+  }
+  v.dispatch({ effects: dec.setItems(items) });
 }
 
 /**
@@ -616,7 +689,7 @@ function format(): boolean {
   return true;
 }
 
-defineExpose({ focus, format, revealLine, openFind });
+defineExpose({ focus, format, revealLine, openFind, setExtension, setDecorationsSpec });
 
 onMounted(() => {
   // 先登记本实例的更新分发器与查找控制器，再建视图：跨挂载复用的 EditorState 的
@@ -637,6 +710,7 @@ onBeforeUnmount(() => {
   if (disposedEditorSlots.has(slot)) {
     view.value?.destroy();
     view.value = null;
+    setLiveEditorView(slot, null);
     return;
   }
   // 切走再切回：把活视图从宿主里摘下、存进模块级表，重挂载时重新挂回（不重建、无闪动）。
@@ -644,6 +718,8 @@ onBeforeUnmount(() => {
   if (view.value) {
     liveEditorViews.set(slot, { view: view.value as unknown as StoredEditorView, path: props.path });
   }
+  // 卸载期间没有「当前挂载」的实例，清空插件门面的活视图（重挂载 createView 会重新登记）。
+  setLiveEditorView(slot, null);
   view.value = null;
 });
 
@@ -668,6 +744,23 @@ watch(
     if (!v) return;
     gen++;
     v.setState(buildState(props.initialContent ?? ""));
+    restoreScroll(v);
+    void loadLanguage();
+  },
+);
+// 「刷新恢复」竞态兜底：面板挂载时激活标签的内容还在异步读取（loadContent 未回），
+// stateFor 先以空文档建了 EditorState 并按路径缓存；之后 buffers 填上内容、docRevs
+// 却不再变化（组件挂载前已自增过）→ 上面两个 watcher 都不会触发，编辑器永远停在空白。
+// 这里补一条：initialContent 由空变有、而当前视图文档仍是空的 → 用真实内容重建。
+// 用户编辑不会改写 initialContent（受控单向），故不会误伤正在输入的内容。
+watch(
+  () => props.initialContent,
+  (content) => {
+    const v = view.value;
+    if (!props.path || !v || !content || v.state.doc.length > 0) return;
+    docCache.set(props.path, buildState(content));
+    gen++;
+    v.setState(stateFor(props.path));
     restoreScroll(v);
     void loadLanguage();
   },

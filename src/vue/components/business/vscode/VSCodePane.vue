@@ -54,6 +54,12 @@
       </button>
     </div>
 
+    <!-- 有已启用但因未打开项目而隐藏的扩展时，给一条醒目引导（纯提示，点击可开项目见下）。 -->
+    <button v-if="hiddenExtCount > 0" class="vs-exthint" type="button" :title="t('vsOpenFolder')" @click="selectProject">
+      <icon name="puzzle" :size="13" />
+      <span>{{ t("vsExtNeedProject", { n: hiddenExtCount }) }}</span>
+    </button>
+
     <div class="vs-body" :class="{ 'right-folded': rightFolded, 'side-right': vsState.sidebarSide === 'right' }">
       <!-- 左栏 = 40px 竖向图标条（Activity Bar）+ 内容区。图标条可右键：隐藏/显示视图、
            图标置顶/置底、侧栏整体移到左/右侧（仿 VS Code）；位置与隐藏项持久化。 -->
@@ -74,7 +80,7 @@
             @contextmenu.prevent.stop="openActViewMenu(v, $event)"
           >
             <icon v-if="hasIcon(v.icon ?? '')" :name="v.icon ?? ''" :size="17" />
-            <span v-else class="vs-act-letter">{{ v.title.slice(0, 1) }}</span>
+            <span v-else class="vs-act-letter">{{ activityLetter(v.title) }}</span>
           </button>
         </div>
         <!-- 内容区：直接显示当前视图（树 / 搜索 / Git 记录） -->
@@ -191,8 +197,7 @@
             :title="t('vsMenuExtensions')"
             @click="openExtMenu"
           >
-            <icon name="puzzle" :size="11" />
-            {{ t("vsMenuExtensions") }}
+            <icon name="grid" :size="11" />
           </button>
           <span class="vs-status-spacer"></span>
           <span class="vs-status-seg">Ln {{ cursor.line }}, Col {{ cursor.col }}</span>
@@ -219,7 +224,7 @@
       @close="fileMenuOpen = false"
     />
     <!-- 底部「扩展」菜单：插件注册条目列表，从状态栏向上弹出（statusbar.register / registerMenu） -->
-    <ContextMenu v-if="extMenuOpen" :items="extMenuItems" :x="extMenuX" :y="extMenuY" placement="top" @close="extMenuOpen = false" />
+    <ContextMenu v-if="extMenuOpen" :items="extMenuItems" :x="extMenuX" :y="extMenuY" :anchor-x="extMenuAnchorX" placement="top" fit-width @close="extMenuOpen = false" />
     <!-- 顶栏「最近项目」下拉（与文件菜单同一组件，各自独立状态） -->
     <ContextMenu v-if="recMenuOpen" :items="recMenuItems" :x="recMenuX" :y="recMenuY" @close="recMenuOpen = false" />
     <!-- 快速打开浮层：居中（上 12%），backdrop 点击 / Esc 关闭，方向键 + 回车选择（对齐 VS Code Quick Open） -->
@@ -343,9 +348,13 @@ import {
   clearEditorStates,
   defaultVSCodeStore,
   getEditorStateCache,
+  getLiveEditorView,
+  onEditorDocChange,
+  onEditorSelectionChange,
   type OpenBuffer,
   type VSCodeStore,
 } from "../../../stores/vscode";
+import { listUserPlugins, contributionsOfPluginId, contributionsOf, allContributions, type ContributionSet } from "../../../stores/userPlugins";
 import * as api from "../../../composables/core/useApi";
 import { clearPendingEditorProject, floatTab, openNewEditorTab, takePendingEditorFile, takePendingEditorProject } from "../../../composables/core/sidebarRight";
 import { confirmDialog, choiceDialog } from "../../../composables/core/dialog";
@@ -357,7 +366,9 @@ import { useTheme } from "../../../composables/core/theme";
 import { prefs, savePrefs } from "../../../composables/core/settings";
 import { diffLines } from "../../../composables/domain/lineDiff";
 import { hasIcon } from "../../../composables/ui/icons";
-import { activityText, listActivityViews, listStatusBarItems, listExtensionMenuItems, executeCommand, ensureInjectedViewScrollable, ACTIVITY_API_VERSION, type ActivityContext, type StatusBarItem, type StatusCommandContext } from "../../../stores/activityBar";
+import { activityText, activityLetter, listActivityViews, listStatusBarItems, listExtensionMenuItems, executeCommand, isCommandRunning, ensureInjectedViewScrollable, viewIconForCommand, ACTIVITY_API_VERSION, type ActivityContext, type EditorAccess, type StatusBarItem, type StatusCommandContext } from "../../../stores/activityBar";
+import { tasks } from "../../../composables/session/tasks";
+import { registerPluginManagerView } from "./pluginManagerView";
 import { languageLabelFor } from "./langResolver";
 import { sshParentOf, sshProjectLabelOf } from "../../../stores/ssh";
 
@@ -1037,6 +1048,127 @@ function openSearchResult(index?: number): void {
 
 /* ---------- 编辑器右键菜单 ---------- */
 const editorRef = ref<InstanceType<typeof CodeEditor> | null>(null);
+
+/* ---------- 插件上下文门面（ctx）：必须在下方 allActViews / watchEffect 消费前完成初始化 ---------- */
+const projectListeners = new Set<(dir: string | null) => void>();
+const themeListeners = new Set<(t: "dark" | "light") => void>();
+const activeFileListeners = new Set<(path: string | null) => void>();
+watch(
+  () => vsState.projectDir,
+  (d) => projectListeners.forEach((f) => f(d)),
+);
+watch(theme, (t) => themeListeners.forEach((f) => f(t)));
+watch(
+  () => vsState.activeTab,
+  (p) => activeFileListeners.forEach((f) => f(p)),
+);
+
+/* ---------- v1 插件编辑器门面（ctx.editor）：把活动 CodeMirror 视图按最小 API 暴露 ---------- */
+/** 本面板当前挂载的活动视图（按槽隔离；无激活文件或卸载期间为 null）。 */
+function editorView(): import("@codemirror/view").EditorView | null {
+  if (!vsState.activeTab) return null;
+  return (getLiveEditorView(store.slot) as import("@codemirror/view").EditorView | undefined) ?? null;
+}
+/** 文档 / 选区监听者集合：首次有订阅时向 store fan-out 表登记，末次退订时注销。 */
+const extDocListeners = new Set<(text: string, changes: unknown) => void>();
+const extSelListeners = new Set<(sel: import("@codemirror/state").EditorSelection) => void>();
+let offStoreDoc: (() => void) | null = null;
+let offStoreSel: (() => void) | null = null;
+
+/** 传给插件的上下文门面：getter 保证插件读到的 projectDir / theme / activeFile 永远是最新值。 */
+const extCtx: ActivityContext = {
+  apiVersion: ACTIVITY_API_VERSION,
+  get projectDir() {
+    return vsState.projectDir;
+  },
+  get theme() {
+    return theme.value;
+  },
+  get activeFile() {
+    return vsState.activeTab;
+  },
+  onProjectChange(fn) {
+    projectListeners.add(fn);
+    fn(vsState.projectDir);
+    return () => projectListeners.delete(fn);
+  },
+  onThemeChange(fn) {
+    themeListeners.add(fn);
+    fn(theme.value);
+    return () => themeListeners.delete(fn);
+  },
+  onDidChangeActiveFile(fn) {
+    activeFileListeners.add(fn);
+    fn(vsState.activeTab);
+    return () => activeFileListeners.delete(fn);
+  },
+  openFile: (path, opts) => openFile(path, opts),
+  listOpenFiles: () => [...vsState.openTabs],
+  openDiff: (title, lines) => showDiffPane({ title, lines }),
+  toast: (level, msg) => toast(level, msg),
+  editor: {
+    get view() {
+      return editorView();
+    },
+    getText: () => editorView()?.state.doc.toString() ?? "",
+    isDirty: () => (vsState.activeTab ? buffers[vsState.activeTab]?.dirty ?? false : false),
+    onDidChangeTextDocument(fn) {
+      const wrapped = (text: string, changes: unknown) => fn({ text, changes: changes as import("@codemirror/state").ChangeSet | null });
+      extDocListeners.add(wrapped);
+      if (!offStoreDoc) offStoreDoc = onEditorDocChange(store.slot, (t, c) => extDocListeners.forEach((l) => l(t, c)));
+      // 立即以当前内容回调一次（无文件时不回调，避免误导插件）。
+      const v = editorView();
+      if (v) fn({ text: v.state.doc.toString(), changes: null });
+      return () => {
+        extDocListeners.delete(wrapped);
+        if (extDocListeners.size === 0 && offStoreDoc) {
+          offStoreDoc();
+          offStoreDoc = null;
+        }
+      };
+    },
+    getSelection: () => editorView()?.state.selection ?? null,
+    onDidChangeSelection(fn) {
+      const wrapped = (sel: import("@codemirror/state").EditorSelection) => fn(sel);
+      extSelListeners.add(wrapped);
+      if (!offStoreSel) offStoreSel = onEditorSelectionChange(store.slot, (s) => extSelListeners.forEach((l) => l(s as import("@codemirror/state").EditorSelection)));
+      const v = editorView();
+      if (v) fn(v.state.selection);
+      return () => {
+        extSelListeners.delete(wrapped);
+        if (extSelListeners.size === 0 && offStoreSel) {
+          offStoreSel();
+          offStoreSel = null;
+        }
+      };
+    },
+    applyEdit(changes) {
+      const v = editorView();
+      if (!v || !changes.length) return false;
+      v.dispatch({ changes });
+      return true;
+    },
+    setDecorations(deco) {
+      const v = editorView();
+      if (!v) return;
+      // deco 为插件用 @codemirror/view 构建好的扩展（Decoration + ViewPlugin/StateField），
+      // 或 null 清除。宿主不代建 RangeSet——避免与 CM6 版本细节耦合。
+      editorRef.value?.setExtension(deco);
+    },
+    createDecorations(spec) {
+      // 同源页插件拿不到真实 CM6 实例，改由宿主工厂把纯 JSON spec 编译成装饰层。
+      // 首建即应用到当前激活文件（内部按 path 暂存、切文件自动显隐）；update() 就地重绘。
+      editorRef.value?.setDecorationsSpec(spec.items);
+      return {
+        extension: [],
+        update(items) {
+          editorRef.value?.setDecorationsSpec(items);
+        },
+      };
+    },
+  } as EditorAccess,
+};
+
 const { cmOpen: edMenuOpen, cmX: edMenuX, cmY: edMenuY, openMenuAt: openEdMenuAt } = useContextMenu();
 
 const edMenuItems = computed<MenuItem[]>(() => [
@@ -1307,6 +1439,11 @@ async function loadContent(path: string, opts: LoadOptions = {}): Promise<void> 
       conflict: false,
     };
     // 内容换了一茬：让编辑器整体重建（丢弃旧撤销栈与选区）。
+    // ⛔ 先等一次 DOM 刷新再自增：读取期间若编辑器已按「空内容」挂载，它此刻的 docRev
+    // 还是旧值；下一个微任务里组件尚未重渲染，watcher 却已能看到新值 —— 时序正确。
+    // 若读取完成时组件**正要**挂载（activeTab 恢复的首帧），await nextTick 保证挂载
+    // 发生在本行之前，新 rev 直接成为它的初始 prop，docRev watcher 随后照常触发重建。
+    await nextTick();
     docRevs[path] = (docRevs[path] ?? 0) + 1;
   } catch (e) {
     // 超过 host 8MB 编辑上限（413）：给明确指引，而不是裸的英文报错。
@@ -1385,6 +1522,8 @@ const activeExtView = computed(() => extViews.value.find((v) => v.id === leftTab
 interface ActBarView {
   id: string;
   title: string;
+  /** 插件视图的原始完整标题：菜单标签被图标文本回退截断时，hover 靠它看到全名。 */
+  fullTitle?: string;
   icon?: string;
   disabled?: boolean;
 }
@@ -1395,10 +1534,27 @@ const allActViews = computed<ActBarView[]>(() => [
   { id: "git", title: t("vsLeftTabGit"), icon: "git", disabled: !vsState.projectDir },
   ...extViews.value
     .filter((v) => !v.when || v.when(extCtx))
-    .map((v) => ({ id: v.id, title: activityText(v.title), icon: v.icon })),
+    .map((v) => ({ id: v.id, title: activityText(v.title), fullTitle: activityText(v.title), icon: v.icon })),
 ]);
 /** 实际渲染的图标：全部视图去掉被隐藏的。 */
 const actBarItems = computed<ActBarView[]>(() => allActViews.value.filter((v) => !vsState.activityBar.hidden.includes(v.id)));
+
+/**
+ * 「已启用但因未打开项目而被 when() 挡住」的扩展数——用于顶栏提示。
+ * 内置插件视图几乎都带 `when: ctx => !!ctx.projectDir`（无项目即隐藏），故没开项目时点了启用
+ * 侧边栏也不会出现图标，用户会误以为「没反应」。这里统计这类项，给出可点击的引导条。
+ */
+const hiddenExtCount = computed<number>(() => {
+  if (vsState.projectDir) return 0;
+  const gatedViewIds = new Set(extViews.value.filter((v) => typeof v.when === "function").map((v) => v.id));
+  if (!gatedViewIds.size) return 0;
+  let n = 0;
+  for (const p of listUserPlugins()) {
+    if (!p.enabled) continue;
+    if (contributionsOfPluginId(p.id).some((vid) => gatedViewIds.has(vid))) n++;
+  }
+  return n;
+});
 
 // 保证「当前激活视图」始终是可见视图之一：持久化的旧值 / 刚被隐藏或卸载的插件视图
 // 都会让左栏没有任何按钮处于激活态（内容区却仍显示树），此时回退到文件视图。
@@ -1471,13 +1627,29 @@ const actMenuItems = computed<MenuItem[]>(() => {
       actSideItem.value,
     ];
   }
-  return [
-    ...allActViews.value.map((v) => ({
+  const extItems = allActViews.value
+    .filter((v) => !["files", "search", "git", "host.plugin-manager"].includes(v.id))
+    .map((v) => ({
       label: v.title,
       icon: v.icon ?? "",
+      title: v.fullTitle,
       checked: !vsState.activityBar.hidden.includes(v.id),
       onClick: () => toggleActView(v.id),
-    })),
+    }));
+  return [
+    ...allActViews.value
+      .filter((v) => !extItems.length || ["files", "search", "git", "host.plugin-manager"].includes(v.id))
+      .map((v) => ({
+        label: v.title,
+        icon: v.icon ?? "",
+        title: v.fullTitle,
+        checked: !vsState.activityBar.hidden.includes(v.id),
+        disabled: v.disabled,
+        onClick: () => toggleActView(v.id),
+      })),
+    ...(extItems.length
+      ? [{ label: `${t("vsActExtViews")} (${extItems.filter((i) => i.checked).length}/${extItems.length})`, icon: "grid", children: extItems }]
+      : []),
     { separator: true },
     actEditorFoldItem.value,
     { separator: true },
@@ -1502,54 +1674,42 @@ function openActBarMenu(e: MouseEvent): void {
   actMenuOpen.value = true;
 }
 
-const projectListeners = new Set<(dir: string | null) => void>();
-const themeListeners = new Set<(t: "dark" | "light") => void>();
-const activeFileListeners = new Set<(path: string | null) => void>();
-watch(
-  () => vsState.projectDir,
-  (d) => projectListeners.forEach((f) => f(d)),
-);
-watch(theme, (t) => themeListeners.forEach((f) => f(t)));
-watch(
-  () => vsState.activeTab,
-  (p) => activeFileListeners.forEach((f) => f(p)),
-);
+/** 状态栏按钮的「稳定壳」：插件运行中反复 register 只更新目标（内容可变），
+ *  owner 由宿主按注册表快照盖章、插件不可伪造。撤销贡献点时按 owner 一并剔除——
+ *  修复禁用插件后其状态栏条目仍留在「扩展」菜单里的问题。 */
+interface StatusItemShell {
+  target: StatusBarItem | null;
+  owner: string | null;
+}
+const statusShells = new Map<string, StatusItemShell>();
 
-/** 传给插件的上下文门面：getter 保证插件读到的 projectDir / theme / activeFile 永远是最新值。 */
-const extCtx: ActivityContext = {
-  apiVersion: ACTIVITY_API_VERSION,
-  get projectDir() {
-    return vsState.projectDir;
-  },
-  get theme() {
-    return theme.value;
-  },
-  get activeFile() {
-    return vsState.activeTab;
-  },
-  onProjectChange(fn) {
-    projectListeners.add(fn);
-    fn(vsState.projectDir);
-    return () => projectListeners.delete(fn);
-  },
-  onThemeChange(fn) {
-    themeListeners.add(fn);
-    fn(theme.value);
-    return () => themeListeners.delete(fn);
-  },
-  onDidChangeActiveFile(fn) {
-    activeFileListeners.add(fn);
-    fn(vsState.activeTab);
-    return () => activeFileListeners.delete(fn);
-  },
-  openFile: (path, opts) => openFile(path, opts),
-  listOpenFiles: () => [...vsState.openTabs],
-  openDiff: (title, lines) => showDiffPane({ title, lines }),
-  toast: (level, msg) => toast(level, msg),
-};
+/** 从注册表快照解析某条目的归属插件：views/commands/menu 命中即其 id；都不属于宿主内置 → orphan。 */
+function resolveStatusOwner(item: StatusBarItem): string | null {
+  const match = (c: ContributionSet) =>
+    c.views.includes(item.id) || c.commands.includes(item.commandId) || c.menu.includes(item.id);
+  for (const [pid, c] of allContributions()) if (match(c)) return pid;
+  // dev 示例命令归宿主，永不过滤。
+  return item.commandId === "demo.statusPing" ? null : "orphan";
+}
 
-/* ---------- 状态栏外部项：插件注册的可点击按钮，点击即 executeCommand(commandId) ---------- */
-const extStatusItems = computed(listStatusBarItems); // 注册表 ref → 注册/注销实时更新
+/** 有效状态栏项：插件反复 register 时保留最新目标，但 owner 以首次盖章为准；
+ *  已撤销插件（含孤儿）的条目被过滤，宿主内置与启用中插件的保留。 */
+const validStatusItems = computed<StatusBarItem[]>(() => {
+  const items = listStatusBarItems();
+  const ids = new Set(items.map((i) => i.id));
+  for (const id of [...statusShells.keys()]) if (!ids.has(id)) statusShells.delete(id);
+  for (const it of items) {
+    let shell = statusShells.get(it.id);
+    if (!shell) shell = { target: it, owner: resolveStatusOwner(it) };
+    else shell.target = it; // 内容跟随最新注册，owner 不变
+    statusShells.set(it.id, shell);
+  }
+  return items.filter((it) => {
+    const o = statusShells.get(it.id)?.owner;
+    return o === null || (!!o && o !== "orphan" && !!contributionsOf(o));
+  });
+});
+
 /** 传给命令处理器 / when 谓词的状态上下文（读时取最新值）。 */
 function statusCtx(): StatusCommandContext {
   return { path: vsState.activeTab, projectDir: vsState.projectDir };
@@ -1561,17 +1721,22 @@ const extMenuBtnRef = ref<HTMLElement | null>(null);
 const {
   cmOpen: extMenuOpen, cmX: extMenuX, cmY: extMenuY, openMenuAt: openExtMenuAt,
 } = useContextMenu();
+/** 弹窗锚定 x（按钮中心），传给 ContextMenu.anchorX。 */
+const extMenuAnchorX = ref(0);
 
-/** 点底部「扩展」→ 在其上方弹出条目菜单（y 给到按钮上沿，ContextMenu 会向上夹取）。 */
+/** 点底部「扩展」→ 在其上方弹出气泡菜单：水平居中对准按钮，下缘箭头指向按钮。 */
 function openExtMenu(): void {
   const r = extMenuBtnRef.value?.getBoundingClientRect();
   if (!r) return;
-  openExtMenuAt(r.left, r.top - 4);
+  extMenuAnchorX.value = r.left + r.width / 2;
+  openExtMenuAt(0, r.top - 10);
 }
 
 /**
  * 下拉条目：合并两套注册表——状态栏项（statusbar.register）与扩展菜单项（statusbar.registerMenu），
  * 按 order 升序统一列出。when(ctx) 为假者置灰禁用；点击即 executeCommand(commandId, ctx)。
+ * 命令返回 Promise 且仍在执行 → 该行显示 spinner、点击改开任务面板（去哪看的指引）；
+ * 完成/失败的 toast 由插件自己发（宿主不代答结果内容）。
  */
 const extMenuItems = computed<MenuItem[]>(() => {
   // 读这两个 ref 建立依赖：激活文件 / 项目变化时，when(ctx) 结论会随之重算。
@@ -1579,24 +1744,38 @@ const extMenuItems = computed<MenuItem[]>(() => {
   void vsState.projectDir;
   const ctx = statusCtx();
   const merged: StatusBarItem[] = [
-    ...extStatusItems.value,
+    ...validStatusItems.value,
     ...listExtensionMenuItems(),
   ].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-  return merged.map((item) => ({
-    label: item.text,
-    disabled: !!item.when && !item.when(ctx),
-    onClick: () => {
-      try {
-        executeCommand(item.commandId, ctx);
-      } catch (e) {
-        toast("error", (e as Error).message);
-      }
-    },
-  }));
+  return merged.map((item) => {
+    const running = isCommandRunning(item.commandId);
+    return {
+      label: item.text,
+      icon: item.icon || viewIconForCommand(extViews.value, item.commandId),
+      title: running ? t("vsExtRunning") : item.tooltip,
+      disabled: !running && !!item.when && !item.when(ctx),
+      running,
+      onClick: () => {
+        if (running) {
+          tasks.setOpen(true);
+          return;
+        }
+        try {
+          const r = executeCommand(item.commandId, ctx);
+          // 命令返回 Promise（异步长任务）→ 挂上失败兜底提示；成功通知归插件自己发。
+          if (r instanceof Promise) {
+            r.catch((e) => toast("error", `${item.text}: ${(e as Error)?.message ?? String(e)}`));
+          }
+        } catch (e) {
+          toast("error", (e as Error).message);
+        }
+      },
+    };
+  });
 });
 
 /** 是否存在任一注册项（决定底部「扩展」入口是否显示）。 */
-const hasExtEntries = computed<boolean>(() => extStatusItems.value.length + listExtensionMenuItems().length > 0);
+const hasExtEntries = computed<boolean>(() => validStatusItems.value.length + listExtensionMenuItems().length > 0);
 
 // 切换视图 / 注册表变化 / when() 结论翻转时重挂载；离开视图（含面板卸载）走插件的清理函数。
 watchEffect(
@@ -2148,6 +2327,8 @@ function evalRightFold(): void {
 }
 
 onMounted(async () => {
+  // 宿主内置「插件管理」视图：注册（幂等）并在首次挂载时引导加载用户/内置插件。
+  registerPluginManagerView();
   // 顶栏宽度监听：内容放不下（会折行）时把文本标签折叠成图标。
   if (topbarRef.value) {
     topbarRO = new ResizeObserver(() => evalTopbarCompact());
@@ -2461,6 +2642,27 @@ onBeforeUnmount(() => {
   width: 28px;
   padding: 0;
   justify-content: center;
+}
+.vs-exthint {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 5px 12px;
+  border: none;
+  border-bottom: 1px solid var(--dsh-border, #30363d);
+  background: color-mix(in srgb, var(--dsh-warn, #d29922) 14%, var(--dsh-bg, #0d1117));
+  color: var(--dsh-fg, #c9d1d9);
+  font-size: calc(12px * var(--dsh-fs-scale, 1));
+  text-align: left;
+  cursor: pointer;
+}
+.vs-exthint:hover {
+  background: color-mix(in srgb, var(--dsh-warn, #d29922) 22%, var(--dsh-bg, #0d1117));
+}
+.vs-exthint svg {
+  flex: 0 0 auto;
+  color: var(--dsh-warn, #d29922);
 }
 .vs-body {
   display: flex;
@@ -2780,10 +2982,6 @@ onBeforeUnmount(() => {
 .vs-status-btn:disabled {
   cursor: default;
   opacity: 0.6;
-}
-/* 插件注册的状态栏项：用强调色与内置段区分 */
-.vs-status-ext {
-  color: var(--dsh-accent, #58a6ff);
 }
 /* ── 提交文件详情（diff）：覆盖编辑区的只读视图（标题在顶部伪标签上，无内部标题栏） ── */
 .vs-diffpane {

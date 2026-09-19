@@ -87,6 +87,50 @@ export async function getAllPersist(): Promise<Record<string, unknown>> {
   return out;
 }
 
+/* ── 插件数据（pluginData.json，单文件命名空间存储） ─────────────────────── */
+
+/**
+ * 外部 / 内置插件的持久化数据：全部存进单个 `pluginData.json`，顶层按 key 分区。
+ *
+ * 与 PERSIST_KEYS 白名单解耦——插件自带任意 key 不可能逐个加白名单，故另立一处
+ * 受控容器：key 经严格校验（字符集 + 长度），杜绝把 key 当路径使用；整表单条原子覆写。
+ */
+const PLUGIN_DATA_FILE = "pluginData";
+
+/** 合法插件数据 key：字母/数字/_/-/. ，1~128 长，且不得含路径分隔或 ".."。 */
+function isPluginDataKey(key: string): boolean {
+  return /^[A-Za-z0-9_.-]{1,128}$/.test(key) && !key.includes("..");
+}
+
+async function readPluginData(): Promise<Record<string, unknown>> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(join(stateDir(), `${PLUGIN_DATA_FILE}.json`), "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** 读插件数据单项；key 非法返回 undefined。 */
+export async function getPluginData(key: string): Promise<unknown> {
+  if (!isPluginDataKey(key)) return undefined;
+  return (await readPluginData())[key];
+}
+
+/** 写插件数据单项（覆盖）；key 非法抛错。 */
+export async function setPluginData(key: string, value: unknown): Promise<void> {
+  if (!isPluginDataKey(key)) throw new Error(`invalid plugin data key: ${key}`);
+  const map = await readPluginData();
+  map[key] = value ?? null;
+  await mkdir(stateDir(), { recursive: true });
+  await writeFile(join(stateDir(), `${PLUGIN_DATA_FILE}.json`), JSON.stringify(map), "utf8");
+}
+
+/** 列出全部插件数据 key（供管理界面查看 / 清理）。 */
+export async function listPluginDataKeys(): Promise<string[]> {
+  return Object.keys(await readPluginData());
+}
+
 /* ── 后台任务归档（taskArchives/<日期>.json，逐日独立文件） ───────────────── */
 
 /** 归档日期合法性：YYYY-MM-DD，杜绝路径穿越拾取任意文件。 */

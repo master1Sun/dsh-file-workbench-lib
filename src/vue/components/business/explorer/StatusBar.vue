@@ -22,8 +22,7 @@
         :title="t('vsMenuExtensions')"
         @click="openExtMenu"
       >
-        <icon name="puzzle" :size="13" />
-        <span>{{ t("vsMenuExtensions") }}</span>
+        <icon name="grid" :size="13" />
       </button>
     </div>
 
@@ -58,7 +57,7 @@
     </div>
 
     <!-- 底部「扩展」菜单：插件注册条目列表，从状态栏向上弹出（workbench statusbar.register） -->
-    <ContextMenu v-if="extMenuOpen" :items="extMenuItems" :x="extMenuX" :y="extMenuY" placement="top" @close="extMenuOpen = false" />
+    <ContextMenu v-if="extMenuOpen" :items="extMenuItems" :x="extMenuX" :y="extMenuY" :anchor-x="extMenuAnchorX" placement="top" fit-width @close="extMenuOpen = false" />
   </div>
 </template>
 
@@ -73,7 +72,7 @@ import { tasks } from "../../../composables/session/tasks";
 import { listStatus, switchListView, type ListViewOption } from "../../../composables/session/listStatus";
 import { useI18n } from "../../../composables/core/i18n";
 import { useContextMenu } from "../../../composables/ui/useContextMenu";
-import { listWorkbenchStatusBarItems, executeCommand, type WorkbenchStatusContext } from "../../../stores/activityBar";
+import { listWorkbenchStatusBarItems, listWorkbenchActivityViews, executeCommand, isCommandRunning, viewIconForCommand, type WorkbenchStatusContext } from "../../../stores/activityBar";
 import type { MenuItem } from "../../../../shared/types";
 
 const { t } = useI18n();
@@ -89,12 +88,15 @@ const chromeDisabled = computed(() => props.chromeDisabled ?? false);
 
 const extMenuBtnRef = ref<HTMLElement | null>(null);
 const { cmOpen: extMenuOpen, cmX: extMenuX, cmY: extMenuY, openMenuAt: openExtMenuAt } = useContextMenu();
+/** 气泡锚定 x（按钮中心），传给 ContextMenu.anchorX。 */
+const extMenuAnchorX = ref(0);
 
-/** 点「扩展」→ 在其上方弹出条目菜单（y 给到按钮上沿，ContextMenu placement=top 会升到该点之上）。 */
+/** 点「扩展」→ 在其上方弹出气泡菜单：水平居中对准按钮，下缘箭头指向按钮。 */
 function openExtMenu(): void {
   const r = extMenuBtnRef.value?.getBoundingClientRect();
   if (!r) return;
-  openExtMenuAt(r.left, r.top - 4);
+  extMenuAnchorX.value = r.left + r.width / 2;
+  openExtMenuAt(0, r.top - 10);
 }
 
 /** 传给命令处理器的上下文：工作台无激活标签概念，path 恒 null；projectDir = 当前工作区根。 */
@@ -108,21 +110,37 @@ const hasExtEntries = computed<boolean>(() => listWorkbenchStatusBarItems().leng
 /**
  * 下拉条目：列出全部已注册的工作台扩展菜单项（按 order 升序，注册时已排好）。
  * when(ctx) 为假者置灰禁用；点击即 executeCommand(commandId, ctx)。
+ * 命令返回 Promise 且仍在执行 → 该行显示 spinner、点击改开任务面板（去哪看的指引），
+ * 完成/失败的 toast 由插件自己发（宿主不代答结果内容）。
  */
 const extMenuItems = computed<MenuItem[]>(() => {
   void wb.root; // 建立依赖：工作区切换时重算 when(ctx)
   const ctx = extCtx();
-  return listWorkbenchStatusBarItems().map((item) => ({
-    label: item.text,
-    disabled: !!item.when && !item.when(ctx),
-    onClick: () => {
-      try {
-        executeCommand(item.commandId, ctx);
-      } catch (e) {
-        toast("error", (e as Error).message);
-      }
-    },
-  }));
+  return listWorkbenchStatusBarItems().map((item) => {
+    const running = isCommandRunning(item.commandId);
+    return {
+      label: item.text,
+      icon: item.icon || viewIconForCommand(listWorkbenchActivityViews(), item.commandId),
+      title: running ? t("vsExtRunning") : item.tooltip,
+      disabled: !running && !!item.when && !item.when(ctx),
+      running,
+      onClick: () => {
+        if (running) {
+          tasks.setOpen(true);
+          return;
+        }
+        try {
+          const r = executeCommand(item.commandId, ctx);
+          // 命令返回 Promise（异步长任务）→ 挂上失败兜底提示；成功通知归插件自己发。
+          if (r instanceof Promise) {
+            r.catch((e) => toast("error", `${item.text}: ${(e as Error)?.message ?? String(e)}`));
+          }
+        } catch (e) {
+          toast("error", (e as Error).message);
+        }
+      },
+    };
+  });
 });
 
 /** 视图切换按钮（与文件列表「查看」子菜单的常用三档一致）。 */
@@ -299,7 +317,7 @@ const busyText = computed(() => {
 .fw-status-seg:hover { background: var(--dsh-hover, rgba(110, 118, 129, 0.25)); color: var(--dsh-fg, #c9d1d9); }
 
 /* 「扩展」入口：菜单展开时高亮，与视图切换按钮的选中态同色系。 */
-.fw-status-ext-btn.on { background: var(--dsh-hover, rgba(48, 54, 61, 0.85)); color: var(--dsh-accent, #238636); }
+.fw-status-ext-btn.on { background: var(--dsh-hover, rgba(48, 54, 61, 0.85)); }
 
 /* 视图切换按钮（原在文件列表内部底栏，随信息一并迁到 footer） */
 .fw-vs-btn {
