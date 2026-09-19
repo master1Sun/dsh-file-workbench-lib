@@ -25,6 +25,7 @@ import {
 import PluginCodeViewer from "./PluginCodeViewer.vue";
 import { registerActivityView, listActivityViews, type ActivityContext } from "../../../stores/activityBar";
 import { t, isZh, useI18n } from "../../../composables/core/i18n";
+import { apiBase } from "../../../composables/core/useApi";
 import { confirmDialog, ensureGlobalDialogHost } from "../../../composables/core/dialog";
 
 const VIEW_ID = "host.plugin-manager";
@@ -634,9 +635,11 @@ function escapeHtml(s: string): string {
 
 /* ---- 查看/编辑源码入口 ---- */
 
-/** 注册表伪行的下载地址里的 k（即随包 bundle 文件名）；真实行用记录 id。 */
+/** 注册表伪行的下载文件名：同源 /plugin-src?k= 或 git contents 直链末段；真实行用记录 id。 */
 function viewerFilename(p: UserPlugin): string {
-  const k = p.origin?.match(/[?&]k=([A-Za-z0-9._-]+)/)?.[1];
+  const k =
+    p.origin?.match(/[?&]k=([A-Za-z0-9._-]+)/)?.[1] ??
+    p.origin?.match(/github(?:usercontent|\.com)\/[^?]*?\/([A-Za-z0-9._-]+)\.js/i)?.[1];
   return `${k ?? p.id.replace(/^(file|url)\./, "")}.js`;
 }
 
@@ -888,9 +891,25 @@ function buildAvailableRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContex
     void (async () => {
       try {
         const abs = new URL(url, window.location.href).href;
-        const r = await fetch(abs, { cache: "no-cache" });
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        openCodeViewer({ filename: viewerFilename(p), code: await r.text(), editable: false });
+        // git 直链（注册表新通道）：浏览器直连 api.github.com 受 CORS/网络限制，
+        // 统一经 host /fetch-plugin 代理取原文；其余地址（本地导入等）照旧直连。
+        const isGit = /^https:\/\/(api\.github\.com|raw\.githubusercontent\.com)\//i.test(abs);
+        let code: string;
+        if (isGit) {
+          const r = await fetch(`${apiBase}/fetch-plugin`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ url: abs }),
+          });
+          const j = (await r.json().catch(() => null)) as { ok?: boolean; error?: string; data?: { code?: string } } | null;
+          if (!j?.ok || !j.data?.code) throw new Error(j?.error || `HTTP ${r.status}`);
+          code = j.data.code;
+        } else {
+          const r = await fetch(abs, { cache: "no-cache" });
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          code = await r.text();
+        }
+        openCodeViewer({ filename: viewerFilename(p), code, editable: false });
       } catch (e) {
         ctx.toast("error", t("pmCodePreviewFailed", { msg: e instanceof Error ? e.message : String(e) }));
       }

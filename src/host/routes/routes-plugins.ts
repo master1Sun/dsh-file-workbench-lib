@@ -17,6 +17,31 @@ import { FsError, json, readBody, PREFIX, WEB_DIR, type RouteMatcher } from "./r
 const MAX_PLUGIN_BYTES = 2 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 15_000;
 
+/** git 内容通道的两种形态：api.github.com contents（本机实测可达）与 raw.githubusercontent（本网络不可达但通用）。
+ *  api.github.com 未认证限流 60 次/时/IP；注册表仅列目录一次，抓取超时复用 FETCH_TIMEOUT_MS 的 controller。 */
+const GIT_API_URL_RE = /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/contents\/[^?]+$/i;
+const GIT_RAW_URL_RE = /^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\/.+$/i;
+
+/** 是否指向 git（GitHub）的插件内容地址。 */
+function isGitContentUrl(u: URL): boolean {
+  return GIT_API_URL_RE.test(u.href) || GIT_RAW_URL_RE.test(u.href);
+}
+
+/**
+ * git 直链 → 同源随包 bundle 地址（离线/上游已删时的回退通道）。
+ * api.github.com 形态取路径末段 `<name>.js`；raw 形态去掉 owner/repo/ref 前三段。
+ * 本地无同名文件时返回 undefined。
+ */
+function sameOriginFallbackUrl(u: URL): string | undefined {
+  const parts = u.pathname.split("/").filter(Boolean);
+  const file = parts[parts.length - 1] ?? "";
+  if (!/\.js$/i.test(file)) return undefined;
+  const name = decodeURIComponent(file.replace(/\.js$/i, ""));
+  const filePath = resolve(PLUGIN_SRC_DIR, `${name}.js`);
+  if (!filePath.startsWith(PLUGIN_SRC_DIR + sep) || !existsSync(filePath)) return undefined;
+  return `${PREFIX}/plugin-src?k=${encodeURIComponent(name)}`;
+}
+
 /** 是否落在私有 / 环回 / 链路本地等不应被外部 URL 导入触及的地址段。 */
 function isPrivateAddress(ip: string): boolean {
   // IPv4-mapped IPv6 (::ffff:a.b.c.d) → 取末段按 IPv4 判。
@@ -90,12 +115,39 @@ export const pluginResource: RouteMatcher = async (req, res, seg, q, method) => 
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const fetchUpstream = async (target: URL, headers?: Record<string, string>): Promise<Response> =>
+    fetch(target.href, { redirect: "follow", signal: controller.signal, headers });
   try {
-    const upstream = await fetch(u.href, {
-      redirect: "follow",
-      signal: controller.signal,
-      headers: { "user-agent": "dsh-file-workbench-plugin-import/1.0" },
-    });
+    let upstream: Response;
+    if (isGitContentUrl(u) && u.hostname === "api.github.com") {
+      // git 内容通道：Accept raw 直接拿文件文本（否则是 base64 JSON）。失败转同源回退。
+      try {
+        upstream = await fetchUpstream(u, {
+          accept: "application/vnd.github.raw+json",
+          "user-agent": "dsh-file-workbench-plugin-import/1.0",
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? (e.name === "AbortError" ? "拉取超时" : e.message) : String(e);
+        return (json(res, 502, { ok: false, error: `git 拉取失败：${msg}` } satisfies ApiResponse<never>), true);
+      }
+      if (!upstream.ok) {
+        const fb = sameOriginFallbackUrl(u);
+        if (fb) {
+          // 离线 / 上游未发布该文件（404）/ API 限流（403）：回退随包发布的同源 bundle，
+          // 保证「装了就能装」的原有属性不因网络状况退化。
+          const fbUrl = new URL(fb, selfHref(req));
+          const fbSelf = req.headers.host?.toLowerCase();
+          if (fbSelf && fbUrl.host.toLowerCase() !== fbSelf) {
+            return (json(res, 400, { ok: false, error: "回退地址非本机同源，已拒绝" } satisfies ApiResponse<never>), true);
+          }
+          upstream = await fetchUpstream(fbUrl);
+        } else {
+          return (json(res, 502, { ok: false, error: `上游返回 HTTP ${upstream.status}（本地亦无随包副本可回退）` } satisfies ApiResponse<never>), true);
+        }
+      }
+    } else {
+      upstream = await fetchUpstream(u, { "user-agent": "dsh-file-workbench-plugin-import/1.0" });
+    }
     if (!upstream.ok) {
       return (json(res, 502, { ok: false, error: `上游返回 HTTP ${upstream.status}` } satisfies ApiResponse<never>), true);
     }
@@ -112,6 +164,12 @@ export const pluginResource: RouteMatcher = async (req, res, seg, q, method) => 
     clearTimeout(timer);
   }
 };
+
+/** 本 host 自身的基地址（同源回退 URL 拼绝对用）。 */
+function selfHref(req: import("node:http").IncomingMessage): string {
+  const host = req.headers.host ?? "127.0.0.1";
+  return `http://${host}/`;
+}
 
 /** 内置插件源码目录：scripts/pack-plugins.mjs 构建期把 plugins/*.js 打包成 bundle 写入 lib/web/plugin-src/。 */
 const PLUGIN_SRC_DIR = resolve(WEB_DIR, "plugin-src");
@@ -177,10 +235,11 @@ let registryCache: { at: number; items: RegistryItem[] } | null = null;
 
 /**
  * 在线注册表：列 GitHub 仓库 plugins/ 下的 *.js 作为「可下载未安装」候选。
- * 清单走 api.github.com（本机实测可达）；url 指向**同源** /plugin-src?k= —— plugins/
- * 全部插件由构建期打包随包发布，raw.githubusercontent 在本网络不可达，故不经 URL 直连下载，
- * 离线也能装。名称/描述直接读随包发布的本地 bundle（plugin-src/<name>.js）——不依赖 host
- * cwd，也不走 Node 下必然抛错的相对 URL。整体失败由调用方回退本地 registry.json。
+ * 清单与内容都走 api.github.com（本机实测可达；raw.githubusercontent 本网络不可达）——
+ * url 为 contents 直链（源码形态），点「下载」经 /fetch-plugin 拉 git 原文，前端导入时
+ * 现场打包（packSourceIfRaw）。git 不可达/上游缺项时 host 自动回退同源随包 bundle
+ * （见 pluginResource）。名称/描述读随包发布的本地 bundle（plugin-src/<name>.js）——
+ * 不依赖 host cwd；上游新增未随包发布时回退文件名展示。整体失败由调用方回退本地 registry.json。
  */
 async function fetchRemoteRegistry(): Promise<RegistryItem[]> {
   const res = await fetch(GH_API_DIR, {
@@ -196,8 +255,8 @@ async function fetchRemoteRegistry(): Promise<RegistryItem[]> {
   return Promise.all(
     files.map(async (e): Promise<RegistryItem> => {
       const name = e.name!.replace(/\.js$/i, "");
-      // 同源相对地址（前端 importFromUrl 会按 location 解析成绝对 URL）。
-      const url = `${PREFIX}/plugin-src?k=${encodeURIComponent(name)}`;
+      // git 内容直链（绝对地址）：下载即从 GitHub 取最新源码。
+      const url = `${GH_API_DIR}/${encodeURIComponent(e.name!)}`;
       let info: { title?: string; titleEn?: string; description?: string; descriptionEn?: string } = {};
       // 候选由 build.mjs 打包进随包发布的 plugin-src/，直接读本地 bundle 抽 meta——
       // host 进程 cwd 不可靠（dev/发布安装不同），同源相对 URL 在 Node fetch 下又必然抛错。
@@ -206,7 +265,7 @@ async function fetchRemoteRegistry(): Promise<RegistryItem[]> {
         if (!filePath.startsWith(PLUGIN_SRC_DIR + sep) || !existsSync(filePath)) throw new Error("not shipped");
         info = extractMetaInfo(readFileSync(filePath, "utf8"));
       } catch {
-        /* 上游新增但尚未随包发布：无源可抽（raw.githubusercontent 本网络不可达），回退文件名展示 */
+        /* 上游新增但尚未随包发布：无源可抽，回退文件名展示 */
       }
       return { name, url, title: info.title ?? name, titleEn: info.titleEn, description: info.description, descriptionEn: info.descriptionEn };
     }),
@@ -218,9 +277,10 @@ async function fetchRemoteRegistry(): Promise<RegistryItem[]> {
  *
  * 「插件管理」统一列表里「未安装」条目的数据源：优先在线枚举 GitHub 仓库
  * plugins/（见 fetchRemoteRegistry，5 分钟缓存），离线/失败回退随包发布的
- * 包根 registry.json（同源 /plugin-src?k= 地址，scripts/pack-plugins.mjs 生成）。
- * 条目形状 { name, url, description, descriptionEn }，前端点「下载」时经
- * importFromUrl → /fetch-plugin 走完整校验导入（源码形态自动打包）。
+ * 包根 registry.json。条目形状 { name, url, description, descriptionEn }，
+ * url 为 git 内容直链（api.github.com contents，源码形态）；前端点「下载」时经
+ * importFromUrl → /fetch-plugin 拉取（git 不可达时 host 自动回退同源 bundle），
+ * 源码形态由前端现场打包后走完整校验导入。
  */
 export const pluginRegistryResource: RouteMatcher = async (req, res, seg, q, method) => {
   void req;
