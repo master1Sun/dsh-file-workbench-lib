@@ -247,6 +247,7 @@ window API 命名空间：`window.__dshFileWorkbenchVSCode__.statusbar`
 | ------------ | ---------------------------------------- | --------------------------------------------------- |
 | `id`         | `string`                                 | 唯一 id，建议带命名空间；同 id 覆盖                               |
 | `text`       | `string`                                 | 条目文案（显示在「扩展」菜单里）                                    |
+| `textFn`     | `(() => string)?`                        | 实时文案读取器：每次渲染现取，用于进度类动态文本；提供时 `text` 只作兜底。替代「同 id 反复 register 刷文案」（见行为须知 8） |
 | `commandId`  | `string`                                 | 点击时执行的命令 id（须先经 `commands.register` 注册，否则点击为 no-op） |
 | `tooltip`    | `string?`                                | 悬浮提示；缺省用 `commandId`                                |
 | `order`      | `number?`                                | 排序权重（小的靠前；与扩展菜单项合并后统一按此升序排列）                        |
@@ -423,7 +424,7 @@ Git 追溯 / 大纲 / 正则高亮 / JSON 转接口 / Markdown 预览 / 十六�
 
 ### 支持的三种 `.js` 形态
 
-1. **源码形态（最简，推荐手写 / AI 生成）**：与 `plugins/packages/*.js` 一致的三种顶层导出——
+1. **源码形态（最简，推荐手写 / AI 生成）**：与 `plugins/*.js` 一致的三种顶层导出——
    `export const meta = {…}`（纯 JSON 字面量）+ `export const inject = []` +
    `export function apply(_ctx)`。导入时宿主**自动打包**成下述 loader bundle（与
    `npm run build` 同一套规则），名称/描述取自 `meta`，无需任何构建步骤。
@@ -449,8 +450,8 @@ Git 追溯 / 大纲 / 正则高亮 / JSON 转接口 / Markdown 预览 / 十六�
    
    「插件管理」会装一个 `__ModuleLoader__` shim 接住这两条：`manifest()` 归档元数据（列表显示
    `name/description/nameEn/descriptionEn/version`，缺清单时回退文件名），`load()` 登记模块、
-   启用时取出 `factory` 执行 `apply()`。本仓库套件的写法见 `plugins/packages/*.js` 的
-   `export const meta = {...}` 块——`plugins/pack.mjs` 打包时自动生成上面两段外壳。
+   启用时取出 `factory` 执行 `apply()`。本仓库套件的写法见 `plugins/*.js` 的
+   `export const meta = {...}` 块——构建期 `scripts/pack-plugins.mjs` 自动生成上面两段外壳。
 3. **极简自注册脚本**：不套 loader，直接在顶层调
    `window.__dshFileWorkbenchVSCode__.activityBar.register(...)` 亦可被识别加载（列表回退文件名显示）。
 
@@ -503,6 +504,11 @@ id 务必带命名空间前缀。
    的包裹层改回可滚动（不影响你有意为之的内部滚动区）；一般无需处理，如需自管可自行设置。
 7. **命令抛错**：状态栏按钮点击时，命令处理器抛出的异常会被面板捕获并以 error toast 呈现，
    不会中断编辑器；主动 `executeCommand` 调用则异常向上冒泡给调用方。
+8. **动态文案用 `textFn`，不要反复 `register`**：条目契约新增可选 `textFn: () => string`——
+   宿主每次渲染「扩展」菜单时现取一次，用于展示进度类文本（如「统计中 240/512」）。
+   以同 id 反复 `register` 来刷新文案会更换注册表数组引用，导致打开中的菜单整体重渲染、
+   位置抖动；`textFn` 只提供读数，节流（如每 N 个文件更新）由插件自行把握。编辑器与工作台
+   两套注册表均支持。
 
 ## 宿主 HTTP API 全清单（已实现，按开放程度分级）
 
@@ -651,9 +657,10 @@ GET 传 `?path=`，POST 放 body `{ path, ... }`。
 - **运行时 `.js` 导入 + 插件管理**：`stores/userPlugins.ts`（模块级列表 + `__ModuleLoader__` shim + eval/apply +
   注册表 diff 归属 + `/persist?k=dsh-fw.userPlugins` 快照持久化 + 启停/移除/导入 API）；宿主内置视图
   `components/business/vscode/pluginManagerView.ts`（`registerPluginManagerView()`，由 VSCodePane onMounted 调用一次）；
-  官方套件已收进本仓库 `plugins/packages/<name>.js`（纯 JS 单文件、无版本管理，清单写在源码的
-  `export const meta = {...}` 块里），`scripts/build.mjs` 构建时先跑
-  `plugins/pack.mjs`（静态校验 meta 并生成 `manifest(...)` + `.load(...)` 两段外壳），再把 `plugins/lib/*` 拷入 `lib/web/plugin-src/`——内置列表**不再构建期内嵌**，
+  官方套件已收进本仓库 `plugins/<name>.js`（纯 JS 单文件、无版本管理、目录内只有 .js 插件，
+  清单写在源码的 `export const meta = {...}` 块里），`scripts/build.mjs` 构建时经
+  `scripts/pack-plugins.mjs`（静态校验 meta 并生成 `manifest(...)` + `.load(...)` 两段外壳）
+  直接写入 `lib/web/plugin-src/`——内置列表**不再构建期内嵌**，
   由前端 bootstrap 经 host `GET /plugin-index`（清单）+ `GET /plugin-src?k=<name>`（bundle，顶层
   `__ModuleLoader__.manifest(...)` 声明提供元数据，无需执行插件代码）在运行时推导；URL 导入走 host 新路由
   `POST /fetch-plugin`（`src/host/routes/routes-plugins.ts`，服务端代拉 + SSRF 拦截 + 2MB 上限）

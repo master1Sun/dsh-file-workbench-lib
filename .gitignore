@@ -23,8 +23,7 @@
 tmp
 /readme
 
-# 插件打包产物（由 plugins/pack.mjs 生成，勿提交）
-/plugins/lib
+# 插件 bundle 由 scripts/pack-plugins.mjs 构建期生成（plugins/*.js → lib/web/plugin-src/），勿单独提交
 /.qoder
 
 # lib/web 旧 hash 资源：构建用只写不删拷贝（受限环境禁批量删除），历史产物会不断堆积；

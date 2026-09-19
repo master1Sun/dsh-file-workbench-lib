@@ -6,6 +6,12 @@
     "descriptionEn": "DSH file editor plugin: activity bar view that toggles line bookmarks, lists current/all-project bookmarks and jumps to them. Uses v1 ctx.editor.createDecorations(category:bookmark) gutter marks + /persist per project. Counterpart of VS Code Bookmarks."
   },
   {
+    "name": "capability-guide",
+    "url": "/api/dsh-file-workbench/plugin-src?k=capability-guide",
+    "description": "示例插件：分区演示全部注入能力与宿主 HTTP API，可直接点跑，兼作开放能力的操作手册",
+    "descriptionEn": "Sample plugin documenting every injection capability and host HTTP endpoint with runnable examples."
+  },
+  {
     "name": "find-references",
     "url": "/api/dsh-file-workbench/plugin-src?k=find-references",
     "description": "跟随光标选中词，在项目内查找全部引用并点击跳转",
@@ -54,6 +60,12 @@
     "descriptionEn": "DSH file editor plugin: activity bar view that extracts symbols (functions/classes/headings) from the active buffer and jumps to them, based on the dsh-file-workbench-lib v1 injection API (window.__dshFileWorkbenchVSCode__)."
   },
   {
+    "name": "project-stats",
+    "url": "/api/dsh-file-workbench/plugin-src?k=project-stats",
+    "description": "一键统计当前项目的文件数、每个文件行数与总字节数，结果可在详情表格里点击查看",
+    "descriptionEn": "One-click project statistics: file count, per-file line counts and total bytes. Runs from the bottom Extensions menu, renders a sortable detail table, and remembers the last result per project."
+  },
+  {
     "name": "regex-highlight",
     "url": "/api/dsh-file-workbench/plugin-src?k=regex-highlight",
     "description": "用自定义正则高亮当前文件全部匹配并列出命中行",
@@ -64,21 +76,5 @@
     "url": "/api/dsh-file-workbench/plugin-src?k=todo-tree",
     "description": "扫描项目内 TODO/FIXME/HACK 等标签，分组成可跳转列表并高亮当前文件",
     "descriptionEn": "DSH file editor plugin: activity bar view that scans TODO/FIXME/HACK/XXX (configurable) tags across the project via /grep into a grouped jumpable tree; highlights the active file with v1 createDecorations. Counterpart of VS Code Todo Tree."
-  },
-  {
-    "name": "project-stats",
-    "url": "/api/dsh-file-workbench/plugin-src?k=project-stats",
-    "title": "项目统计",
-    "titleEn": "Project Stats",
-    "description": "一键统计当前项目的文件数、每个文件行数与总字节数，结果可在详情表格里点击查看",
-    "descriptionEn": "One-click project statistics: file count, per-file lines and total bytes."
-  },
-  {
-    "name": "capability-guide",
-    "url": "/api/dsh-file-workbench/plugin-src?k=capability-guide",
-    "title": "能力手册",
-    "titleEn": "Capability Guide",
-    "description": "示例插件即操作手册：12 组 74 项已开放能力（window API / 宿主 HTTP / 终端 / 推送 WS / 持久化）逐条可点运行并回显真实响应",
-    "descriptionEn": "Sample plugin as a living manual: 74 runnable demos across 12 sections covering every exposed capability (window API, host HTTP, terminal, push WS, persistence)."
   }
 ]

@@ -5,9 +5,38 @@
 // 两处必须逐字节同构，否则「npm run build 产物」与「导入时现场打包的 bundle」会出现规则漂移。
 // shared/plugin-meta.ts 头部注明了本文件为其对偶；改这里务必同步改那里。
 
-/** 源码是否含三种顶层 export 之一（即「未打包的 packages/*.js 形态」）。 */
+/** 源码是否含三种顶层 export 之一（即「未打包的插件源码形态」）。 */
 export function isSourceForm(code) {
   return /^export\s+(const\s+meta\b|const\s+inject\b|function\s+apply\b)/m.test(code);
+}
+
+/** 静态求值 `export const inject = [...]` 字面量（缺省/非法回退 []）；与 shared/plugin-meta.ts 同构。 */
+export function extractInject(src) {
+  const m = /export\s+const\s+inject\s*=\s*/.exec(src);
+  if (!m) return [];
+  let i = m.index + m[0].length;
+  if (src[i] !== "[") return [];
+  let depth = 0;
+  let end = -1;
+  let inStr = null;
+  for (; i < src.length; i++) {
+    const c = src[i];
+    if (inStr) {
+      if (c === "\\") { i++; continue; }
+      if (c === inStr) inStr = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") { inStr = c; continue; }
+    if (c === "[") depth++;
+    else if (c === "]" && --depth === 0) { end = i + 1; break; }
+  }
+  if (end < 0) return [];
+  try {
+    const v = JSON.parse(src.slice(m.index + m[0].length, end).replace(/'/g, '"').replace(/,\s*([}\]])/g, "$1"));
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -78,13 +107,16 @@ export function transformSourceToBundle(code, name) {
     `window.__ModuleLoader__.manifest(${JSON.stringify(manifest)});`,
     `window.__ModuleLoader__.load({`,
     `\tid: ${JSON.stringify(manifest.id)},`,
+    // inject 声明必须在 load 顶层（cordis loader 读取）：静态求值源码里的字面量，
+    // 不能引用 factory 内被剥了 export 的局部名。
+    `\tinject: ${JSON.stringify(extractInject(code))},`,
     `\tfactory: (require) => {`,
     src
       .trimEnd()
       .split("\n")
       .map((l) => (l ? `\t\t${l}` : l))
       .join("\n"),
-    `\t\treturn { apply, inject, meta };`,
+    `\t\treturn { apply, meta };`,
     `\t}`,
     `});`,
     "",

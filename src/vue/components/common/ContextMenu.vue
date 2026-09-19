@@ -6,7 +6,7 @@
         class="fw-cm"
         :class="{ 'fw-cm-up': props.placement === 'top' && props.anchorX === undefined, 'fw-cm-bubble': anchorX !== undefined, 'fw-cm-fit': props.fitWidth }"
         :data-theme="currentTheme"
-        :style="{ left: pos.x + 'px', top: pos.y + 'px' }"
+        :style="{ left: pos.x + 'px', top: bubbleBottomPx ? undefined : pos.y + 'px', bottom: bubbleBottomPx ?? undefined }"
         @mousedown.stop
         @contextmenu.prevent
       >
@@ -26,7 +26,7 @@
               v-else
               class="fw-cm-item"
               :class="{ disabled: item.disabled, checked: item.checked, hasChild: !!item.children?.length }"
-              :title="item.title"
+              :title="rowTitle(item)"
               @mouseenter="hover(i, $event)"
               @click="pick(item)"
             >
@@ -132,10 +132,13 @@ const activeSub = ref<MenuItem | null>(null);
 const subPos = ref({ x: 0, y: 0 });
 /** 箭头水平位置（菜单内坐标系）：clamp() 后按菜单真实左缘反算，始终对准锚点。 */
 const arrowLeftPx = ref(0);
-/** 锚定气泡（anchorX）时菜单与触发按钮的间距：JS 按「底缘贴按钮上沿-该间距」定位，
- *  不再依赖 CSS translateY(-100%)——否则首帧 rect 仍是未上移的位置，clamp 会把菜单
- *  垂直拉回、盖住触发按钮（水平/垂直两套坐标系混用的陷阱）。 */
+/** 锚定气泡（anchorX）时菜单与触发按钮的间距。 */
 const BUBBLE_GAP = 10;
+/** 气泡垂直定位：placement=top + anchorX 时改用 CSS bottom 直接钉住「按钮上沿-间距」，
+ *  菜单向上生长、无需按实测高度换算 top——此前用 getBoundingClientRect().height 反推
+ *  top，任何时刻量到偏大的高度（首帧/动画中/临时宽容器把长行撑出换行）都会把气泡整个
+ *  拽到屏幕顶端。bottom 由浏览器实时求值，天然免疫测量时机问题。 */
+const bubbleBottomPx = ref<string | null>(null);
 /** 对齐宿主主题，确保 Teleport 到 body 后仍随白天/黑夜变色。 */
 const currentTheme = ref<"dark" | "light">("dark");
 
@@ -153,6 +156,14 @@ function iconText(icon?: string): string {
   return icon ? [...icon][0] ?? "" : "";
 }
 
+/** 行提示：实时读取器 hintFn 优先（每次渲染现取），否则静态 title。
+ *  hintFn 让插件把进度写进 tooltip 而无需同 id 反复 register——后者会换数组引用、
+ *  触发菜单重定位/重渲染抖动。 */
+function rowTitle(item: MenuItem): string | undefined {
+  if (item.hintFn) return item.hintFn();
+  return item.title;
+}
+
 watch(
   () => [props.x, props.y],
   ([x, y]) => {
@@ -165,8 +176,9 @@ watch(
   },
 );
 
-// 条目注册表变化（如测试/插件在菜单打开期间 register/unregister）→ 重算位置，
-// 避免菜单高度变化后贴底锚点（placement=top）的向上位移失准、菜单漂到触发按钮上。
+// 条目注册表变化（如测试/插件在菜单打开期间 register/unregister）→ 重算位置。
+// 气泡模式（anchorX+top）由 CSS bottom 自动跟随高度生长，此处主要兜住非气泡的
+// placement=top：translateY(-100%) 的量随高度变化，需按新 rect 重新夹取 top。
 watch(
   () => props.items,
   () => {
@@ -197,13 +209,21 @@ function clamp(): void {
   const r = el.getBoundingClientRect();
   let ny = pos.value.y;
   if (props.anchorX !== undefined && props.placement === "top") {
-    // 气泡锚定（JS 定位版）：y 是按钮上沿，菜单底缘应停在 y-间距处 → top = y-h-间距。
-    ny = pos.value.y - r.height - BUBBLE_GAP;
+    // 气泡锚定：y 是按钮上沿 → 以 CSS bottom 钉住「视口底 - 按钮上沿 + 间距」。
+    // 不再测量高度反推 top（历史 bug 源头：任意一次量到偏大高度都会把气泡拽到屏幕顶端）。
+    bubbleBottomPx.value = `${rh - pos.value.y + BUBBLE_GAP}px`;
+    ny = pos.value.y; // bottom 已接管渲染定位，top 不应用（见模板），此处仅占位
+  } else {
+    bubbleBottomPx.value = null;
+    // placement=top（非气泡）：菜单经 translateY(-100%) 升到锚点之上，rect.top 已含该位移。
+    // ⚠️ 必须按「当前拟落位 ny + 实测高」判断越界——不能用 rect.bottom：首帧 rect 还在
+    // （未上移的）旧位置，其 bottom 会虚假触发拉回、把向上弹出的菜单整个拽到屏幕顶端。
+    if (ny + r.height > rh - 4) ny = Math.max(4, rh - r.height - 4);
+    // 顶缘越界（向上生长过头 / 被上式拉到负值）才下推回可见区；向下弹出的普通菜单
+    // r.top 本就 ≥0，不会命中此分支。
+    if (r.top < 4) ny = Math.max(4, ny + (4 - r.top));
+    if (ny < 4) ny = 4;
   }
-  // placement=top（非气泡）：菜单经 translateY(-100%) 升到锚点之上，rect 已含该位移，按真实尺寸夹取。
-  if (ny + r.height > rh - 4) ny = Math.max(4, rh - r.height - 4);
-  if (r.top < 4 && props.anchorX === undefined) ny = Math.max(4, ny + (4 - r.top));
-  if (ny < 4) ny = 4;
   pos.value = { x: nx, y: ny };
 }
 
@@ -356,10 +376,12 @@ onBeforeUnmount(() => {
   translate: 0 -100%;
   animation: fw-cm-in-up 0.1s ease-out;
 }
-/* 锚定气泡：top 已由 JS 直接定位（无 translateY(-100%)），动画从按钮方向滑入 */
+/* 锚定气泡：bottom 由 JS 直接钉住按钮上沿之上（无 translateY(-100%)），动画从按钮方向滑入。
+   max-height 兜底：内容再高也只占满可视区，超出部分交给 .fw-cm-scroll 内部滚动。 */
 .fw-cm-bubble {
   transform-origin: bottom center;
   animation: fw-cm-in-up 0.1s ease-out;
+  max-height: calc(100vh - 16px);
 }
 @keyframes fw-cm-in-up {
   from {

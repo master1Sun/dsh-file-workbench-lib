@@ -4,7 +4,7 @@
  * 提供 Promise 化的 confirmDialog / promptDialog，替代原生 window.confirm / window.prompt。
  * ConfirmDialog.vue 消费 dialogState 渲染 Element Plus 弹窗，并回调 resolve。
  */
-import { reactive } from "vue";
+import { createApp, reactive } from "vue";
 
 export type DialogKind = "confirm" | "prompt";
 
@@ -129,4 +129,33 @@ export function resolveDialog(v: boolean | string | null): void {
   dialogState.visible = false;
   dialogState.resolve?.(v);
   dialogState.resolve = null;
+}
+
+/* ------------------------------------------------------------- 全局挂载宿主 */
+
+/**
+ * 「无面板根」时的兜底宿主：插件管理视图是纯 DOM、可能挂在 body 浮层里（独立编辑器窗口），
+ * 其确认框需要一处常驻的 ConfirmDialog 实例；面板树（App.vue / VSCodePane）已各自渲染
+ * <confirm-dialog>，共用的就是这份模块级 dialogState，所以此处只兜底、不重复。
+ */
+let globalDialogHostMounted = false;
+export function ensureGlobalDialogHost(): void {
+  if (globalDialogHostMounted || typeof document === "undefined" || !document.body) return;
+  // ConfirmDialog 动态引入：本模块也被纯 DOM 侧（非 Vue 树）引用，避免把 .vue 拖进其静态依赖。
+  void import("../../components/common/ConfirmDialog.vue").then(({ default: ConfirmDialog }) => {
+    if (globalDialogHostMounted) return;
+    // 任一棵应用树（主面板 / 浮窗编辑器——浮窗有自己的 #root 与完整组件树）已渲染实例即跳过：
+    // dialogState 是模块级单例，同 document 内复用即可，多挂一份会同屏弹两个框。
+    if (document.querySelector(".el-dialog, .fw-confirm-body")) return;
+    const host = document.createElement("div");
+    host.id = "dsh-confirm-root";
+    document.body.appendChild(host);
+    try {
+      createApp(ConfirmDialog).mount(host);
+      globalDialogHostMounted = true;
+    } catch (e) {
+      console.error("[dsh-file-workbench] 全局确认弹窗挂载失败：", e);
+      host.remove();
+    }
+  });
 }

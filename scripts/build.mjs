@@ -11,7 +11,6 @@
 //   - client 桥接需要知道 Vue 产物的具体资源文件名；构建后从 dist/index.html 解析出
 //     入口 JS 与 CSS，经 esbuild define 注入 __VUE_ENTRY__ / __VUE_CSS__。
 import { build as esbuild } from "esbuild";
-import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -24,17 +23,6 @@ const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 const PLUGIN_ID = pkg.name;
 const PLUGIN_VERSION = pkg.version;
 const IS_DEV = process.argv.includes("--dev");
-
-// ── -1) 打包本仓库 plugins/ 套件 → plugins/lib/（内置插件的运行时来源）─────────
-// 「插件管理」的内置列表不再构建期内嵌（原 builtinPluginSources.ts 已删）：
-// 前端 bootstrap 时经 host /plugin-index（读 .pack-meta.json）+ /plugin-src（bundle 顶层
-// manifest 声明）在运行时推导种子。这里只需跑 plugins/pack.mjs——
-// 源码 plugins/packages/<name>.js（纯 JS 单文件）→ plugins/lib/<name>.js
-// （__ModuleLoader__.manifest(...) + .load({id,factory}) 外壳）+ .pack-meta.json，随后拷入静态目录。
-const { packPlugins } = await import("../plugins/pack.mjs");
-await packPlugins();
-
-const SUITE_ROOT = join(root, "plugins");
 
 // ── 0) Vite 构建 Vue 产物 ────────────────────────────────────────────────
 const { build: viteBuild } = await import("vite");
@@ -88,39 +76,12 @@ async function copyDirNoDelete(src, dest) {
 // 受限环境的安全删除守卫会拦截 cp 内部的删除/覆写路径，故用只写不删的递归拷贝铺产物。
 await copyDirNoDelete(join(root, "dist"), webDir);
 
-// 内置插件源码静态目录：种子 code 只是引用（plugin-src/<name>.js），实际 bundle 拷到这里；
-// .pack-meta.json 一并拷入，host /plugin-index 直接对外提供它（前端运行时推导内置列表）。
-// host 以 WEB_DIR/plugin-src 为根按白名单文件名对外提供（见 routes-plugins.ts）；
-// 同步拷入 dist/ 是为了 vite dev 下 `/api/dsh-file-workbench/*` 整体代理到 host 时同样命中。
-const packMetaList = JSON.parse(await readFile(join(SUITE_ROOT, "lib", ".pack-meta.json"), "utf8"));
-for (const dir of [join(webDir, "plugin-src"), join(root, "dist", "plugin-src")]) {
-  await mkdir(dir, { recursive: true });
-  await copyFile(join(SUITE_ROOT, "lib", ".pack-meta.json"), join(dir, ".pack-meta.json"));
-  for (const entry of packMetaList) {
-    await copyFile(join(SUITE_ROOT, "lib", `${entry.name}.js`), join(dir, `${entry.name}.js`));
-  }
-}
-// 插件注册表（「未安装」列表来源）：name/url/description 清单，host /plugin-registry 直出。
-// importPackages/ 下的外部候选（如 project-stats）也登记进 registry，url 指向 plugin-src——
-// 这里把它们一并拷入，保证注册表里的每个 url 都真实可下载。
-await copyFile(join(SUITE_ROOT, "registry.json"), join(webDir, "plugin-src", "registry.json"));
-await copyFile(join(SUITE_ROOT, "registry.json"), join(root, "dist", "plugin-src", "registry.json"));
-{
-  const { transformSourceToBundle } = await import("../plugins/pack-core.mjs");
-  const reg = JSON.parse(await readFile(join(SUITE_ROOT, "registry.json"), "utf8"));
-  for (const e of reg) {
-    const k = new URL(e.url, "http://x").searchParams.get("k");
-    if (!k || /\.pack-meta/.test(k)) continue;
-    const candidates = [join(SUITE_ROOT, "importPackages", `${k}.js`), join(SUITE_ROOT, "packages", `${k}.js`)];
-    const src = candidates.find((p) => existsSync(p));
-    if (!src) continue;
-    const { packed } = transformSourceToBundle(await readFile(src, "utf8"), k);
-    for (const dir of [join(webDir, "plugin-src"), join(root, "dist", "plugin-src")]) {
-      await writeFile(join(dir, `${k}.js`), packed);
-    }
-  }
-}
-console.log(`build: plugin sources → lib/web/plugin-src + dist/plugin-src (${packMetaList.length} 个) + registry.json`);
+// 插件打包 + 静态发布：plugins/*.js（纯源码形态）→ 内存 bundle → lib/web/plugin-src +
+// dist/plugin-src（bundle + .pack-meta.json + registry.json，见 scripts/pack-plugins.mjs）。
+// host /plugin-index、/plugin-src、/plugin-registry 全部以该目录为根对外提供。
+const { packPluginsInto } = await import("./pack-plugins.mjs");
+const packMetaList = await packPluginsInto(webDir);
+console.log(`build: plugins/*.js packed → lib/web/plugin-src + dist/plugin-src (${packMetaList.length} 个)`);
 
 // ── 0a2) 作者资源发布（面向用户的 AI 助手，见 AGENTS.md / docs/activity-bar-plugin.md）──
 // 骨架：plugin-authoring/plugin-skeleton.js（真·源码形态）经同源打包规则成 bundle 后

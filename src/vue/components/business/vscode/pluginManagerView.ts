@@ -8,20 +8,24 @@
  * 悬停浮出操作按钮与齿轮菜单，已禁用项整行淡化、已启用项带绿点徽章。内置种子不可移除。
  * 已安装与注册表「未安装」条目合并为统一列表展示（未安装行悬停「下载」即装）。
  */
-import { watch } from "vue";
+import { createApp, reactive, watch } from "vue";
 import {
   bootstrapUserPlugins,
   contributionsOfPluginId,
   disablePlugin,
   enablePlugin,
+  getPluginSource,
   importFromFile,
   importFromUrl,
   listUserPlugins,
   removePlugin,
+  savePluginEditedCode,
   type UserPlugin,
 } from "../../../stores/userPlugins";
+import PluginCodeViewer from "./PluginCodeViewer.vue";
 import { registerActivityView, listActivityViews, type ActivityContext } from "../../../stores/activityBar";
 import { t, isZh, useI18n } from "../../../composables/core/i18n";
+import { confirmDialog, ensureGlobalDialogHost } from "../../../composables/core/dialog";
 
 const VIEW_ID = "host.plugin-manager";
 const NS = "dsh-pm";
@@ -54,7 +58,7 @@ function viewIds(): Set<string> {
 function markIfNeedsReload(p: UserPlugin | undefined, before: Set<string>): void {
   if (!p || !p.enabled || p.error) return;
   const gated = contributionsOfPluginId(p.id);
-  if (!gated.length) return;
+  if (!gated.length) return; // 探针未捕获到贡献点：交给下方 grew 判定，避免误报
   const view = listActivityViews().find((v) => v.id === gated[0]);
   if (view?.when && !view.when(activityCtxForProbe())) return; // 条件未满足 → 走「需打开项目」提示，不算失效
   // 视图已在册即视为生效：导入内置插件的克隆时同 id 覆盖注册，列表不「增长」但功能正常——
@@ -63,6 +67,19 @@ function markIfNeedsReload(p: UserPlugin | undefined, before: Set<string>): void
   const grew = [...live].some((id) => !before.has(id));
   if (!grew && !gated.every((id) => live.has(id))) pendingReloadIds.add(p.id);
   else pendingReloadIds.delete(p.id);
+}
+
+/**
+ * 下载/导入成功后的 Reload Required 判定：优先按贡献点核查（markIfNeedsReload）；
+ * 探针完全没捕获到贡献点说明热加载实际失败（重启后才可能挂上），直接记入待刷新，
+ * 由横幅提示「新安装插件需要重新加载窗口」。
+ */
+function markDownloadedNeedsReload(rec: UserPlugin | undefined, before: Set<string>): void {
+  if (rec && !contributionsOfPluginId(rec.id).length) {
+    if (rec.enabled && !rec.error) pendingReloadIds.add(rec.id);
+    return;
+  }
+  markIfNeedsReload(rec, before);
 }
 
 /** 探测 when() 用的最小上下文：目前内置插件只看 projectDir，其余字段给安全默认。 */
@@ -116,7 +133,11 @@ function injectStyles(): void {
   // ⚠️ 配色走本视图自有的 --pm-* 令牌：在 .${NS}-view 上定义浅色默认值，再由 data-theme/.dark
   // 祖先覆盖为深色。**不直接读 --dsh-*** —— 那些变量若未注入会落到写死的兜底，白天/黑夜就串色。
   const css = `
-.${NS}-view,.${NS}-menu{
+/* el-dialog 的 teleport 挂 body（z-index ~2014），而查看器/确认宿主也在 body 层——
+   把弹层体系整体抬到查看器浮层之上，否则「恢复原版」等确认框会藏在查看器后面。 */
+.el-overlay{z-index:2147483640 !important;}
+.el-overlay-message-box,.el-message{z-index:2147483645 !important;}
+.${NS}-view,.${NS}-menu,.${NS}-viewer{
   --pm-fg:#1f2328; --pm-fg-weak:#656d76; --pm-fg-muted:#8b949e;
   --pm-bg:#ffffff; --pm-bg2:#f6f8fa; --pm-bg3:#eaeef2;
   --pm-border:#d0d7de; --pm-hover:#e7ebef; --pm-accent:#0969da;
@@ -125,7 +146,8 @@ function injectStyles(): void {
   --pm-av-builtin:#57606a; --pm-av-file:#1f6feb; --pm-av-url:#8250df;}
 .${NS}-view{color:var(--pm-fg);font-size:13px;}
 :is(html[data-theme="dark"],html.dark,.fw-root[data-theme="dark"],.vs-pane[data-theme="dark"]) .${NS}-view,
-:is(html[data-theme="dark"],html.dark,.fw-root[data-theme="dark"],.vs-pane[data-theme="dark"]) .${NS}-menu{
+:is(html[data-theme="dark"],html.dark,.fw-root[data-theme="dark"],.vs-pane[data-theme="dark"]) .${NS}-menu,
+:is(html[data-theme="dark"],html.dark,.fw-root[data-theme="dark"],.vs-pane[data-theme="dark"]) .${NS}-viewer{
   --pm-fg:#c9d1d9; --pm-fg-weak:#8b949e; --pm-fg-muted:#6e7681;
   --pm-bg:#0d1117; --pm-bg2:#161b22; --pm-bg3:#21262d;
   --pm-border:#30363d; --pm-hover:#30363d; --pm-accent:#2f81f7;
@@ -175,6 +197,11 @@ function injectStyles(): void {
 .${NS}-desc{font-size:12px;color:var(--pm-fg-weak);line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
 .${NS}-err{font-size:11px;color:var(--pm-danger);margin-top:2px;word-break:break-all;}
 
+/* ---- 分区标题（已安装 / 浏览器）：VS Code 扩展面板 collapsible section 观感 ---- */
+.${NS}-section{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:6px;padding:6px 10px;font-size:11px;font-weight:600;letter-spacing:.2px;text-transform:uppercase;color:var(--pm-fg-weak);background:var(--pm-bg);border-bottom:1px solid var(--pm-border);cursor:pointer;user-select:none;}
+.${NS}-section:hover{color:var(--pm-fg);}
+.${NS}-section-caret{width:12px;flex:0 0 auto;font-size:10px;line-height:1;}
+
 /* ---- 行内操作区：hover 才显出（VS Code 悬停浮出）---- */
 .${NS}-rowacts{position:absolute;top:6px;right:10px;display:none;align-items:center;gap:4px;}
 .${NS}-row:hover .${NS}-rowacts{display:flex;}
@@ -212,6 +239,23 @@ function injectStyles(): void {
 .${NS}-reload-text{flex:1 1 auto;font-size:12px;line-height:1.5;color:var(--pm-fg);}
 .${NS}-reload-x{flex:0 0 auto;border:0;background:transparent;color:var(--pm-fg-muted);font-size:14px;line-height:1;padding:2px 4px;cursor:pointer;}
 .${NS}-reload-x:hover{color:var(--pm-fg);}
+
+/* ---- 源码查看器浮层（PluginCodeViewer.vue，挂 body → 令牌在此全局重声明）---- */
+/* host div 是 0×0 + pointer-events:none（main.ts 惯例），浮层必须自行恢复命中，
+   否则整块对话框不可交互（滚动/点击全灭）。 */
+.${NS}-viewer-mask{position:fixed;inset:0;z-index:2147483600;pointer-events:auto;background:rgba(1,4,9,.55);display:flex;align-items:center;justify-content:center;padding:4vh 4vw;}
+.${NS}-viewer{display:flex;flex-direction:column;width:min(1100px,92vw);height:min(760px,92vh);background:var(--pm-bg);color:var(--pm-fg);border:1px solid var(--pm-border);border-radius:8px;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.35);}
+.${NS}-viewer-hdr{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--pm-bg2);border-bottom:1px solid var(--pm-border);font-size:13px;flex:0 0 auto;}
+.${NS}-viewer-title{font-weight:600;}
+.${NS}-viewer-dirty{color:var(--pm-warn);}
+.${NS}-viewer-ro{opacity:.6;font-size:12px;}
+.${NS}-viewer-spacer{flex:1 1 auto;}
+.${NS}-viewer-btn{padding:3px 10px;font-size:12px;border:1px solid var(--pm-border);border-radius:6px;background:var(--pm-bg);color:var(--pm-fg);cursor:pointer;}
+.${NS}-viewer-btn.primary{background:var(--pm-accent);border-color:var(--pm-accent);color:#fff;}
+.${NS}-viewer-btn:disabled{opacity:.5;cursor:default;}
+.${NS}-viewer-x{border:0;background:none;color:var(--pm-fg);font-size:18px;line-height:1;cursor:pointer;padding:2px 6px;}
+.${NS}-viewer-editor{flex:1 1 auto;min-height:0;overflow:hidden;}
+.${NS}-viewer-editor .cm-editor{height:100%;}
 `;
   const style = document.createElement("style");
   style.id = `${NS}-styles`;
@@ -238,19 +282,24 @@ let sortKey: SortKey = "install";
 export interface RegistryEntry {
   name: string;
   url: string;
+  /** 插件 meta.name（中文名）；缺省回退文件名。 */
+  title?: string;
+  titleEn?: string;
   description?: string;
   descriptionEn?: string;
 }
 let registryEntries: RegistryEntry[] = [];
 let registryLoaded = false;
-/** 正在下载安装的注册表项 name 集合（行内按钮防重复点击 + loading 文案）。 */
-const downloadingNames = new Set<string>();
+/** 同条目防重复点击：进行中的下载 URL 集合（仅拦「同一 DOM 存活期间的二次点击」，不驱动任何文案）。 */
+const downloadingUrls = new Set<string>();
 
-async function fetchRegistry(): Promise<RegistryEntry[]> {
-  if (registryLoaded) return registryEntries;
+async function fetchRegistry(force = false): Promise<RegistryEntry[]> {
+  if (registryLoaded && !force) return registryEntries;
   try {
     const res = await fetch("/api/dsh-file-workbench/plugin-registry", { cache: "no-cache" });
-    const arr = await res.json();
+    const body = await res.json();
+    // host 返回信封 { ok, data }（在线枚举 GitHub plugins/，失败回退本地 registry.json）。
+    const arr = Array.isArray(body) ? body : body?.data;
     registryEntries = Array.isArray(arr) ? arr.filter((e: RegistryEntry) => e?.name && e?.url) : [];
   } catch {
     registryEntries = [];
@@ -262,8 +311,13 @@ async function fetchRegistry(): Promise<RegistryEntry[]> {
 /** 注册表项是否已在安装列表中（按种子裸名 / file·url 命名空间 id / bundle loader id 归一匹配）。 */
 function isInstalled(p: UserPlugin[], entry: RegistryEntry): boolean {
   const bare = entry.url.match(/[?&]k=([A-Za-z0-9._-]+)/)?.[1] ?? entry.name;
+  // 「从 URL 导入」的记录主键取文件名（含 .js），与裸名不互含——先剥扩展名再逐一比对。
+  const stem = bare.replace(/\.(c|m)?js$/i, "");
   const ids = new Set(p.map((x) => x.id));
-  return ids.has(bare) || ids.has(`file.${bare}`) || ids.has(`url.${bare}`) || ids.has(`dsh-fw.${bare}`);
+  for (const cand of [bare, stem]) {
+    if (ids.has(cand) || ids.has(`file.${cand}`) || ids.has(`url.${cand}`) || ids.has(`dsh-fw.${cand}`)) return true;
+  }
+  return false;
 }
 
 function sourceLabel(s: UserPlugin["source"]): string {
@@ -300,13 +354,33 @@ function displayName(p: UserPlugin): string {
   return (!isZh() && p.nameEn) || shortName(p);
 }
 
-/** 按当前排序键统一排序（install：已安装在前、注册表未安装在后，各自保持导入/注册顺序）。 */
+/** 按当前排序键排序（分区后各段内部使用；install 键 = 维持导入/注册原序）。 */
 function sortPlugins(arr: UserPlugin[]): UserPlugin[] {
   const s = [...arr];
   if (sortKey === "name") s.sort((a, b) => displayName(a).localeCompare(displayName(b)));
   else if (sortKey === "source") s.sort((a, b) => a.source.localeCompare(b.source) || displayName(a).localeCompare(displayName(b)));
-  else s.sort((a, b) => Number(isRegistryRow(b)) - Number(isRegistryRow(a)));
   return s;
+}
+
+/** 分区折叠态（模块级，跨重绘/语言切换存活；仅本会话内）。 */
+const collapsedSections = new Set<"installed" | "browse">();
+
+/** 分区标题行（「已安装 (n)」/「浏览器 (n)」）：点击折叠/展开该段，样式对齐 VS Code collapsible section。 */
+function sectionHeader(label: string, n: number, key: "installed" | "browse", root: HTMLElement, ctx: ActivityContext): HTMLElement {
+  const h = document.createElement("div");
+  h.className = `${NS}-section`;
+  const caret = document.createElement("span");
+  caret.className = `${NS}-section-caret`;
+  caret.textContent = collapsedSections.has(key) ? "\u25b8" : "\u25be"; // ▸ / ▾
+  const text = document.createElement("span");
+  text.textContent = `${label} (${n})`;
+  h.append(caret, text);
+  h.addEventListener("click", () => {
+    if (collapsedSections.has(key)) collapsedSections.delete(key);
+    else collapsedSections.add(key);
+    renderList(root, ctx);
+  });
+  return h;
 }
 
 /* --------------------------------------------------------------- 菜单纯净化 */
@@ -364,13 +438,71 @@ function closeActiveMenu(): void {
   activeMenu?.close();
 }
 
+/* ---- 源码查看器浮层（Vue 组件挂 body，参照 main.ts 全局宿主：0×0 + 显式 z-index） ---- */
+
+let activeViewer: { host: HTMLDivElement; app: import("vue").App } | undefined;
+
+/**
+ * 打开插件源码查看/编辑器。同一时刻仅一个实例（重复调用先关旧的）。
+ * onSave/onReload 由调用方注入（保存编辑并重载 / 仅重载），内部经响应式 props 转发给组件。
+ */
+function openCodeViewer(opts: {
+  filename: string;
+  code: string;
+  editable: boolean;
+  edited?: boolean;
+  onSave?: (code: string) => Promise<void> | void;
+  onReload?: (code: string) => Promise<void> | void;
+  onRestore?: () => Promise<void> | void;
+}): void {
+  closeCodeViewer();
+  const host = document.createElement("div");
+  host.style.cssText = "position:fixed;left:0;top:0;width:0;height:0;overflow:visible;z-index:2147483600;pointer-events:none;";
+  document.body.appendChild(host);
+  const viewerProps = reactive({
+    filename: opts.filename,
+    code: opts.code,
+    editable: opts.editable,
+    edited: opts.edited ?? false,
+    onSave: async (code: string) => {
+      await opts.onSave?.(code);
+      closeCodeViewer();
+    },
+    onReload: async (code: string) => {
+      await opts.onReload?.(code);
+      closeCodeViewer();
+    },
+    onRestore: async () => {
+      await opts.onRestore?.();
+      closeCodeViewer();
+    },
+    onClose: () => closeCodeViewer(),
+  });
+  const app = createApp(PluginCodeViewer, viewerProps);
+  app.mount(host);
+  activeViewer = { host, app };
+}
+
+function closeCodeViewer(): void {
+  if (!activeViewer) return;
+  const { host, app } = activeViewer;
+  activeViewer = undefined;
+  try {
+    app.unmount();
+  } finally {
+    host.remove();
+  }
+}
+
 /* ------------------------------------------------------------------ 统一列表渲染 */
 
 /** 注册表条目 → 伪插件记录（仅用于与真实记录同构排序展示；不入库）。 */
 function entryToPlugin(e: RegistryEntry): UserPlugin {
   return {
     id: `__reg.${e.name}`,
-    name: e.name,
+    // name 存 meta 中文名（无则文件名）；nameEn 存英文名——displayName 按语言取 nameEn。
+    name: e.title || e.name,
+    nameEn: e.titleEn || "",
     source: "url",
     origin: e.url,
     description: e.description ?? "",
@@ -386,23 +518,33 @@ function renderList(root: HTMLElement, ctx: ActivityContext): void {
   const installed = all.filter((p) => matchesQuery(p, q));
   const available = registryEntries
     .filter((e) => !isInstalled(all, e))
-    .filter((e) => !q || `${e.name} ${e.description ?? ""} ${e.descriptionEn ?? ""}`.toLowerCase().includes(q))
+    .filter((e) => !q || `${e.name} ${e.title ?? ""} ${e.titleEn ?? ""} ${e.description ?? ""} ${e.descriptionEn ?? ""}`.toLowerCase().includes(q))
     .map(entryToPlugin);
-  // 已安装 + 未安装合并为一个列表，按当前排序键统一排。
-  const shown = sortPlugins([...installed, ...available]);
 
   const list = root.querySelector<HTMLElement>(`.${NS}-list`);
   if (!list) return;
   list.replaceChildren();
-  if (!shown.length) {
-    const empty = document.createElement("div");
-    empty.className = `${NS}-empty`;
-    empty.innerHTML = `<div class="${NS}-empty-icon">&#x2699;</div><div class="${NS}-empty-text">${
-      q ? t("pmEmptyWithQuery", { q: escapeHtml(query) }) : t("pmEmptyNoPlugins")
-    }</div>`;
-    list.append(empty);
-  } else {
-    for (const p of shown) list.append(isRegistryRow(p) ? buildAvailableRow(p, root, ctx) : buildRow(p, root, ctx));
+  // VS Code 扩展面板式两段分区：「已安装」（本地）在上，「浏览器」（远程注册表）在下；
+  // 下载成功的项从注册表移入本地段（isInstalled 过滤 + 重绘即达成）。点标题折叠/展开。
+  const shown = sortPlugins(installed);
+  list.append(sectionHeader(t("pmInstalledSection"), shown.length, "installed", root, ctx));
+  if (!collapsedSections.has("installed")) {
+    if (shown.length) {
+      for (const p of shown) list.append(buildRow(p, root, ctx));
+    } else {
+      const empty = document.createElement("div");
+      empty.className = `${NS}-empty`;
+      empty.innerHTML = `<div class="${NS}-empty-icon">&#x2699;</div><div class="${NS}-empty-text">${
+        q ? t("pmEmptyWithQuery", { q: escapeHtml(query) }) : t("pmEmptyNoPlugins")
+      }</div>`;
+      list.append(empty);
+    }
+  }
+  if (available.length) {
+    list.append(sectionHeader(t("pmBrowseSection"), available.length, "browse", root, ctx));
+    if (!collapsedSections.has("browse")) {
+      for (const p of available) list.append(buildAvailableRow(p, root, ctx));
+    }
   }
 
   // VS Code「Reload Required」同款：启用/导入后贡献点未实时生效 → 横幅一键刷新。
@@ -436,13 +578,59 @@ function renderList(root: HTMLElement, ctx: ActivityContext): void {
   }
 }
 
-/** 伪行（注册表占位记录）判定。 */
-function isRegistryRow(p: UserPlugin): boolean {
-  return p.id.startsWith("__reg.");
-}
-
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] as string);
+}
+
+/* ---- 查看/编辑源码入口 ---- */
+
+/** 注册表伪行的下载地址里的 k（即随包 bundle 文件名）；真实行用记录 id。 */
+function viewerFilename(p: UserPlugin): string {
+  const k = p.origin?.match(/[?&]k=([A-Za-z0-9._-]+)/)?.[1];
+  return `${k ?? p.id.replace(/^(file|url)\./, "")}.js`;
+}
+
+/** 已安装行：打开查看器（内置种子只读预览，外部插件可编辑保存重载）。 */
+function openInstalledViewer(p: UserPlugin, root: HTMLElement, ctx: ActivityContext): void {
+  void getPluginSource(p.id).then((code) => {
+    openCodeViewer({
+      filename: viewerFilename(p),
+      code,
+      editable: p.source !== "builtin",
+      edited: !!p.editedCode,
+      onRestore: async () => {
+        await savePluginEditedCode(p.id, null);
+        ctx.toast("ok", t("pmCodeRestored", { name: shortName(p) }));
+        renderList(root, ctx);
+      },
+      onSave: async (next) => {
+        try {
+          await savePluginEditedCode(p.id, next);
+          const rec = listUserPlugins().find((x) => x.id === p.id);
+          if (rec?.error) throw new Error(rec.error);
+          ctx.toast("ok", t("pmCodeSaved", { name: shortName(p) }));
+        } catch (e) {
+          ctx.toast("error", t("pmCodeSaveFailed", { msg: e instanceof Error ? e.message : String(e) }));
+        }
+        renderList(root, ctx);
+      },
+      onReload: async (next) => {
+        // 「重新加载」先落盘当前缓冲区（含未点保存的编辑），再重启贡献点：
+        // savePluginEditedCode 对已启用插件内部就是 enablePlugin（撤销旧注册 + 重 eval，幂等）。
+        try {
+          await savePluginEditedCode(p.id, next);
+        } catch (e) {
+          ctx.toast("error", t("pmCodeSaveFailed", { msg: e instanceof Error ? e.message : String(e) }));
+          renderList(root, ctx);
+          return;
+        }
+        const rec = listUserPlugins().find((x) => x.id === p.id);
+        if (rec?.error) ctx.toast("error", t("pmEnableFailedReason", { name: shortName(p), msg: rec.error }));
+        else ctx.toast("ok", t("pmCodeReloaded", { name: shortName(p) }));
+        renderList(root, ctx);
+      },
+    });
+  });
 }
 
 function buildRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContext): HTMLElement {
@@ -525,7 +713,7 @@ function buildRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContext): HTMLE
     } else {
       const before = viewIds();
       void enablePlugin(p.id).then(() => {
-        if (p.error) ctx.toast("error", t("pmEnableFailed", { name: shortName(p), msg: p.error }));
+        if (p.error) ctx.toast("error", t("pmEnableFailedReason", { name: shortName(p), msg: p.error }));
         markIfNeedsReload(p, before);
         renderList(root, ctx);
       });
@@ -551,7 +739,7 @@ function buildRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContext): HTMLE
           } else {
             const before = viewIds();
             void enablePlugin(p.id).then(() => {
-              if (p.error) ctx.toast("error", t("pmEnableFailed", { name: shortName(p), msg: p.error }));
+              if (p.error) ctx.toast("error", t("pmEnableFailedReason", { name: shortName(p), msg: p.error }));
               markIfNeedsReload(p, before);
               renderList(root, ctx);
             });
@@ -559,13 +747,20 @@ function buildRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContext): HTMLE
         },
       },
     ];
+    items.push({
+      label: p.source === "builtin" ? t("pmCodeView") : t("pmCodeEdit"),
+      onClick: () => openInstalledViewer(p, root, ctx),
+    });
     if (p.source !== "builtin") {
       items.push({
         label: t("pmRemove"),
         danger: true,
         onClick: () => {
-          removePlugin(p.id);
-          renderList(root, ctx);
+          void confirmDialog({ title: t("pmRemove"), message: t("pmRemoveConfirm", { name: shortName(p) }) }).then((ok) => {
+            if (!ok) return;
+            removePlugin(p.id);
+            renderList(root, ctx);
+          });
         },
       });
     }
@@ -581,7 +776,7 @@ function buildRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContext): HTMLE
 
 /** 注册表条目行（统一列表里的「未安装」项）：名称 + 描述 + 悬停「下载」按钮；点击即经 importFromUrl 安装并启用。 */
 function buildAvailableRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContext): HTMLElement {
-  const name_ = p.name;
+  const name_ = displayName(p);
   const url = p.origin ?? "";
   const row = document.createElement("div");
   row.className = `${NS}-row is-uninstalled`;
@@ -598,7 +793,8 @@ function buildAvailableRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContex
   const name = document.createElement("span");
   name.className = `${NS}-name`;
   name.textContent = name_;
-  name.title = url;
+  // p.name 即 meta 中文名；EN 模式标题行显英文名，tooltip 补另一语名与下载地址。
+  name.title = isZh() ? url : `${p.name} (${url})`;
   const vendor = document.createElement("span");
   vendor.className = `${NS}-vendor`;
   vendor.textContent = t("pmSrcRegistry");
@@ -615,18 +811,37 @@ function buildAvailableRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContex
 
   const acts = document.createElement("div");
   acts.className = `${NS}-rowacts`;
+  const preview = document.createElement("button");
+  preview.type = "button";
+  preview.className = `${NS}-btn`;
+  preview.textContent = t("pmCodePreview");
+  preview.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    void (async () => {
+      try {
+        const abs = new URL(url, window.location.href).href;
+        const r = await fetch(abs, { cache: "no-cache" });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        openCodeViewer({ filename: viewerFilename(p), code: await r.text(), editable: false });
+      } catch (e) {
+        ctx.toast("error", t("pmCodePreviewFailed", { msg: e instanceof Error ? e.message : String(e) }));
+      }
+    })();
+  });
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = `${NS}-btn primary`;
-  const busy = downloadingNames.has(name_);
-  btn.textContent = busy ? t("pmDownloading") : t("pmDownload");
-  btn.disabled = busy;
+  btn.textContent = t("pmDownload");
   btn.addEventListener("click", (ev) => {
     ev.stopPropagation();
-    if (downloadingNames.has(name_)) return;
-    downloadingNames.add(name_);
-    renderList(root, ctx);
+    if (downloadingUrls.has(url)) return;
+    downloadingUrls.add(url);
+    // busy 态只写在这颗按钮元素上：重绘会重建整行 DOM，新按钮天然回到「下载」初始态——
+    // loading 不再经全局名字集合广播（同名已安装行曾被误标、且异常路径漏清账会永久卡「下载中」）。
+    btn.disabled = true;
+    btn.textContent = t("pmDownloading");
     void (async () => {
+      // before 必须在 await 前抓：下载完成后种子视图可能已注册，晚抓就漏判「需重载」。
       const before = viewIds();
       try {
         const r = await importFromUrl(url);
@@ -634,20 +849,26 @@ function buildAvailableRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContex
           ctx.toast("ok", t("pmDownloaded", { name: name_ }));
           if (r.id) {
             const rec = listUserPlugins().find((pp) => pp.id === r.id);
-            if (rec) markIfNeedsReload(rec, before);
+            if (rec) markDownloadedNeedsReload(rec, before);
           }
+          // 下载即启用完成后强刷注册表：host 侧枚举可能滞后（上游新增项都靠它），
+          // 到位后 renderList 重算 isInstalled，把仍显示「可下载」的多余行抹掉。
+          await fetchRegistry(true).catch(() => {});
         } else {
           ctx.toast("error", t("pmDownloadFailed", { name: name_, msg: r.error ?? "" }));
         }
       } catch (err) {
         ctx.toast("error", t("pmDownloadFailed", { name: name_, msg: err instanceof Error ? err.message : String(err) }));
       } finally {
-        downloadingNames.delete(name_);
+        downloadingUrls.delete(url);
+        // 本按钮若已被重绘替换则无所谓；仍是活节点就恢复可点（失败重试路径）。
+        btn.disabled = false;
+        btn.textContent = t("pmDownload");
         renderList(root, ctx);
       }
     })();
   });
-  acts.append(btn);
+  acts.append(preview, btn);
   row.append(acts);
   return row;
 }
@@ -791,6 +1012,12 @@ function buildChrome(host: HTMLElement, ctx: ActivityContext): { cleanup: () => 
         },
       },
       {
+        label: t("pmRefreshRegistry"),
+        onClick: () => {
+          void fetchRegistry(true).then(() => renderList(root, ctx));
+        },
+      },
+      {
         label: t("pmEnableAll"),
         onClick: () => {
           const targets = listUserPlugins().filter((p) => !p.enabled);
@@ -814,6 +1041,7 @@ function buildChrome(host: HTMLElement, ctx: ActivityContext): { cleanup: () => 
   return {
     cleanup() {
       closeActiveMenu();
+      closeCodeViewer();
       host.replaceChildren();
     },
     rerender() {
@@ -830,6 +1058,8 @@ function buildChrome(host: HTMLElement, ctx: ActivityContext): { cleanup: () => 
  */
 function renderManager(el: HTMLElement, ctx: ActivityContext): { cleanup: () => void; rerender: () => void } {
   injectStyles();
+  // 本视图可能挂在浮窗（独立 body）里——面板树内的 <confirm-dialog> 实例够不到，需兜底宿主。
+  ensureGlobalDialogHost();
   el.classList.add(`${NS}-view`);
 
   const inner = document.createElement("div");

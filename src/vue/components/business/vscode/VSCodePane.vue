@@ -1536,8 +1536,31 @@ const allActViews = computed<ActBarView[]>(() => [
     .filter((v) => !v.when || v.when(extCtx))
     .map((v) => ({ id: v.id, title: activityText(v.title), fullTitle: activityText(v.title), icon: v.icon })),
 ]);
+/**
+ * 「扩展视图」清单只列**当前注册中**的视图：插件被禁用后其视图已从注册表撤销，
+ * 若仍沿用持久化的 hidden 名单参与计数/展示，会出现「(3/3) 却一个都不勾」的鬼影条目——
+ * 用户重新启用插件时旧隐藏态还会直接生效，看起来像「勾选没反应」。
+ */
+const registeredExtIds = computed(() => new Set(extViews.value.map((v) => v.id)));
 /** 实际渲染的图标：全部视图去掉被隐藏的。 */
 const actBarItems = computed<ActBarView[]>(() => allActViews.value.filter((v) => !vsState.activityBar.hidden.includes(v.id)));
+
+// 把已注销/未注册插件遗留在持久化 hidden 名单里的 id 收敛掉。
+// ⚠️ 插件 bootstrap（enablePlugin 异步 eval）可能晚于本组件挂载——用 watch 持续收敛而非只跑一次，
+// 但只在名单真正变短时写回，避免与插件注册互相触发死循环。
+watch(
+  () => [extViews.value.map((v) => v.id).join(","), vsState.activityBar.hidden.join(",")] as const,
+  () => {
+    const ids = registeredExtIds.value;
+    // 内置视图 id 不在扩展注册表里，白名单外单独放行。
+    const builtinIds = new Set(["files", "search", "git", "host.plugin-manager"]);
+    const stale = vsState.activityBar.hidden.filter((id) => !ids.has(id) && !builtinIds.has(id));
+    if (!stale.length) return;
+    vsState.activityBar.hidden = vsState.activityBar.hidden.filter((id) => !stale.includes(id));
+    persistVSCode();
+  },
+  { immediate: true },
+);
 
 /**
  * 「已启用但因未打开项目而被 when() 挡住」的扩展数——用于顶栏提示。
@@ -1633,6 +1656,8 @@ const actMenuItems = computed<MenuItem[]>(() => {
       label: v.title,
       icon: v.icon ?? "",
       title: v.fullTitle,
+      // 注册中的视图默认显示；仅尊重仍在注册表内的显式隐藏（stale watch 会即时清理，
+      // 禁用→重新启用的插件因此总是以「显示」回归）。
       checked: !vsState.activityBar.hidden.includes(v.id),
       onClick: () => toggleActView(v.id),
     }));
@@ -1747,13 +1772,17 @@ const extMenuItems = computed<MenuItem[]>(() => {
     ...validStatusItems.value,
     ...listExtensionMenuItems(),
   ].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-  return merged.map((item) => {
-    const running = isCommandRunning(item.commandId);
+  return merged.map((reg) => {
+    const running = isCommandRunning(reg.commandId);
     return {
-      label: item.text,
-      icon: item.icon || viewIconForCommand(extViews.value, item.commandId),
-      title: running ? t("vsExtRunning") : item.tooltip,
-      disabled: !running && !!item.when && !item.when(ctx),
+      label: reg.text,
+      icon: reg.icon || viewIconForCommand(extViews.value, reg.commandId),
+      title: running ? t("vsExtRunning") : reg.tooltip,
+      // 实时 tooltip：textFn（插件的节流进度读取器）优先，静态字段兜底。
+      // 此前插件靠「进度→同 id 重新 register」刷新文案，数组引用每 tick 都换、
+      // 菜单跟着重定位重渲染抖动——textFn 把更新收敛到纯文本节点。
+      hintFn: () => (running ? t("vsExtRunning") : reg.textFn?.() ?? reg.tooltip),
+      disabled: !running && !!reg.when && !reg.when(ctx),
       running,
       onClick: () => {
         if (running) {
@@ -1761,10 +1790,10 @@ const extMenuItems = computed<MenuItem[]>(() => {
           return;
         }
         try {
-          const r = executeCommand(item.commandId, ctx);
+          const r = executeCommand(reg.commandId, ctx);
           // 命令返回 Promise（异步长任务）→ 挂上失败兜底提示；成功通知归插件自己发。
           if (r instanceof Promise) {
-            r.catch((e) => toast("error", `${item.text}: ${(e as Error)?.message ?? String(e)}`));
+            r.catch((e) => toast("error", `${reg.text}: ${(e as Error)?.message ?? String(e)}`));
           }
         } catch (e) {
           toast("error", (e as Error).message);

@@ -1255,12 +1255,26 @@ async function mountView(el, ctx) {
 
 /* ------------------------------------------------------------------ 命令 + 「扩展」菜单入口 */
 
+/** 优先用调用点自带的 ctx；否则回退到最近挂载过的视图 ctx（模块级，卸载后仍持有）。
+ *  都拿不到时抛错——宿主「扩展」菜单的 onClick 有 try/catch，会把消息渲染成 error toast。 */
+function notify(level, msg, preferredCtx) {
+  const c = preferredCtx ?? currentCtx ?? currentWbCtx;
+  if (c?.toast) return c.toast(level, msg);
+  throw new Error(msg);
+}
+
 function registerContributions(api) {
   api.commands.register(CMD_SUMMARY, (statusCtx) => {
-    const dir = statusCtx?.projectDir ?? currentCtx?.projectDir;
-    if (!dir) return api.toast?.("info", "未打开项目。");
+    // 编辑器与工作台是两套注册表/两条菜单：statusCtx 只来自被点击的那一侧，
+    // 项目目录需兼顾另一侧的上下文。
+    const dir = statusCtx?.projectDir ?? currentCtx?.projectDir ?? currentWbCtx?.projectDir;
+    if (!dir) return notify("info", "未打开项目。", statusCtx);
     const st = projState(dir);
-    api.toast(st.hits ? "ok" : "info", `能力手册：watcher 累计命中 ${st.hits} 次${st.savedAt ? `（最近 ${new Date(st.savedAt).toLocaleTimeString()}）` : ""}`);
+    notify(
+      st.hits ? "ok" : "info",
+      `能力手册：watcher 累计命中 ${st.hits} 次${st.savedAt ? `（最近 ${new Date(st.savedAt).toLocaleTimeString()}）` : ""}`,
+      statusCtx
+    );
     return { hits: st.hits };
   });
   refreshMenuText();

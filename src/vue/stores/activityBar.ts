@@ -288,6 +288,11 @@ export interface StatusBarItem {
   id: string;
   /** 按钮文案。 */
   text: string;
+  /**
+   * 实时文案读取器（可选）：宿主每次渲染时调用，取代「进度变化→同 id 反复 register」。
+   * 提供时 text 只作首帧/兜底值；节流由插件自行把握（如每 N 个文件才更新一次）。
+   */
+  textFn?: () => string;
   /** 点击时执行的命令 id（须已通过 commands.register 注册，否则点击为 no-op）。 */
   commandId: string;
   /** 悬浮提示；缺省用 commandId。 */
@@ -405,6 +410,8 @@ export interface WorkbenchStatusContext {
 export interface WorkbenchStatusBarItem {
   id: string;
   text: string;
+  /** 实时文案读取器，语义同 StatusBarItem.textFn（渲染期调用，免反复 register）。 */
+  textFn?: () => string;
   commandId: string;
   tooltip?: string;
   /** 条目图标（内置 icon 集名），「扩展」弹窗菜单里展示。 */

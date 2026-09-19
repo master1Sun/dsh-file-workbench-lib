@@ -49,5 +49,7 @@ for (const f of files) {
 }
 await cp(join(root, "package.json"), join(dstRoot, "package.json"), { force: true });
 await cp(join(root, "cordis.patch.yml"), join(dstRoot, "cordis.patch.yml"), { force: true });
-console.log(`sync-to-profile: 已同步 ${files.length + 2} 项 → ${dstLib}`);
+// 注册表离线兜底：「检查远端」失败时 host 读包根 registry.json（见 routes-plugins.ts）。
+await cp(join(root, "registry.json"), join(dstRoot, "registry.json"), { force: true });
+console.log(`sync-to-profile: 已同步 ${files.length + 3} 项 → ${dstLib}`);
 console.log("完成！请重启 `dsh web` 使新版本生效。");

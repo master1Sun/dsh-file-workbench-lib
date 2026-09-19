@@ -31,7 +31,7 @@ import {
 
 /** 内置插件种子（运行时经 host /plugin-index + bundle manifest 推导，不再构建期内嵌）。 */
 interface BuiltinSeed {
-  /** 稳定 key：插件裸名（plugins/packages/<name>.js 的文件名）。 */
+  /** 稳定 key：插件裸名（plugins/<name>.js 的文件名）。 */
   id: string;
   name: string;
   version: string;
@@ -61,6 +61,8 @@ export interface UserPlugin {
   descriptionEn?: string;
   /** 外部导入=完整插件源码文本（自包含 bundle）；内置种子=相对获取路径 `plugin-src/<id>.js`（启用时经 host 取回，见 resolvePluginCode）。 */
   code: string;
+  /** 用户编辑后的源码覆盖（查看器「保存」写入；优先于 code 执行，恢复原版即删除此字段）。 */
+  editedCode?: string;
   enabled: boolean;
   /** 至少成功激活过一次（注册到贡献点）。bootstrap 只自动恢复此项，避免从未生效的坏插件每次加载都弹错。 */
   activated?: boolean;
@@ -199,8 +201,8 @@ export function readPluginManifest(code: string): LoaderManifest | null {
 
 /**
  * 「极简直调形态」插件的清单回退：这类文件没有 `__ModuleLoader__.manifest(...)` 声明，
- * 但常按 packages/*.js 约定写一份顶层 `const meta = {...}`（为可导入而去掉了 export 关键字）。
- * 这里把它补上 `export` 前缀后复用 pack.mjs 同源的 extractMeta 静态求值——纯正则读字面量，不执行代码。
+ * 但常按 plugins/*.js 约定写一份顶层 `const meta = {...}`（为可导入而去掉了 export 关键字）。
+ * 这里把它补上 `export` 前缀后复用 pack-core 同源的 extractMeta 静态求值——纯正则读字面量，不执行代码。
  */
 function readPlainMeta(code: string, baseName: string): Omit<PluginManifest, "id"> | null {
   if (!/^\s*const\s+meta\s*=\s*\{/m.test(code)) return null;
@@ -246,6 +248,8 @@ function revokeContributions(set: ContributionSet | undefined): void {
 const PLUGIN_MARK_RE = /__ModuleLoader__|__dshFileWorkbench(?:VSCode|Workbench)__/;
 /** 从 loader bundle 文本里嗅探登记 id（`window.__ModuleLoader__.load({ id: "..."`）。 */
 const LOADER_ID_RE = /__ModuleLoader__\.load\(\s*\{\s*id\s*:\s*(["'])((?:(?!\1)[\s\S])*)\1/;
+/** 回退特征：打包壳把清单放在 manifest({"id":"dsh-fw.x",...) 首条声明里（load 的 id 可能换行/变形）。 */
+const MANIFEST_ID_RE = /__ModuleLoader__\.manifest\(\s*\{\s*"id"\s*:\s*"((?:[^"\\]|\\.)*)"/;
 
 export interface PluginCheckResult {
   ok: boolean;
@@ -261,20 +265,20 @@ export interface PluginCheckResult {
  */
 export function validatePluginSource(code: string): PluginCheckResult {
   if (!code.trim()) return { ok: false, error: t("pmCheckEmpty") };
-  // 「源码形态」（plugins/packages/*.js 约定，带顶层 export）也是合法插件——由
+  // 「源码形态」（plugins/*.js 约定，带顶层 export）也是合法插件——由
   // packSourceIfRaw 现场打包成 loader bundle，这里按特征直接放行。
   if (isSourceForm(code)) return { ok: true };
   const m = code.match(LOADER_ID_RE);
   return {
     ok: PLUGIN_MARK_RE.test(code),
     error: t("pmCheckNotPlugin"),
-    loaderId: m?.[2]?.trim() || undefined,
+    loaderId: m?.[2]?.trim() || code.match(MANIFEST_ID_RE)?.[1]?.trim() || undefined,
   };
 }
 
 /**
- * 「源码内部自动打包」：识别未打包的 packages/*.js 源码形态（顶层 export const meta 等），
- * 用与 plugins/pack.mjs 同构的规则（见 shared/plugin-meta）现场包上 __ModuleLoader__ 外壳。
+ * 「源码内部自动打包」：识别未打包的 plugins/*.js 源码形态（顶层 export const meta 等），
+ * 用与构建期打包（scripts/pack-plugins.mjs）同构的规则（见 shared/plugin-meta）现场包上 __ModuleLoader__ 外壳。
  * 已是 loader bundle / 极简形态时原样返回。抛错 = 源码不符合约定，调用方转成导入失败提示。
  */
 function packSourceIfRaw(code: string, baseName: string): { code: string; manifest: PluginManifest | null } {
@@ -374,11 +378,71 @@ function setIsEmpty(s: ContributionSet): boolean {
 }
 
 /**
+ * 对真实 API 对象**就地**临时替换注册类方法为吞掉桩（引用不变），返回 restore()。
+ * 插件闭包若缓存了探测桩，正式 apply 的注册会落进捕获表；restore() 先还原真实方法、
+ * 再把吞掉的注册重放进真 registry（同 id 覆盖语义，幂等）。每次现取 window 的插件
+ * 走同一入口也无副作用——注册只是晚一拍生效。
+ */
+function sandboxRealApis(
+  realVs: unknown,
+  realWb: unknown,
+): { restore: () => void } | undefined {
+  const vs = realVs as Record<string, Record<string, unknown>> | undefined;
+  const wb = realWb as Record<string, Record<string, unknown>> | undefined;
+  if (!vs?.activityBar && !wb?.activityBar) return undefined;
+  const saved: Array<{ ns: Record<string, unknown>; name: string; key: string; orig: unknown }> = [];
+  const noop = (..._: unknown[]): void => {};
+  const captured = new Map<string, () => void>();
+  const override = (ns: Record<string, unknown> | undefined, name: string, key: string, impl: unknown) => {
+    if (!ns) return;
+    const target = ns[key];
+    if (typeof target !== "function") return;
+    saved.push({ ns, name, key, orig: target });
+    ns[key] = impl;
+  };
+  // register 类调用先吞掉并记下「重放」闭包（按 name.key:id 去重，同 id 后写覆盖）。
+  // ⚠️ orig 必须在 override 时传入捕获——restore 会先清空 saved 再重放，懒查必落空。
+  const swallowRegister = (name: string, key: string, orig: (...a: unknown[]) => unknown) =>
+    (item: { id?: string } | string, handler?: unknown) => {
+      const id = typeof item === "string" ? item : item?.id ?? "";
+      captured.set(`${name}.${key}:${id}`, () => {
+        orig(...(typeof item === "string" ? [item, handler] : [item]));
+      });
+    };
+  const regSwallow = (ns: Record<string, unknown> | undefined, name: string, key: string) => {
+    if (!ns || typeof ns[key] !== "function") return;
+    const impl = swallowRegister(name, key, ns[key] as (...a: unknown[]) => unknown);
+    override(ns, name, key, impl);
+  };
+  regSwallow(vs?.activityBar, "activityBar", "register");
+  override(vs?.activityBar, "activityBar", "unregister", noop);
+  regSwallow(vs?.commands, "commands", "register");
+  override(vs?.commands, "commands", "unregister", noop);
+  regSwallow(vs?.statusbar, "statusbar", "register");
+  override(vs?.statusbar, "statusbar", "unregister", noop);
+  regSwallow(vs?.statusbar, "statusbar", "registerMenu");
+  override(vs?.statusbar, "statusbar", "unregisterMenu", noop);
+  regSwallow(wb?.activityBar, "wbActivityBar", "register");
+  override(wb?.activityBar, "wbActivityBar", "unregister", noop);
+  regSwallow(wb?.statusbar, "wbStatusbar", "register");
+  override(wb?.statusbar, "wbStatusbar", "unregister", noop);
+  return {
+    restore: () => {
+      for (const s of saved.splice(0)) s.ns[s.key] = s.orig;
+      // 兜底：apply 若在沙箱期内只注册过一次（restore 后不再重跑），把吞掉的注册重放进真 API。
+      for (const fn of captured.values()) fn();
+      captured.clear();
+    },
+  };
+}
+
+/**
  * 单模块预检 + 执行。
  *
  * 1) 版本预检：required > ACTIVITY_API_VERSION → 直接抛错，错误文案带具体需求/当前版本。
  * 2) 探测：把两个注入 API 临时换成 no-op 桩跑 factory.apply()，拦下探测期的真实注册副作用。
  *    多数插件的 apply 走 waitForApi 异步轮询，桩里没有真实 API → 轮询自然落空，零污染。
+ *    同步直取型（内置 bundle）会把桩缓存进闭包——正式执行改走 sandboxRealApis 沙箱重放兜底。
  * 3) 返回「注册确认」句柄：正式执行后 250ms 窗口内对比四张注册表快照；仍无任何贡献点 → 撤销
  *    本次疑似半截注册并 reject（缺激活代码 / API 用错），由 enablePlugin await 后统一走失败路径。
  *    窗口期同时兜住 waitForApi 首次立即回调的同步注册路径。无确认需要时返回 null。
@@ -395,48 +459,56 @@ function probeAndApply(mod: LoaderModule, required: number): Promise<void> | nul
   const noop = () => {};
   const realVs = w[V_KEY];
   const realWb = w[W_KEY];
-  // ⚠️ 探测桩必须带上 __proxy 标记：内置插件的 apply 直调 window API，若它缓存了探测期对象
-  // 引用（const api = window[X]），正式执行时不会重取——没有标记，Vue 侧 adoptContributionProxy
-  // 认不出它是代理 → 不 rebind/flush → 注册永远落在 no-op 上，表现为「未注册任何贡献点」。
-  // 真实 API 从不带该字段（见 activityBar.ts / contributionProxy.ts）。
-  w[V_KEY] = {
+  const stubVs = {
     __proxy: true,
     apiVersion: ACTIVITY_API_VERSION,
     activityBar: { register: noop, unregister: noop },
     commands: { register: noop, unregister: noop, execute: noop, list: () => [], has: () => false },
     statusbar: { register: noop, unregister: noop, list: () => [], registerMenu: noop, unregisterMenu: noop, listMenu: () => [] },
   };
-  w[W_KEY] = {
+  const stubWb = {
     __proxy: true,
     apiVersion: ACTIVITY_API_VERSION,
     activityBar: { register: noop, unregister: noop },
     statusbar: { register: noop, unregister: noop, list: () => [] },
     backgroundTasks: { start: () => ({ step: noop, updateLabel: noop, done: noop, fail: noop }), clearFinished: async () => {}, clearAll: async () => {} },
   };
+  // ⚠️ 探测桩带 __proxy 标记仅作防御：真实 API 从不带该字段（见 activityBar.ts /
+  // contributionProxy.ts），万一 Vue 侧重挂载撞上探测窗口，认领端也不会把桩当真实 API。
+  // 插件缓存桩引用的主路径由下方 sandboxRealApis 沙箱重放兜底（见 probeAndApply 注释）。
+  w[V_KEY] = stubVs;
+  w[W_KEY] = stubWb;
   try {
     const probed = mod.factory(() => undefined);
     if (typeof probed?.apply === "function") probed.apply();
   } finally {
     w[V_KEY] = realVs;
     w[W_KEY] = realWb;
+
+    // 正式执行。⚠️ 「缓存了桩引用」无从外部探测（闭包不可见），而换 window 键救不回缓存引用
+    // ——统一对**真实 API 对象**就地降级沙箱：插件缓存的若是桩，注册被沙箱吞掉并在 restore()
+    // 重放进真 registry；每次现取 window 的插件本就正常。register 幂等，多跑一遍无副作用。
+    const sb = sandboxRealApis(realVs, realWb);
+    const before = snapshotContributions();
+    try {
+      const exportsObj = mod.factory(() => undefined);
+      if (typeof exportsObj?.apply === "function") exportsObj.apply();
+    } finally {
+      sb?.restore();
+    }
+
+    const set = diffContributions(before, snapshotContributions());
+    if (!setIsEmpty(set)) return null;
+    // 同步窗口没抓到 → 等一拍 waitForApi 首跳 / microtask 注册的迟到贡献。
+    return new Promise<void>((resolve, reject) => {
+      setTimeout(() => {
+        const late = diffContributions(before, snapshotContributions());
+        if (!setIsEmpty(late)) return resolve();
+        revokeContributions(late);
+        reject(new Error(t("pmCheckNoContrib")));
+      }, 250);
+    });
   }
-
-  // 正式执行。
-  const before = snapshotContributions();
-  const exportsObj = mod.factory(() => undefined);
-  if (typeof exportsObj?.apply === "function") exportsObj.apply();
-
-  const set = diffContributions(before, snapshotContributions());
-  if (!setIsEmpty(set)) return null;
-  // 同步窗口没抓到 → 等一拍 waitForApi 首跳 / microtask 注册的迟到贡献。
-  return new Promise<void>((resolve, reject) => {
-    setTimeout(() => {
-      const late = diffContributions(before, snapshotContributions());
-      if (!setIsEmpty(late)) return resolve();
-      revokeContributions(late);
-      reject(new Error(t("pmCheckNoContrib")));
-    }, 250);
-  });
 }
 
 /* --------------------------------------------------------------- 公共 API */
@@ -454,6 +526,7 @@ const fetchedBuiltinCode = new Map<string, string>();
  *  - 内置种子：code 只是相对获取路径（真源码由 host /plugin-src 提供），启用时取回并缓存。
  */
 async function resolvePluginCode(p: UserPlugin): Promise<string> {
+  if (p.editedCode) return p.editedCode;
   const refMatch = /^plugin-src\/(.+)\.js$/.exec(p.code);
   if (p.source !== "builtin" || !refMatch) return p.code;
   const k = decodeURIComponent(refMatch[1]);
@@ -465,6 +538,34 @@ async function resolvePluginCode(p: UserPlugin): Promise<string> {
   if (!code.trim()) throw new Error("内置插件源码为空");
   fetchedBuiltinCode.set(k, code);
   return code;
+}
+
+/** 查看器取某记录的完整源码文本（内置种子按引用现拉；编辑过则返回编辑版）。 */
+export async function getPluginSource(id: string): Promise<string> {
+  const p = findPlugin(id);
+  if (!p) return "";
+  return resolvePluginCode(p);
+}
+
+/**
+ * 保存用户在查看器里编辑的源码并立即重载生效：editedCode 覆盖执行源，
+ * enablePlugin 先撤销旧贡献再 eval——「改完即见」，无需重启。传 null 恢复原版。
+ */
+export async function savePluginEditedCode(id: string, code: string | null): Promise<void> {
+  const p = findPlugin(id);
+  if (!p) return;
+  if (code) {
+    const check = validatePluginSource(code);
+    if (!check.ok) throw new Error(check.error || t("pmCheckNotPlugin"));
+  }
+  p.editedCode = code ?? undefined;
+  if (p.source === "builtin") {
+    // 内置种子的执行缓存也要同步替换，否则重启用仍跑旧 bundle。
+    const ref = /^plugin-src\/(.+)\.js$/.exec(p.code);
+    if (ref && code) fetchedBuiltinCode.set(decodeURIComponent(ref[1]), code);
+  }
+  if (p.enabled) await enablePlugin(id);
+  else await persistNow();
 }
 
 /** 启用一个插件：执行其代码并把贡献点记入 contributions。 */
@@ -561,6 +662,18 @@ export async function importFromFile(file: File): Promise<ImportResult> {
   // file/url 主键一律带来源前缀命名空间——外部插件的 loader id（如 dsh-fw.linter）可能与
   // 内置种子 key 撞名，裸 id 会让快照记录被种子合并顶掉（见 ensureBuiltinSeeds）。
   const id = normalizeId(`file.${rawId}`) || `file-${Date.now()}`;
+  // 同文件重复导入（与「从 URL 导入」互为 twin，见彼处说明）：命中同源码既有记录时只重新
+  // 启用并原位刷新内容，不再新建第二份记录。
+  const urlTwin = plugins.value.find((x) => x.source === "url" && (x.id === `url.${rawId}` || x.code === code));
+  if (urlTwin) {
+    // 原位刷新内容（不覆盖 origin——仍走 URL 通道），并清掉旧的编辑版；
+    // enablePlugin 读新 code 后内部会 persistNow，快照随之落盘。
+    urlTwin.code = code;
+    urlTwin.editedCode = undefined;
+    await enablePlugin(urlTwin.id);
+    const trec = findPlugin(urlTwin.id);
+    return { ok: !!trec?.enabled, error: trec?.error, id: urlTwin.id };
+  }
   const manifest = packedManifest ?? readPluginManifest(code) ?? readPlainMeta(code, file.name);
   upsert({
     id,
@@ -583,10 +696,17 @@ export async function importFromFile(file: File): Promise<ImportResult> {
 export async function importFromUrl(url: string): Promise<ImportResult> {
   const clean = url.trim();
   if (!clean) return { ok: false, error: t("pmCheckEmpty") };
+  // 注册表条目可能是同源相对地址（本地 registry.json → /plugin-src?k=），先解析为绝对 URL。
+  let absUrl = clean;
+  try {
+    absUrl = new URL(clean, window.location.href).href;
+  } catch {
+    /* 非法 URL 交给 host 侧统一报错 */
+  }
   const res = await fetch(`${apiBase}/fetch-plugin`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ url: clean }),
+    body: JSON.stringify({ url: absUrl }),
   });
   const payload = (await res.json().catch(() => ({ ok: false, error: "bad response" }))) as {
     ok: boolean;
@@ -604,7 +724,32 @@ export async function importFromUrl(url: string): Promise<ImportResult> {
   }
   const check = validatePluginSource(code);
   if (!check.ok) return { ok: false, error: check.error };
+  // 注册表候选本就随包发布为内置种子：bundle 的 loader id（dsh-fw.<name>）撞见在位种子时，
+  // 「下载」等价于「启用该内置插件」——直接激活种子记录，不留 url. 克隆（克隆正是
+  // 「下载后仍显示未安装行」的元凶：同功能双记录）。
+  // ⚠️ 必须同时按文件名兜底比对：源码形态的候选（plugins/ 里未打包的 .js）没有
+  // manifest 声明，loaderId 抽不出来——只认 loaderId 会让捷径整个漏掉、照建克隆。
+  const seedKey =
+    check.loaderId?.startsWith("dsh-fw.") ? check.loaderId.slice("dsh-fw.".length) : baseName.replace(/\.(c|m)?js$/i, "");
+  if (seedKey) {
+    const seed = findPlugin(seedKey);
+    if (seed?.source === "builtin") {
+      await enablePlugin(seedKey);
+      const srec = findPlugin(seedKey);
+      return { ok: !!srec?.enabled, error: srec?.error, id: seedKey };
+    }
+  }
+  // 同一 bundle 经不同通道重复导入会撞主键（先「从 URL 导入」再「导入本地文件」，或反之）：
+  // 命中同源码的既有记录时只重新启用，绝不 upsert 覆盖——否则会篡改另一通道的 origin/归属。
   const rawId = check.loaderId || baseName.replace(/\.(c|m)?js$/i, "");
+  const twin =
+    plugins.value.find((x) => x.source === "file" && (x.id === `file.${rawId}` || x.code === code)) ??
+    plugins.value.find((x) => x.source === "url" && x.id === `url.${rawId}` && x.origin === clean);
+  if (twin) {
+    await enablePlugin(twin.id);
+    const trec = findPlugin(twin.id);
+    return { ok: !!trec?.enabled, error: trec?.error, id: twin.id };
+  }
   const id = normalizeId(`url.${rawId}`) || `url-${Date.now()}`;
   const manifest = packedManifest ?? readPluginManifest(code) ?? readPlainMeta(code, baseName);
   upsert({

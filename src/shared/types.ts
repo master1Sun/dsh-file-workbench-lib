@@ -300,6 +300,8 @@ export interface MenuItem {
   icon?: string;
   /** 整行悬停提示（tooltip），如插件注册项的 tooltip。 */
   title?: string;
+  /** 实时提示读取器：菜单渲染每帧调用，替代「进度变化→重新 register」的抖动式更新。 */
+  hintFn?: () => string | undefined;
   disabled?: boolean;
   checked?: boolean;
   separator?: boolean;

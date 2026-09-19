@@ -31,6 +31,7 @@
     "lib",
     "cordis.patch.yml",
     "AGENTS.md",
+    "registry.json",
     "docs/activity-bar-plugin.md"
   ],
   "dsh": {

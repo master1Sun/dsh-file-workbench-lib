@@ -40,6 +40,9 @@ export const inject = [];
 const resultsByProject = new Map();
 /** projectDir → Promise（同一项目正在扫描时复用，避免重复劳动）。 */
 const scanningByProject = new Map();
+/** projectDir → "统计中 x/y…"：扫描进度只写这里，状态栏条目经 textFn 现取。
+ *  以同 id 反复 statusbar.register 刷文案会让宿主菜单整体重渲染、气泡位置抖动。 */
+const progressByProject = new Map();
 /** 最近一次扫描的汇总结果：runStats 完成 toast 直接引用，不重扫文件。 */
 let lastSummary = null;
 
@@ -225,7 +228,7 @@ function scanProject(dir, ctx) {
     const absList = rels.map((r) => joinRoot(dir, r));
     let lastLogged = 0;
     const measures = await measureAll(absList, (done, total) => {
-      emitStatus(ctx, `统计中 ${done}/${total}…`);
+      setProgress(ctx, `统计中 ${done}/${total}…`);
       // 每 ~10% 记一条步骤，避免任务日志被数千条刷爆
       if (task && (done - lastLogged >= Math.max(1, Math.floor(total / 10)) || done === total)) {
         lastLogged = done;
@@ -248,7 +251,10 @@ function scanProject(dir, ctx) {
     },
   );
   scanningByProject.set(dir, p);
-  p.finally(() => scanningByProject.delete(dir)).catch(() => {});
+  p.finally(() => {
+    scanningByProject.delete(dir);
+    progressByProject.delete(dir);
+  }).catch(() => {});
   return p;
 }
 
@@ -266,6 +272,30 @@ function ensureStatusRegistered(api) {
     order: 70,
     when: (c) => !!c.projectDir,
   });
+  // 摘要条目只注册一次：文案经 textFn 现取（进度 → 纯文本更新，不再换数组引用触发菜单重排）。
+  api.statusbar.register({
+    id: STATUS_ID,
+    text: "项目统计：未运行",
+    textFn: () => statusText(),
+    commandId: CMD_RUN,
+    tooltip: "点击重新统计当前项目",
+    order: 70,
+    when: (c) => !!c.projectDir,
+  });
+}
+
+/** 状态栏条目当前应展示的文案：扫描中显示进度，否则显示该项目最近一次结果摘要。 */
+function statusText() {
+  const dir = currentCtx?.projectDir ?? null;
+  return (dir && progressByProject.get(dir)) || defaultStatusText(dir);
+}
+
+/** 记录扫描进度（text 为空则清除，回到结果摘要文案）。 */
+function setProgress(ctx, text) {
+  const dir = ctx?.projectDir ?? null;
+  if (!dir) return;
+  if (text) progressByProject.set(dir, text);
+  else progressByProject.delete(dir);
 }
 
 /** 「统计项目」命令处理器：跑一次扫描，完成后切到「项目统计」视图并展示详情。 */
@@ -276,10 +306,10 @@ async function runStats(statusCtx) {
     try { ctx?.toast?.("info", "请先在文件编辑器里打开一个项目。"); } catch { /* noop */ }
     return;
   }
-  emitStatus(ctx, "统计中…");
+  setProgress(ctx, "统计中…");
   try {
     await scanProject(dir, ctx);
-    emitStatus(ctx, null);
+    setProgress(ctx, null);
     refreshView();
     focusStatsView();
     const s = lastSummary;
@@ -290,7 +320,7 @@ async function runStats(statusCtx) {
         : "项目统计完成，已在左侧展开详情。",
     );
   } catch (e) {
-    emitStatus(ctx, null);
+    setProgress(ctx, null);
     ctx.toast("error", `统计失败：${e?.message ?? e}。可点左下角任务按钮查看失败记录。`);
   }
 }
@@ -316,22 +346,7 @@ function focusStatsView() {
   tick();
 }
 
-/** 更新底部状态栏摘要文案（text 为空则恢复默认文案）。 */
-function emitStatus(ctx, text) {
-  const api = globalApi();
-  if (!api?.statusbar) return; // 桩/真 API 均可安全 register（幂等覆盖固定 id，非新增贡献点）
-  const dir = ctx?.projectDir ?? null;
-  const item = {
-    id: STATUS_ID,
-    text: text ?? defaultStatusText(dir),
-    commandId: CMD_RUN,
-    tooltip: "点击重新统计当前项目",
-    order: 70,
-    when: (c) => !!c.projectDir,
-  };
-  api.statusbar.register(item);
-}
-
+/** 该项目最近一次统计结果的摘要文案（无结果时回退「未运行」）。 */
 function defaultStatusText(dir) {
   const r = dir ? resultsByProject.get(dir) : null;
   if (!r || !Array.isArray(r.files) || !r.files.length) return "项目统计：未运行";
@@ -406,7 +421,7 @@ function mountView(el, ctx) {
 
   async function onProjectChanged(dir) {
     if (dir) await loadResult(dir);
-    emitStatus(ctx, null);
+    setProgress(ctx, null);
     render();
   }
 
@@ -414,7 +429,7 @@ function mountView(el, ctx) {
 
   (async () => {
     if (ctx.projectDir) await loadResult(ctx.projectDir);
-    emitStatus(ctx, null);
+    setProgress(ctx, null);
     render();
   })();
 

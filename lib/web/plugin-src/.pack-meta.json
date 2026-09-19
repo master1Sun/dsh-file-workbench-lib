@@ -9,6 +9,15 @@
     "descriptionEn": "DSH file editor plugin: activity bar view that toggles line bookmarks, lists current/all-project bookmarks and jumps to them. Uses v1 ctx.editor.createDecorations(category:bookmark) gutter marks + /persist per project. Counterpart of VS Code Bookmarks."
   },
   {
+    "name": "capability-guide",
+    "id": "dsh-fw.capability-guide",
+    "title": "能力手册",
+    "version": "",
+    "description": "示例插件：分区演示全部注入能力与宿主 HTTP API，可直接点跑，兼作开放能力的操作手册",
+    "nameEn": "Capability Guide",
+    "descriptionEn": "Sample plugin documenting every injection capability and host HTTP endpoint with runnable examples."
+  },
+  {
     "name": "find-references",
     "id": "dsh-fw.find-references",
     "title": "引用查找",
@@ -79,6 +88,15 @@
     "description": "从当前缓冲提取符号（函数/类/标题）并列成可跳转大纲",
     "nameEn": "Outline",
     "descriptionEn": "DSH file editor plugin: activity bar view that extracts symbols (functions/classes/headings) from the active buffer and jumps to them, based on the dsh-file-workbench-lib v1 injection API (window.__dshFileWorkbenchVSCode__)."
+  },
+  {
+    "name": "project-stats",
+    "id": "dsh-fw.project-stats",
+    "title": "项目统计",
+    "version": "",
+    "description": "一键统计当前项目的文件数、每个文件行数与总字节数，结果可在详情表格里点击查看",
+    "nameEn": "Project Stats",
+    "descriptionEn": "One-click project statistics: file count, per-file line counts and total bytes. Runs from the bottom Extensions menu, renders a sortable detail table, and remembers the last result per project."
   },
   {
     "name": "regex-highlight",

@@ -203,6 +203,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import * as api from "../../../composables/core/useApi";
 import { t } from "../../../composables/core/i18n";
+import { confirmDialog } from "../../../composables/core/dialog";
 import { toast } from "../../../composables/core/toast";
 import { useSearchStore, type SearchViewMode } from "../../../stores/search";
 import Icon from "../../common/Icon.vue";
@@ -471,7 +472,7 @@ async function confirmReplaceAll(): Promise<void> {
     q: q.value.trim(),
     r: replacement.value,
   });
-  if (!window.confirm(msg)) return;
+  if (!(await confirmDialog({ title: t("vsReplaceAll"), message: msg }))) return;
   replacing.value = true;
   try {
     const res = await api.batchReplace(q.value.trim(), replacement.value, {

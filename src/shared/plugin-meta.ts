@@ -1,13 +1,14 @@
 /**
- * 插件「源码形态」的解析与打包 —— 构建期（plugins/pack.mjs）与运行期（导入未打包源码时）共用。
+ * 插件「源码形态」的解析与打包 —— 构建期（scripts/pack-plugins.mjs 经 plugins/pack-core.mjs）
+ * 与运行期（导入未打包源码时）共用。
  *
- * 背景：`plugins/packages/*.js` 是带 `export const meta / export const inject / export function apply`
- * 三种顶层导出的源码约定；npm run build 时 pack.mjs 剥掉 export、包上 __ModuleLoader__ 外壳产出
- * plugins/lib/。用户把**源码**直接拖进「插件管理 → 导入」时，宿主对全局作用域 eval 会撞
- * `Unexpected token 'export'`。本模块让导入路径现场做与 pack.mjs 完全一致的转换，杜绝规则漂移。
+ * 背景：`plugins/*.js` 是带 `export const meta / export const inject / export function apply`
+ * 三种顶层导出的源码约定；npm run build 时 pack-plugins 剥掉 export、包上 __ModuleLoader__
+ * 外壳直接写入 lib/web/plugin-src/。用户把**源码**直接拖进「插件管理 → 导入」时，宿主对全局
+ * 作用域 eval 会撞 `Unexpected token 'export'`。本模块让导入路径现场做完全一致的转换，杜绝规则漂移。
  */
 
-/** 插件清单（manifest）：pack.mjs 静态求值 export const meta 得到；id 由本模块按 `dsh-fw.<裸名>` 生成。 */
+/** 插件清单（manifest）：静态求值 export const meta 得到；id 由本模块按 `dsh-fw.<裸名>` 生成。 */
 export interface PluginManifest {
   id: string;
   name: string;
@@ -17,15 +18,50 @@ export interface PluginManifest {
   descriptionEn?: string;
 }
 
-/** 源码是否含三种顶层 export 之一（即「未打包的 packages/*.js 形态」）。 */
+/** 源码是否含三种顶层 export 之一（即「未打包的插件源码形态」）。 */
 export function isSourceForm(code: string): boolean {
   return /^export\s+(const\s+meta\b|const\s+inject\b|function\s+apply\b)/m.test(code);
 }
 
 /**
+ * 静态求值 `export const inject = [...]` 字面量（loader 外壳需要其真值；缺省/非法回退 []）。
+ * 与 extractMeta 同族：括号配平静态扫描，不做 eval。
+ */
+export function extractInject(src: string): unknown[] {
+  const m = /export\s+const\s+inject\s*=\s*/.exec(src);
+  if (!m) return [];
+  let i = m.index + m[0].length;
+  if (src[i] !== "[") return [];
+  let depth = 0;
+  let end = -1;
+  let inStr: string | null = null;
+  for (; i < src.length; i++) {
+    const c = src[i];
+    if (inStr) {
+      if (c === "\\") { i++; continue; }
+      if (c === inStr) inStr = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") { inStr = c; continue; }
+    if (c === "[") depth++;
+    else if (c === "]") {
+      depth--;
+      if (depth === 0) { end = i + 1; break; }
+    }
+  }
+  if (end < 0) return [];
+  try {
+    const v = JSON.parse(src.slice(m.index + m[0].length, end).replace(/'/g, '"').replace(/,\s*([}\]])/g, "$1"));
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
  * 从源码文本里静态求值 `export const meta = {...}` 字面量。
  * 括号配平静态扫描（不做 eval）——meta 必须是纯 JSON 风格对象字面量，禁止表达式。
- * 逻辑与 pack.mjs 保持一致：字符串感知、支持转义、支持单双反引号。
+ * 逻辑与 pack-core.mjs 保持一致：字符串感知、支持转义、支持单双反引号。
  */
 export function extractMeta(src: string, name: string): Omit<PluginManifest, "id"> {
   const m = /export\s+const\s+meta\s*=\s*/.exec(src);
@@ -77,7 +113,7 @@ function validateMeta(meta: unknown, name: string): Omit<PluginManifest, "id"> {
 }
 
 /**
- * 把一段源码形态插件打成 __ModuleLoader__ bundle（与 pack.mjs 输出逐字节同构）。
+ * 把一段源码形态插件打成 __ModuleLoader__ bundle（与构建期产物逐字节同构）。
  * @throws Error 源码不符合约定（顶层 import / 多余 export / 缺 apply / meta 非法）
  */
 export function transformSourceToBundle(code: string, name: string): { packed: string; manifest: PluginManifest } {
@@ -91,13 +127,16 @@ export function transformSourceToBundle(code: string, name: string): { packed: s
     `window.__ModuleLoader__.manifest(${JSON.stringify(manifest)});`,
     `window.__ModuleLoader__.load({`,
     `\tid: ${JSON.stringify(manifest.id)},`,
+    // inject 声明必须在 load 顶层（cordis loader 读取）：静态求值源码里的字面量，
+    // 不能引用 factory 内被剥了 export 的局部名。
+    `\tinject: ${JSON.stringify(extractInject(code))},`,
     `\tfactory: (require) => {`,
     src
       .trimEnd()
       .split("\n")
       .map((l) => (l ? `\t\t${l}` : l))
       .join("\n"),
-    `\t\treturn { apply, inject, meta };`,
+    `\t\treturn { apply, meta };`,
     `\t}`,
     `});`,
     "",

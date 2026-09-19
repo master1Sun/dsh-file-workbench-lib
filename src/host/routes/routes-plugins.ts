@@ -11,7 +11,7 @@ import { isIP } from "node:net";
 import { resolve, sep } from "node:path";
 import type { ApiResponse } from "../../shared/types.js";
 import { getPluginData, setPluginData } from "../store/workbench-store.js";
-import { FsError, json, readBody, WEB_DIR, type RouteMatcher } from "./routes-util.js";
+import { FsError, json, readBody, PREFIX, WEB_DIR, type RouteMatcher } from "./routes-util.js";
 
 /** 单插件源码上限：2MB 足够任何手写 JS，且防止超大响应打爆内存。 */
 const MAX_PLUGIN_BYTES = 2 * 1024 * 1024;
@@ -75,11 +75,17 @@ export const pluginResource: RouteMatcher = async (req, res, seg, q, method) => 
   if (u.protocol !== "http:" && u.protocol !== "https:") {
     return (json(res, 400, { ok: false, error: "仅支持 http(s)" } satisfies ApiResponse<never>), true);
   }
-  try {
-    await assertPublicHost(u.hostname);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return (json(res, 400, { ok: false, error: msg } satisfies ApiResponse<never>), true);
+  // 同源（本 host 自己）豁免 SSRF 拦截：注册表候选的下载 url 就指向本机 /plugin-src?k=，
+  // 而 k 在 plugin-src 路由侧已有严格文件名白名单，无路径穿越面。跨源内网/环回照旧拒绝。
+  const selfHost = req.headers.host?.toLowerCase();
+  const isSelf = !!selfHost && u.host.toLowerCase() === selfHost;
+  if (!isSelf) {
+    try {
+      await assertPublicHost(u.hostname);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return (json(res, 400, { ok: false, error: msg } satisfies ApiResponse<never>), true);
+    }
   }
 
   const controller = new AbortController();
@@ -107,7 +113,7 @@ export const pluginResource: RouteMatcher = async (req, res, seg, q, method) => 
   }
 };
 
-/** 内置插件源码目录：scripts/build.mjs 把 plugins/lib/<name>.js + .pack-meta.json 拷入 lib/web/plugin-src/。 */
+/** 内置插件源码目录：scripts/pack-plugins.mjs 构建期把 plugins/*.js 打包成 bundle 写入 lib/web/plugin-src/。 */
 const PLUGIN_SRC_DIR = resolve(WEB_DIR, "plugin-src");
 
 /**
@@ -133,28 +139,113 @@ export const pluginIndexResource: RouteMatcher = async (req, res, seg, q, method
   return true;
 };
 
+/** 上游插件仓库（plugins/ = 全部 .js 插件，源码形态单文件，内置与候选同源同目录）。 */
+const GH_API_DIR = "https://api.github.com/repos/master1Sun/dsh-file-workbench-lib/contents/plugins";
+/** GitHub API 结果缓存时长：够新又不吃 rate limit（未认证 60 次/时/IP）。 */
+const REGISTRY_TTL_MS = 5 * 60_000;
+
+type RegistryItem = {
+  name: string;
+  url: string;
+  title?: string;
+  titleEn?: string;
+  description?: string;
+  descriptionEn?: string;
+};
+
 /**
- * 资源路由：GET /plugin-registry → 可下载插件注册表（JSON 数组，即 plugin-src/registry.json）。
+ * 从 JS 源码抽 meta 名称与描述（不执行任意代码）。逐字段在「带引号 JSON 风格」与
+ * 「裸键单引号」（如 `"name": '项目统计'`）两种写法上各试一遍；打包 bundle 的
+ * manifest({...}) 与源码形态的 export const meta = {...} 均适用。
+ */
+function extractMetaInfo(code: string): { title?: string; titleEn?: string; description?: string; descriptionEn?: string } {
+  const head = code.slice(0, 8192);
+  const pick = (key: string): string | undefined => {
+    for (const re of [
+      new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`),
+      new RegExp(`["']?${key}["']?\\s*:\\s*'((?:[^'\\\\]|\\\\.)*)'`),
+    ]) {
+      const m = head.match(re);
+      if (m) return m[1].replace(/\\(["'])/g, "$1");
+    }
+    return undefined;
+  };
+  return { title: pick("name"), titleEn: pick("nameEn"), description: pick("description"), descriptionEn: pick("descriptionEn") };
+}
+
+let registryCache: { at: number; items: RegistryItem[] } | null = null;
+
+/**
+ * 在线注册表：列 GitHub 仓库 plugins/ 下的 *.js 作为「可下载未安装」候选。
+ * 清单走 api.github.com（本机实测可达）；url 指向**同源** /plugin-src?k= —— plugins/
+ * 全部插件由构建期打包随包发布，raw.githubusercontent 在本网络不可达，故不经 URL 直连下载，
+ * 离线也能装。名称/描述直接读随包发布的本地 bundle（plugin-src/<name>.js）——不依赖 host
+ * cwd，也不走 Node 下必然抛错的相对 URL。整体失败由调用方回退本地 registry.json。
+ */
+async function fetchRemoteRegistry(): Promise<RegistryItem[]> {
+  const res = await fetch(GH_API_DIR, {
+    headers: { accept: "application/vnd.github+json", "user-agent": "dsh-file-workbench-plugin-registry/1.0" },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) throw new Error(`GitHub API HTTP ${res.status}`);
+  const entries = (await res.json()) as Array<{ name?: string; type?: string }>;
+  // 只收纯插件文件：`<name>.js`（name 无点、非 _ 前缀），排除工具脚本与内部资源。
+  const files = entries
+    .filter((e) => e.type === "file" && /^[^._][^.]*\.js$/i.test(e.name ?? ""))
+    .slice(0, 30);
+  return Promise.all(
+    files.map(async (e): Promise<RegistryItem> => {
+      const name = e.name!.replace(/\.js$/i, "");
+      // 同源相对地址（前端 importFromUrl 会按 location 解析成绝对 URL）。
+      const url = `${PREFIX}/plugin-src?k=${encodeURIComponent(name)}`;
+      let info: { title?: string; titleEn?: string; description?: string; descriptionEn?: string } = {};
+      // 候选由 build.mjs 打包进随包发布的 plugin-src/，直接读本地 bundle 抽 meta——
+      // host 进程 cwd 不可靠（dev/发布安装不同），同源相对 URL 在 Node fetch 下又必然抛错。
+      try {
+        const filePath = resolve(PLUGIN_SRC_DIR, `${name}.js`);
+        if (!filePath.startsWith(PLUGIN_SRC_DIR + sep) || !existsSync(filePath)) throw new Error("not shipped");
+        info = extractMetaInfo(readFileSync(filePath, "utf8"));
+      } catch {
+        /* 上游新增但尚未随包发布：无源可抽（raw.githubusercontent 本网络不可达），回退文件名展示 */
+      }
+      return { name, url, ...info };
+    }),
+  );
+}
+
+/**
+ * 资源路由：GET /plugin-registry → 可下载插件注册表（JSON 数组）。
  *
- * 「插件管理」的「未安装」分组数据源：条目形状 { name, url, description, descriptionEn }，
- * url 为同源可下载地址（通常指向本包 /plugin-src?k=<name>），前端点「下载」时经
- * importFromUrl → /fetch-plugin 走完整校验导入。文件由 scripts/build.mjs 从
- * plugins/registry.json 拷入；缺失时返回空数组（UI 只是不显示未安装项）。
+ * 「插件管理」统一列表里「未安装」条目的数据源：优先在线枚举 GitHub 仓库
+ * plugins/（见 fetchRemoteRegistry，5 分钟缓存），离线/失败回退随包发布的
+ * 包根 registry.json（同源 /plugin-src?k= 地址，scripts/pack-plugins.mjs 生成）。
+ * 条目形状 { name, url, description, descriptionEn }，前端点「下载」时经
+ * importFromUrl → /fetch-plugin 走完整校验导入（源码形态自动打包）。
  */
 export const pluginRegistryResource: RouteMatcher = async (req, res, seg, q, method) => {
   void req;
   void q;
   if (!(seg[0] === "plugin-registry" && seg.length === 1)) return false;
   if (method !== "GET") return false;
-  try {
-    const raw = readFileSync(resolve(PLUGIN_SRC_DIR, "registry.json"), "utf8");
-    res.on("error", () => {});
-    res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache" });
-    res.end(raw);
-  } catch {
-    return (json(res, 200, { ok: true, data: [] } satisfies ApiResponse<never[]>), true);
+  let items: RegistryItem[] = [];
+  if (registryCache && Date.now() - registryCache.at < REGISTRY_TTL_MS) {
+    items = registryCache.items;
+  } else {
+    try {
+      const remote = await fetchRemoteRegistry();
+      // 成功才缓存（含空目录）；失败不缓存，下次再试。
+      registryCache = { at: Date.now(), items: remote };
+      items = remote;
+    } catch {
+      try {
+        // 随包发布的离线回退清单：package 根 registry.json（WEB_DIR=lib/web 的上上级）。
+        items = JSON.parse(readFileSync(resolve(WEB_DIR, "..", "..", "registry.json"), "utf8"));
+      } catch {
+        items = [];
+      }
+    }
   }
-  return true;
+  return (json(res, 200, { ok: true, data: items } satisfies ApiResponse<RegistryItem[]>), true);
 };
 
 /**

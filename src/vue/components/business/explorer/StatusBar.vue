@@ -116,13 +116,15 @@ const hasExtEntries = computed<boolean>(() => listWorkbenchStatusBarItems().leng
 const extMenuItems = computed<MenuItem[]>(() => {
   void wb.root; // 建立依赖：工作区切换时重算 when(ctx)
   const ctx = extCtx();
-  return listWorkbenchStatusBarItems().map((item) => {
-    const running = isCommandRunning(item.commandId);
+  return listWorkbenchStatusBarItems().map((reg) => {
+    const running = isCommandRunning(reg.commandId);
     return {
-      label: item.text,
-      icon: item.icon || viewIconForCommand(listWorkbenchActivityViews(), item.commandId),
-      title: running ? t("vsExtRunning") : item.tooltip,
-      disabled: !running && !!item.when && !item.when(ctx),
+      label: reg.text,
+      icon: reg.icon || viewIconForCommand(listWorkbenchActivityViews(), reg.commandId),
+      title: running ? t("vsExtRunning") : reg.tooltip,
+      // 实时 tooltip：textFn（插件的节流进度读取器）优先，避免进度刷新换数组引用导致菜单抖动。
+      hintFn: () => (running ? t("vsExtRunning") : reg.textFn?.() ?? reg.tooltip),
+      disabled: !running && !!reg.when && !reg.when(ctx),
       running,
       onClick: () => {
         if (running) {
@@ -130,10 +132,10 @@ const extMenuItems = computed<MenuItem[]>(() => {
           return;
         }
         try {
-          const r = executeCommand(item.commandId, ctx);
+          const r = executeCommand(reg.commandId, ctx);
           // 命令返回 Promise（异步长任务）→ 挂上失败兜底提示；成功通知归插件自己发。
           if (r instanceof Promise) {
-            r.catch((e) => toast("error", `${item.text}: ${(e as Error)?.message ?? String(e)}`));
+            r.catch((e) => toast("error", `${reg.text}: ${(e as Error)?.message ?? String(e)}`));
           }
         } catch (e) {
           toast("error", (e as Error).message);

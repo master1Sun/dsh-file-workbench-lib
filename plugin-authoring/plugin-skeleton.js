@@ -5,7 +5,7 @@
  *  - <要点 1>；
  *  - <要点 2>。
  *
- * 交付：保存到 plugins/importPackages/，在「插件管理 → 导入本地文件」拖入即可。
+ * 交付：保存到 plugins/（本仓库）或用户工作区，经「插件管理 → 导入本地文件」或 skill 脚本直装即可。
  * 约定：只允许 export const meta / export const inject / export function apply 三种顶层导出；
  *       不得有顶层 import；loader id = dsh-fw.<文件名>，勿手写。
  */

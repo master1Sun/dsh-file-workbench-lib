@@ -15,7 +15,7 @@
 1. **读作者文档（全文契约）**：本包若带 `docs/activity-bar-plugin.md` 直接读它；否则经运行中的
    宿主拉取——`GET http://<dsh 地址>/api/dsh-file-workbench/plugin-doc`（同源的插件管理页即可确认
    端口）。含 window API 全契约 + 宿主 HTTP API 清单 + 主题 token。
-2. **照抄参考实现**：本包 `plugins/packages/*.js`（若有仓库）或运行时逐个拉取——
+2. **照抄参考实现**：本仓库 `plugins/*.js`（若有）或运行时逐个拉取——
    `GET /api/dsh-file-workbench/plugin-src?k=<name>`（bookmarks / todo-tree / find-references /
    linter / gitlens-lite / outline / regex-highlight / json2interface / md-preview / hex-viewer /
    local-history，均为打包好的 bundle，可导入即活）；骨架模板用 `?k=_skeleton`。
