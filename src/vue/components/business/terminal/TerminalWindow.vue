@@ -48,11 +48,6 @@
 
     <!-- xterm 输出区：WebTUI 双线边框（box-="double"），每窗口一个常驻实例 -->
     <div ref="outEl" class="fw-term-out" box-="double" @click="focusTerm"></div>
-    <!-- 官方终端启动失败（如宿主会话失效）：错误横幅 + 重试，替代空白窗口 -->
-    <div v-if="tab.otError" class="fw-term-error">
-      <span class="fw-term-error-msg">{{ t("termOfficialFailed", { msg: tab.otError }) }}</span>
-      <button class="fw-retry" @click="retryOfficial">{{ t("termOfficialRetry") }}</button>
-    </div>
 
     <div class="fw-term-footer">
       <button class="fw-term-btn" @click="clear">{{ t('terminalClear') }}</button>
@@ -530,12 +525,6 @@ function reconnect(): void {
   void nextTick(fitTerm);
 }
 
-/** 官方终端启动失败后的「重试」：走 restartShell 重新建流（会清掉错误横幅）。 */
-function retryOfficial(): void {
-  void restartShell(props.tab, wb.key);
-  void nextTick(fitTerm);
-}
-
 /** 权限徽标提示（终端无法在插件内对单终端提权，依赖宿主持有管理员令牌启动）。 */
 function showAdminHint(): void {
   if (termElevated.value) toast("ok", t("terminalAdminOn"));
@@ -605,7 +594,6 @@ onBeforeUnmount(() => {
 <style scoped>
 /* 独立终端浮窗：WebTUI 风，配色跟随 DSH 项目主题（--dsh-*，随全局 data-theme 日夜翻转）。 */
 .fw-term-window {
-  position: relative;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
@@ -746,29 +734,6 @@ onBeforeUnmount(() => {
   cursor: text;
 }
 .fw-term-xterm { width: 100%; height: 100%; }
-
-/* 官方终端失败横幅：盖在输出区上的半透明浮层，配色走宿主 token（带兜底） */
-.fw-term-error {
-  position: absolute;
-  inset: 40px 6px 44px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  padding: 16px;
-  text-align: center;
-  background: color-mix(in srgb, var(--base, #0d1117) 82%, transparent);
-  backdrop-filter: blur(2px);
-  z-index: 5;
-}
-.fw-term-error-msg {
-  color: var(--term-danger, #f85149);
-  font-size: calc(12.5px * var(--dsh-fs-scale, 1));
-  line-height: 1.6;
-  word-break: break-all;
-  user-select: text;
-}
 
 /* 底部按钮栏：不换行 + 可收缩，窄窗下由提示文字先省略，避免溢出 */
 .fw-term-footer {
