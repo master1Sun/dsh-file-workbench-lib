@@ -549,12 +549,12 @@ function renderList(root: HTMLElement, ctx: ActivityContext): void {
   const seenIds = new Set<string>();
   const all = listUserPlugins().filter((p) => !seenIds.has(p.id) && (seenIds.add(p.id), true));
   const installed = sortPlugins(all.filter((p) => matchesQuery(p, q)));
-  const available = registryEntries
-    .filter((e) => !isInstalled(all, e))
-    .filter((e) => !q || `${e.name} ${e.title ?? ""} ${e.titleEn ?? ""} ${e.description ?? ""} ${e.descriptionEn ?? ""}`.toLowerCase().includes(q))
-    .map(entryToPlugin);
-  // Tab 计数恒按「当前搜索词命中的条数」——切页后搜索在哪页就在哪页计数。
-  setTabCounts(root, installed.length, available.length);
+  // 「浏览」页不再隐藏已下载项——注册表条目全量展示，已装的打「已下载」标签；
+  // Tab 计数仍按未下载数（搜索命中口径）。
+  const availRaw = registryEntries.filter((e) => !q || `${e.name} ${e.title ?? ""} ${e.titleEn ?? ""} ${e.description ?? ""} ${e.descriptionEn ?? ""}`.toLowerCase().includes(q));
+  const availFlags = availRaw.map((e) => isInstalled(all, e));
+  const available = availRaw.map((e, i) => Object.assign(entryToPlugin(e), { _installed: availFlags[i] }) as unknown as UserPlugin);
+  setTabCounts(root, installed.length, availFlags.filter((x) => !x).length);
 
   const list = root.querySelector<HTMLElement>(`.${NS}-list`);
   if (!list) return;
@@ -684,6 +684,7 @@ function openInstalledViewer(p: UserPlugin, root: HTMLElement, ctx: ActivityCont
 function buildRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContext): HTMLElement {
   const row = document.createElement("div");
   row.className = `${NS}-row${p.enabled ? "" : " is-disabled"}`;
+  row.dataset.pid = p.id; // 「管理」跳转定位用（见 buildAvailableRow）
 
   const av = document.createElement("div");
   av.className = `${NS}-avatar ${p.source}`;
@@ -844,8 +845,11 @@ function buildSkeletonRow(): HTMLElement {
 function buildAvailableRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContext): HTMLElement {
   const name_ = displayName(p);
   const url = p.origin ?? "";
+  // 已下载到本地（含本地文件导入的同名插件）：打「已下载」标签，行仍留在浏览页。
+  const already = !!(p as unknown as { _installed?: boolean })._installed;
   const row = document.createElement("div");
-  row.className = `${NS}-row is-uninstalled`;
+  // 已下载项不再弱化。
+  row.className = `${NS}-row${already ? "" : " is-uninstalled"}`;
 
   const av = document.createElement("div");
   av.className = `${NS}-avatar url`;
@@ -864,7 +868,14 @@ function buildAvailableRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContex
   const vendor = document.createElement("span");
   vendor.className = `${NS}-vendor`;
   vendor.textContent = t("pmSrcRegistry");
-  nameLine.append(name, vendor);
+  const parts: HTMLElement[] = [name, vendor];
+  if (already) {
+    const tag = document.createElement("span");
+    tag.className = `${NS}-badge`;
+    tag.textContent = t("pmAlreadyInstalled");
+    parts.push(tag);
+  }
+  nameLine.append(...parts);
   main.append(nameLine);
   const descText = (!isZh() && p.descriptionEn) || p.description || "";
   if (descText) {
@@ -912,8 +923,23 @@ function buildAvailableRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContex
   });
   const btn = document.createElement("button");
   btn.type = "button";
-  btn.className = `${NS}-btn primary`;
-  btn.textContent = t("pmDownload");
+  btn.className = `${NS}-btn${already ? "" : " primary"}`;
+  btn.textContent = already ? t("pmRedownload") : t("pmDownload");
+  let manage: HTMLButtonElement | null = null;
+  if (already) {
+    // 「管理」：跳到已安装页并定位该行（伪行 id __reg.<name> ↔ url./file. 记录主键）。
+    manage = document.createElement("button");
+    manage.type = "button";
+    manage.className = `${NS}-btn`;
+    manage.textContent = t("pmManagePlugin");
+    manage.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      activeTab = "installed";
+      renderList(root, ctx);
+      const bare = p.id.replace(/^__reg\./, ""); // 引号包裹的属性选择器，无需转义
+      root.querySelector<HTMLElement>(`.${NS}-list .${NS}-row[data-pid$="${bare}"]`)?.scrollIntoView({ block: "nearest" });
+    });
+  }
   btn.addEventListener("click", (ev) => {
     ev.stopPropagation();
     if (downloadingUrls.has(url)) return;
@@ -933,9 +959,6 @@ function buildAvailableRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContex
             const rec = listUserPlugins().find((pp) => pp.id === r.id);
             if (rec) markDownloadedNeedsReload(rec, before);
           }
-          // 下载即启用完成后强刷注册表：host 侧枚举可能滞后（上游新增项都靠它），
-          // 到位后 renderList 重算 isInstalled，把仍显示「可下载」的多余行抹掉。
-          await fetchRegistry(true).catch(() => {});
         } else {
           ctx.toast("error", t("pmDownloadFailed", { name: name_, msg: r.error ?? "" }));
         }
@@ -950,7 +973,9 @@ function buildAvailableRow(p: UserPlugin, root: HTMLElement, ctx: ActivityContex
       }
     })();
   });
-  acts.append(preview, btn);
+  acts.append(preview);
+  if (manage) acts.append(manage);
+  acts.append(btn);
   row.append(acts);
   return row;
 }
