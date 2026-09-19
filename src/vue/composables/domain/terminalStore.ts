@@ -67,6 +67,11 @@ export interface TermTab {
    * exec 会话（/exec-open + 复用流）。SSH 标签永远是自建后端（官方没有远端主机概念）。
    */
   backend?: "official";
+  /**
+   * 官方终端最近一次启动失败的原因（phase=failed 时由桥写入，成功连接即清空）。
+   * 供 TerminalWindow 显示「重试」横幅——只把错误打进回滚缓冲的话，用户根本不知道怎么办。
+   */
+  otError?: string;
   /** 累积的原始输出（含 ANSI 转义），供 xterm 重放；超过上限从头截断。 */
   output: string;
   /** SSE 输出流是否在线（断开时自动重连）。 */
@@ -350,6 +355,7 @@ async function reopenShell(tab: TermTab): Promise<void> {
   if (tab.backend === "official") {
     // 官方终端重开 = 关掉已退出的旧进程，起新官方终端（同 key 先 close 再 create）。
     officialTermApi()?.close(tab.id);
+    tab.otError = undefined;
     tab.connected = true;
     void attachOfficial(tab);
     return;
@@ -477,9 +483,11 @@ function onOtStatus(d: OtStatusDetail): void {
   }
   if (d.phase === "connected" && !tab.connected) {
     tab.connected = true;
+    tab.otError = undefined;
     // initCmd（「在终端打开」的自动命令）等 shell 就绪后再敲，与 sendInitCmd 同一节拍。
     sendInitCmd(tab);
   } else if (d.phase === "failed" && d.error) {
+    tab.otError = d.error;
     const line = `\r\n\x1b[33m[term] ${d.error}\x1b[0m\r\n`;
     tab.output = capOutput(tab.output + line);
     outputSinks.get(tab.id)?.(line);
@@ -789,6 +797,7 @@ export function resizeTerminal(session: string, cols: number, rows: number): voi
 export async function restartShell(tab: TermTab, key?: string): Promise<void> {
   const wasOfficial = tab.backend === "official";
   stopStream(tab);
+  tab.otError = undefined;
   tab.output = "";
   termPreviews.value = { ...termPreviews.value, [tab.id]: "" };
   await killTabBackend(tab);
