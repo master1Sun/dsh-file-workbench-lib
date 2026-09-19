@@ -976,11 +976,17 @@ function ensureBuiltinSeeds(snapshot: UserPlugin[], seeds: BuiltinSeed[]): UserP
   for (const p of snapshot) {
     if ((p.source === "file" || p.source === "url") && seedIds.has(p.id)) p.id = `${p.source}.${p.id}`;
   }
-  const byId = new Map(
-    snapshot
-      .filter((p) => !(isLegacyBuiltinId(p.id) && !seedIds.has(p.id)))
-      .map((p) => [p.id, p]),
-  );
+  const kept = snapshot.filter((p) => !(isLegacyBuiltinId(p.id) && !seedIds.has(p.id)));
+  // 迁移已为同插件建过 url./file. 记录时，裸名 builtin 行是重复残留（旧版页面覆写快照可复活它们）：
+  // 直接丢弃自愈——否则每次启动都渲染两行「已安装」。
+  const dropBare = new Set(kept.filter((p) => p.source === "builtin").map((p) => p.id));
+  for (const p of kept) {
+    if (p.source === "url" || p.source === "file") {
+      const bare = p.id.replace(/^(url|file)\./, "");
+      if (dropBare.has(bare)) dropBare.delete(bare);
+    }
+  }
+  const byId = new Map(kept.filter((p) => !dropBare.has(p.id)).map((p) => [p.id, p]));
   for (const seed of seeds) {
     const existing = byId.get(seed.id);
     if (!existing) {
@@ -1053,6 +1059,8 @@ export async function bootstrapUserPlugins(): Promise<void> {
   // 使 importFromUrl 的「下载 == 随包版本」同文比对成立（种子时代克隆记录重下时归位）。
   const seeds = await fetchBuiltinSeeds();
   plugins.value = ensureBuiltinSeeds(snapshot, seeds);
+  // 种子对账丢过残留 builtin 行 → 立即把归一后的快照写回盘，防旧版页面下次覆写又复活重复。
+  if (plugins.value.length !== snapshot.length) void persistNow();
   // 串行启用，避免并发 eval 互相污染 diff 归属。仅恢复曾成功激活过的插件；
   // 从未生效的（如版本不兼容）强制置为禁用并清错，不再每次加载重复失败弹 toast。
   for (const p of [...plugins.value]) {
