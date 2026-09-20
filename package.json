@@ -1,6 +1,6 @@
 {
   "name": "@sunjuntao/dsh-file-workbench",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "DSH web plugin: a Vue 3 + Vite Win11-style file explorer (navigation tree / file list / search / CRUD) docked in the DSH right sidebar; file viewing is delegated to the DSH native viewer",
   "type": "module",
   "main": "./lib/index.js",
