@@ -29,7 +29,18 @@ declare module "@deepseek-ai/dsh-client-ui-primitives" {
     children?: ReactNode;
   }) => ReactNode;
 
+  /**
+   * 下拉箭头图标。
+   *
+   * ⛔ **命名随宿主版本漂移**：0.1.6 用数字尺寸后缀（`IconChevronDownOutline14`），
+   * 0.1.7 改为字号档位（`IconChevronDownOutlineRegular` / `…Medium`）。直接具名导入
+   * 旧名字会在新版拿到 `undefined`，`<undefined/>` 触发 React #130，把整个 guide
+   * 卡片渲染炸掉（症状：右侧栏「开始」页没有本插件入口）。运行时按名解析，见
+   * `GuideCardBridge.tsx` 的 `resolveChevronDown()`。
+   */
   export const IconChevronDownOutline14: (props: { size?: number; className?: string }) => ReactNode;
+  export const IconChevronDownOutlineRegular: (props: { size?: number; className?: string }) => ReactNode;
+  export const IconChevronDownOutlineMedium: (props: { size?: number; className?: string }) => ReactNode;
 
   /** 分组间隔线 / 标题行（与 MenuItem 一起构成菜单条目）。 */
   export type MenuEntry =

@@ -14,8 +14,6 @@ import { installContributionProxy } from "./contributionProxy.js";
 import { installOfficialTerminal, type OfficialTermApi } from "./OfficialTerminalBridge.js";
 import { setSidebarRight } from "./api.js";
 
-console.info('import(window.__dshTestProbeUrl).then(m => m.installTestButtons())')
-
 /** 前端资源基址（host REST + 静态资源前缀）。 */
 export const PREFIX = "/api/dsh-file-workbench";
 
@@ -31,7 +29,6 @@ export const PREFIX = "/api/dsh-file-workbench";
 export const inject = [
   "locale",
   "sessions",
-  "workspaces",
   "slots",
   "sidebarRightTabs",
   "sidebarRight",
@@ -461,7 +458,15 @@ export function apply(ctx: ClientCtx): void {
     else (g.pendingOpens = g.pendingOpens ?? []).push({ kind, path });
   };
 
-  const ws = ctx.workspaces;
+  // workspaces 是 host-only 服务（0.1.7 客户端运行时不再提供）。它不在 inject 里，
+  // 直接读 ctx.workspaces 会被 Cordis proxy 抛 `cannot get property without inject`；
+  // 这里用 try/catch 兜底，缺失时回落到宿主原生 openPath（不接管文件打开改道）。
+  let ws;
+  try {
+    ws = ctx.workspaces;
+  } catch {
+    ws = undefined;
+  }
   if (ws && typeof ws.openPath === "function") {
     const original = ws.openPath.bind(ws);
     ws.openPath = (path: string): Promise<void> => {
@@ -562,8 +567,8 @@ export function apply(ctx: ClientCtx): void {
     //    guide 只挂工作台一个入口（id 与 ⑥ 的卡片注册 key 对应）；编辑器入口合并进
     //    卡片的下拉菜单，不再单独出胶囊。
     ctx.effect(
-      () =>
-        ctx.sidebarRightTabs?.register({
+      () => {
+        const off = ctx.sidebarRightTabs?.register({
           id: ID,
           kind: KIND,
           title: () => tr("tabFileWorkbench"),
@@ -576,7 +581,9 @@ export function apply(ctx: ClientCtx): void {
               icon: WorkbenchGlyph,
             },
           ],
-        }),
+        });
+        return off;
+      },
       "dsh-file-workbench: sidebar tab type",
     );
 
@@ -585,12 +592,13 @@ export function apply(ctx: ClientCtx): void {
       () => {
         const slots = ctx.slots;
         if (!slots) return;
-        return slots.inject("sidebar.right.pane.tab", () =>
+        const off = slots.inject("sidebar.right.pane.tab", () =>
           slots.register(
             { name: "sidebar.right.pane.tab", key: ID },
             RightPaneBridge as (props: unknown) => ReactNode,
           ),
         );
+        return off;
       },
       "dsh-file-workbench: sidebar tab body",
     );

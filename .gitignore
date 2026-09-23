@@ -46,5 +46,7 @@ lib/web/assets/ConfirmDialog-*.js
 # **新**入口文件（! 白名单只救旧名），换入口后必须把新 hash 名加进来；vendor-* 若重新拆出同理。
 !lib/web/assets/index-D0CqeY8q.js
 !lib/web/assets/style-DpdXIKsW.css
+!lib/web/assets/index-hd_o6Nxg.js
+!lib/web/assets/style-XRKgxIgu.css
 # AGENTS.md 的包内副本：build 每次从仓库根拷贝注入 lib/，无需入库。
 /lib/AGENTS.md
