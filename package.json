@@ -1,6 +1,6 @@
 {
   "name": "@sunjuntao/dsh-file-workbench",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "DSH web plugin: a Vue 3 + Vite Win11-style file explorer (navigation tree / file list / search / CRUD) docked in the DSH right sidebar; file viewing is delegated to the DSH native viewer",
   "type": "module",
   "main": "./lib/index.js",
@@ -63,7 +63,6 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1-rc.1",
-    "@deepseek-ai/dsh-host-webserver": ">=0.1.6-alpha.1 <0.2.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "vue": "^3.5.0"
@@ -71,9 +70,6 @@
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
       "optional": false
-    },
-    "@deepseek-ai/dsh-host-webserver": {
-      "optional": true
     },
     "react": {
       "optional": true
