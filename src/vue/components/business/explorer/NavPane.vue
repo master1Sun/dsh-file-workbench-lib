@@ -594,9 +594,9 @@ function onThisPcCtx(e: MouseEvent): void {
   ]);
 }
 
-/** 磁盘右键：打开 / 收藏 / 复制完整路径。 */
+/** 磁盘右键：打开 / 收藏 / 复制完整路径（此电脑下的盘符不提供「在文件编辑器中打开」）。 */
 function onDriveCtx(e: MouseEvent, d: DriveInfo): void {
-  onPathCtx(e, d.path);
+  onPathCtx(e, d.path, { openEditor: false });
 }
 
 /** 回收站右键：打开 / 刷新 / 清空（清空走共享的确认+后台任务流程）。 */

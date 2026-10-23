@@ -305,8 +305,14 @@ export function apply(ctx: ClientCtx): void {
   };
 
   // 读取当前（选中的）会话 id。
+  // dsh 0.2.x 把 ctx.sessions 从 `{ list:{ getSnapshot().current/byId } }` 重构为 SessionStore，
+  // 旧的 `ctx.sessions.list` 不再存在；当前会话改从右侧栏的「在屏会话」取
+  // （SidebarRightController.mounted：ObservableSnapshot<SessionId | undefined>）。
   const getSessionId = (): string | null => {
     try {
+      const sb = ctx.sidebarRight as unknown as { mounted?: { getSnapshot(): unknown } } | undefined;
+      const fromSidebar = sb?.mounted?.getSnapshot?.();
+      if (typeof fromSidebar === "string" && fromSidebar) return fromSidebar;
       return ctx.sessions?.list?.getSnapshot?.()?.current ?? null;
     } catch {
       return null;

@@ -111,7 +111,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watchEffect } from "vue";
 import { useI18n } from "../../../composables/core/i18n";
-import { openProjectInEditor } from "../../../composables/core/sidebarRight";
 import { explorer, browseTo, refreshListing } from "../../../stores/explorer";
 import {
   toggleFavorite,
@@ -284,7 +283,6 @@ function onDriveCtx(e: MouseEvent, d: DriveInfo): void {
   const fav = isFavorite(d.path);
   openMenu(e, [
     { label: t("menuOpen"), icon: "arrowRight", onClick: () => open(d) },
-    { label: t("menuOpenInEditor"), icon: "code", onClick: () => openProjectInEditor(d.path) },
     { separator: true },
     {
       label: fav ? t("favoriteRemove") : t("favoriteAdd"),
